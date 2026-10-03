@@ -810,14 +810,30 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     }
   }
 
+  /**
+   * Discord messages being ingested right now. The permanent record below is
+   * only written once a message is stored, after its downloads, so a live event
+   * and a history import of the same message could both get past it meanwhile.
+   */
+  const ingesting = new Set<string>();
+
   async function ingest(message: DiscordIncomingMessage, silent = false): Promise<boolean> {
+    if (ingesting.has(message.id)) return false;
+    ingesting.add(message.id);
+    try {
+      return await ingestOnce(message, silent);
+    } finally {
+      ingesting.delete(message.id);
+    }
+  }
+
+  async function ingestOnce(message: DiscordIncomingMessage, silent: boolean): Promise<boolean> {
     const active = transport;
     // Ignore bots, including our own mirrored webhook messages.
     if (!active || message.fromBot) return false;
-    // Already accounted for: a live event and a history import can race here,
-    // and a backfill may meet a message whose Harmony copy was deleted or
-    // pruned. The permanent record answers that even when the mapping is gone,
-    // so removed content is not brought back.
+    // Already accounted for: a backfill may meet a message whose Harmony copy was
+    // deleted or pruned. The permanent record answers that even when the mapping
+    // is gone, so removed content is not brought back.
     if (hasSeenBridgeMessage(deps.sqlite, message.id)) return false;
 
     const channel = findChannelByDiscordId(deps.sqlite, message.channelId);

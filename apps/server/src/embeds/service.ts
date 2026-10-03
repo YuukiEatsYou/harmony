@@ -177,36 +177,58 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     broadcast(messageId);
   }
 
+  /**
+   * The resolution running for each message, so the next one waits its turn.
+   *
+   * A message can ask more than once in quick succession: Discord sends an
+   * update for a bridged message each time it finishes unfurling the link, and
+   * for a gif that is often while we are still downloading it. Run side by side,
+   * each request found no picture yet, shared the one download and then stored
+   * its own copy, so one gif arrived two or three times. One after another, a
+   * later request sees what the earlier one kept and has nothing left to do.
+   */
+  const queues = new Map<string, Promise<void>>();
+
+  async function resolveNow(messageId: string, content: string): Promise<void> {
+    if (!deps.settings.get().embedsEnabled) return;
+
+    const url = listEmbeddableUrls(content)[0];
+    const linked = listLinkedAttachments(deps.sqlite, messageId);
+
+    // The message no longer points anywhere, so anything it brought in has to
+    // go with it.
+    if (!url) {
+      if (linked.length > 0) await applyOutcome(messageId, { kind: 'embed', embed: null });
+      return;
+    }
+
+    // The same link as last time: the picture is already here, and an edit
+    // elsewhere in the text must not fetch it a second time.
+    if (linked.some((attachment) => attachment.source_url === url)) return;
+
+    // Nor must a second message. A community posts the same handful of gifs
+    // over and over, and this instance is very likely already holding it.
+    const reusable = deps.attachments.reusableForUrl(url);
+    if (reusable) {
+      await applyOutcome(messageId, { kind: 'copy', url, from: reusable });
+      return;
+    }
+
+    const userAgent = deps.settings.get().previewUserAgent ?? USER_AGENT;
+    await applyOutcome(messageId, await resolveOutcome(url, userAgent));
+  }
+
   return {
     resolve(messageId, content) {
-      if (!deps.settings.get().embedsEnabled) return;
-
-      const url = listEmbeddableUrls(content)[0];
-      const linked = listLinkedAttachments(deps.sqlite, messageId);
-
-      // The message no longer points anywhere, so anything it brought in has to
-      // go with it.
-      if (!url) {
-        if (linked.length > 0) void applyOutcome(messageId, { kind: 'embed', embed: null });
-        return;
-      }
-
-      // The same link as last time: the picture is already here, and an edit
-      // elsewhere in the text must not fetch it a second time.
-      if (linked.some((attachment) => attachment.source_url === url)) return;
-
-      // Nor must a second message. A community posts the same handful of gifs
-      // over and over, and this instance is very likely already holding it.
-      const reusable = deps.attachments.reusableForUrl(url);
-      if (reusable) {
-        void applyOutcome(messageId, { kind: 'copy', url, from: reusable });
-        return;
-      }
-
-      const userAgent = deps.settings.get().previewUserAgent ?? USER_AGENT;
-      void resolveOutcome(url, userAgent)
-        .then((outcome) => applyOutcome(messageId, outcome))
+      const run = (queues.get(messageId) ?? Promise.resolve())
+        .then(() => resolveNow(messageId, content))
         .catch((error: unknown) => log('link preview failed', { error: String(error) }));
+      queues.set(messageId, run);
+      void run.finally(() => {
+        // Only the last in line clears the slot; an earlier one finishing must
+        // not let a newcomer skip past a resolution that is still queued.
+        if (queues.get(messageId) === run) queues.delete(messageId);
+      });
     },
   };
 }

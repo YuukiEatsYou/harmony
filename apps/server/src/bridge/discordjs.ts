@@ -123,7 +123,11 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
     for (const handler of createdHandlers) handler(incoming);
   });
 
-  client.on(Events.MessageUpdate, (_previous, next) => {
+  client.on(Events.MessageUpdate, (previous, next) => {
+    // Discord also sends an update when it finishes unfurling a link, often more
+    // than once for a gif. The text is unchanged, so it is not an edit, and
+    // passing it on would mark the message edited and resolve its link again.
+    if (!previous.partial && !next.partial && previous.content === next.content) return;
     void (async () => {
       try {
         const message = (next.partial ? await next.fetch() : next) as DiscordMessage;

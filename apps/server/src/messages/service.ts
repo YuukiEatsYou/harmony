@@ -87,7 +87,10 @@ export interface MessageService {
     options?: { createdAt?: string; silent?: boolean; stickerIds?: string[] },
   ): Message;
   edit(auth: AuthContext, messageId: string, content: string): Message;
-  /** Applies a bridged edit, without notifying the outbound listeners. */
+  /**
+   * Applies a bridged edit, without notifying the outbound listeners. Null when
+   * the message is gone or the text is unchanged.
+   */
   editBridged(messageId: string, content: string): Message | null;
   /** Renders one message for a broadcast, or null when it is gone or deleted. */
   byId(messageId: string): Message | null;
@@ -542,6 +545,8 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     editBridged(messageId, content) {
       const row = findMessage(sqlite, messageId);
       if (!row || row.deleted_at) return null;
+      // Discord reports link unfurls as updates; the same text is not an edit.
+      if (row.content === content) return null;
 
       updateMessageContent(sqlite, messageId, content, new Date().toISOString());
       const message = render(requireMessage(messageId), row.author_id ?? '');

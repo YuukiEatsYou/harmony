@@ -14,6 +14,8 @@ import { insertChannel, listChannels } from '../src/db/channels.ts';
 import { listCategories } from '../src/db/categories.ts';
 import { findUserById, findUserByDiscordId, insertUser } from '../src/db/users.ts';
 import { findBridgeMessageByHarmonyId } from '../src/db/bridge.ts';
+import { listLinkedAttachments } from '../src/db/attachments.ts';
+import { createEmbedService } from '../src/embeds/service.ts';
 import { findEmojiByName, insertEmoji, toEmoji } from '../src/db/emojis.ts';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createEmojiService } from '../src/emojis/service.ts';
@@ -1140,6 +1142,73 @@ try {
   check('and is no longer reported as online', !bridge.onlineDiscordIds().has('999'));
 
   transport.emitPresence({ userId: '999', online: true });
+
+  // 13b. A gif link from Discord arrives once. Discord sends an update each time
+  // it finishes unfurling the link, often while we are still downloading the
+  // gif, and each of those used to store a copy of its own.
+  settings.update({ embedsEnabled: true });
+  const embeds = createEmbedService({
+    sqlite: db.sqlite,
+    settings,
+    hub,
+    attachments,
+    renderMessage: (id) => messages.byId(id),
+  });
+  const gifUrl = 'https://93.184.216.34/funny.png';
+  const gifMessage = messages.createBridged(channelId, userId, gifUrl, [], null, { silent: true });
+  const realFetch = globalThis.fetch;
+  let gifFetches = 0;
+  globalThis.fetch = async () => {
+    gifFetches++;
+    await sleep(150);
+    return new Response(png, { headers: { 'content-type': 'image/png' } });
+  };
+  try {
+    for (let i = 0; i < 3; i++) embeds.resolve(gifMessage.id, gifUrl);
+    await sleep(800);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  check(
+    'a link resolved three times at once is kept once',
+    listLinkedAttachments(db.sqlite, gifMessage.id).length === 1,
+    `${listLinkedAttachments(db.sqlite, gifMessage.id).length} kept`,
+  );
+  check('and downloaded once', gifFetches === 1, `${gifFetches} fetches`);
+
+  // The unfurl updates carry the same text, so they are not edits.
+  check('an update with the same text is not an edit', messages.editBridged(gifMessage.id, gifUrl) === null);
+  check('and does not mark the message edited', !messages.byId(gifMessage.id)?.editedAt);
+
+  // The same Discord message delivered twice while the first is still being
+  // stored (a live event racing a history import) is only stored once.
+  transport.emit({
+    id: 'twice',
+    channelId: '111',
+    authorId: '999',
+    authorName: 'Discord Sam',
+    authorAvatarUrl: null,
+    replyToDiscordId: null,
+    content: 'delivered twice',
+    attachments: [{ url: 'https://cdn.example/twice.png', filename: 'twice.png', contentType: 'image/png', size: png.length }],
+    fromBot: false,
+  });
+  transport.emit({
+    id: 'twice',
+    channelId: '111',
+    authorId: '999',
+    authorName: 'Discord Sam',
+    authorAvatarUrl: null,
+    replyToDiscordId: null,
+    content: 'delivered twice',
+    attachments: [{ url: 'https://cdn.example/twice.png', filename: 'twice.png', contentType: 'image/png', size: png.length }],
+    fromBot: false,
+  });
+  await sleep(100);
+  check(
+    'a Discord message delivered twice at once is stored once',
+    messages.history(channelId, { limit: 50 }, userId).messages.filter((m) => m.content === 'delivered twice').length === 1,
+  );
 
   // 14. Disabling stops the transport, and takes the presence with it.
   settings.updateBridge({ enabled: false });
