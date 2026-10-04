@@ -1684,6 +1684,13 @@ message or reaction that carried one. The instance's own emoji are never touched
 [Stickers](#stickers) learned from Discord are aged out by `stickerRetentionDays` the same way,
 counted from the last bridged message that carried one.
 
+`storageLimitBytes` caps everything stored on disk, which includes saved gifs, emoji, stickers,
+avatars and the instance icon. Once it is exceeded, the pruner removes the oldest attachments until
+usage is back under `storageTargetBytes` (or the limit, if no target is set). Attachments are the
+only thing it removes for space: it never deletes messages, and it stops as soon as a round of
+removals frees nothing, so a cap that the exempt content alone exceeds is left over rather than
+chased by deleting more.
+
 ```ts
 type RetentionSettings = {
   imageRetentionDays: number | null;

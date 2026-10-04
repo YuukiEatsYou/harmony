@@ -85,13 +85,14 @@ export function touchEmojiUsed(sqlite: DatabaseSync, id: string): void {
 
 /**
  * Learned emoji not seen since `before`. Only rows with a Discord id are ever
- * removed, so the instance's own emoji stay whatever the rule says.
+ * removed, so the instance's own emoji stay whatever the rule says. Returns the
+ * ids it removed, so the caller can tell connected clients each one is gone.
  */
-export function deleteExternalEmojisUnusedBefore(sqlite: DatabaseSync, before: string): number {
-  const result = sqlite
-    .prepare('DELETE FROM emojis WHERE discord_id IS NOT NULL AND COALESCE(used_at, created_at) < ?')
-    .run(before);
-  return Number(result.changes);
+export function deleteExternalEmojisUnusedBefore(sqlite: DatabaseSync, before: string): string[] {
+  const rows = sqlite
+    .prepare('DELETE FROM emojis WHERE discord_id IS NOT NULL AND COALESCE(used_at, created_at) < ? RETURNING id')
+    .all(before) as unknown as Array<{ id: string }>;
+  return rows.map((row) => row.id);
 }
 
 export function deleteEmoji(sqlite: DatabaseSync, id: string): void {

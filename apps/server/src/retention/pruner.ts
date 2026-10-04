@@ -9,7 +9,7 @@ import {
   deleteVideoAttachmentsOlderThan,
   listReferencedHashes,
 } from '../db/attachments.ts';
-import { countMessages, deleteMessagesOlderThan, deleteOldestMessages } from '../db/messages.ts';
+import { countMessages, deleteMessagesOlderThan } from '../db/messages.ts';
 import { deleteExternalEmojisUnusedBefore } from '../db/emojis.ts';
 import { deleteStickersUnusedBefore } from '../db/stickers.ts';
 import { deleteAuditOlderThan } from '../db/audit.ts';
@@ -119,10 +119,15 @@ export function createPruner(deps: PrunerDeps): Pruner {
     // for a while; the instance's own emoji are never touched by this. Like the
     // favorites above, it runs before the sweep so their bytes are freed here too.
     if (settings.externalEmojiRetentionDays !== null) {
-      deletedExternalEmojis += deleteExternalEmojisUnusedBefore(
+      const removedEmojiIds = deleteExternalEmojisUnusedBefore(
         deps.sqlite,
         isoDaysAgo(settings.externalEmojiRetentionDays),
       );
+      deletedExternalEmojis += removedEmojiIds.length;
+
+      // Clients keep their own emoji list and only refresh it on EMOJI_DELETE, so
+      // without this a pruned emoji would linger in their picker until a reload.
+      for (const id of removedEmojiIds) deps.hub.dispatch(GatewayEvent.EmojiDelete, { id });
     }
 
     // Stickers learned from Discord age out the same way, once no bridged message
@@ -139,7 +144,11 @@ export function createPruner(deps: PrunerDeps): Pruner {
     deletedBlobs += swept.count;
     freedBytes += swept.bytes;
 
-    // Emergency pruning: evict oldest content until back under the target.
+    // Emergency pruning: evict the oldest attachments until back under the target.
+    // Attachments are the only thing it may remove. The total also counts saved
+    // gifs, emoji, stickers, avatars and the instance icon, none of which this
+    // touches, and messages hold no bytes of their own: once their attachments
+    // are gone, deleting them frees nothing and would only erase history.
     if (settings.storageLimitBytes !== null) {
       const target =
         settings.storageTargetBytes !== null
@@ -153,22 +162,27 @@ export function createPruner(deps: PrunerDeps): Pruner {
         batches += 1;
 
         const removedAttachments = deleteOldestAttachments(deps.sqlite, BATCH_SIZE);
-        const removedMessages = removedAttachments === 0 ? deleteOldestMessages(deps.sqlite, BATCH_SIZE) : 0;
-        if (removedAttachments === 0 && removedMessages === 0) break; // nothing left to evict
-
         deletedAttachments += removedAttachments;
-        deletedMessages += removedMessages;
 
         swept = sweepUnreferencedBlobs();
         deletedBlobs += swept.count;
         freedBytes += swept.bytes;
         current -= swept.bytes;
-      }
 
-      // The final message deletions may have cascaded attachments; sweep again.
-      swept = sweepUnreferencedBlobs();
-      deletedBlobs += swept.count;
-      freedBytes += swept.bytes;
+        // Either no attachments are left, or the ones just removed shared their
+        // blobs with something that stays (a saved gif, say). Both mean the rest
+        // of the total is held by content pruning may not remove, so stop rather
+        // than keep evicting for nothing on every run.
+        if (removedAttachments === 0 || swept.bytes === 0) {
+          if (current > target) {
+            deps.log('storage limit is out of reach of emergency pruning', {
+              storedBytes: current,
+              targetBytes: target,
+            });
+          }
+          break;
+        }
+      }
     }
 
     const summary: PruneSummary = {

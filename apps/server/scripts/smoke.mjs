@@ -1824,6 +1824,84 @@ try {
     body: { storageLimitBytes: null, storageTargetBytes: null },
   });
 
+  // Emergency pruning when the cap is out of reach: an emoji alone is over the
+  // target, and pruning may never remove one. It should evict the attachment and
+  // then stop, rather than delete messages that hold no bytes of their own.
+  const keptEmojiForm = new FormData();
+  keptEmojiForm.append('name', 'keeper');
+  keptEmojiForm.append(
+    'file',
+    new Blob(
+      [
+        await sharp({
+          create: { width: 24, height: 24, channels: 4, background: { r: 0, g: 120, b: 255, alpha: 1 } },
+        })
+          .png()
+          .toBuffer(),
+      ],
+      { type: 'image/png' },
+    ),
+    'keeper.png',
+  );
+  const keptEmoji = await (
+    await fetch(`${BASE}/emojis`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ownerToken}` },
+      body: keptEmojiForm,
+    })
+  ).json();
+  const capUpload = new FormData();
+  capUpload.append('file', new Blob([emojiPng], { type: 'image/png' }), 'cap.png');
+  const capAttachment = await (
+    await fetch(`${BASE}/attachments`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ownerToken}` },
+      body: capUpload,
+    })
+  ).json();
+  const capMessage = await req(`/channels/${colorChannel.id}/messages`, {
+    method: 'POST',
+    token: ownerToken,
+    body: { content: 'outlives the storage cap', attachmentIds: [capAttachment.id] },
+  });
+  const messagesBeforeCap = (await req('/retention', { token: ownerToken })).json?.usage?.messageCount;
+
+  await req('/retention', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { storageLimitBytes: 1, storageTargetBytes: 0 },
+  });
+  const unreachable = await req('/retention/run', { method: 'POST', token: ownerToken });
+  check(
+    'unreachable storage cap still evicts attachments',
+    unreachable.status === 200 && unreachable.json?.summary?.deletedAttachments > 0,
+    JSON.stringify(unreachable.json?.summary),
+  );
+  check(
+    'unreachable storage cap deletes no messages',
+    unreachable.json?.summary?.deletedMessages === 0 && unreachable.json?.usage?.messageCount === messagesBeforeCap,
+    JSON.stringify({ summary: unreachable.json?.summary, before: messagesBeforeCap, usage: unreachable.json?.usage }),
+  );
+  const capHistory = await req(`/channels/${colorChannel.id}/messages`, { token: ownerToken });
+  check(
+    'the message survives with only its attachment pruned',
+    capHistory.json?.messages?.some(
+      (message) => message.id === capMessage.json?.id && message.attachments?.length === 0,
+    ) === true,
+  );
+  check(
+    'the emoji holding the bytes is left alone',
+    existsSync(join(dataDir, 'uploads', keptEmoji.hash.slice(0, 2), keptEmoji.hash)) &&
+      unreachable.json?.usage?.blobBytes > 0,
+  );
+
+  await req('/retention', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { storageLimitBytes: null, storageTargetBytes: null },
+  });
+  await req(`/emojis/${keptEmoji.id}`, { method: 'DELETE', token: ownerToken });
+
   // Age-based image retention.
   const ageUpload = new FormData();
   ageUpload.append('file', new Blob([emojiPng], { type: 'image/png' }), 'age.png');
