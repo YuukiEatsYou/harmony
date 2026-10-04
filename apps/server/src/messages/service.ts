@@ -29,7 +29,7 @@ import { attachToMessage, findAttachment, listAttachmentsForMessages } from '../
 import { markChannelRead } from '../db/channel_reads.ts';
 import { findChannel, type ChannelRow } from '../db/channels.ts';
 import { findEmoji } from '../db/emojis.ts';
-import { insertMention, listMentions, type MentionRow } from '../db/mentions.ts';
+import { deleteNameMentions, insertMention, listMentions, type MentionRow } from '../db/mentions.ts';
 import {
   findMessage,
   insertMessage,
@@ -87,7 +87,10 @@ export interface MessageService {
     options?: { createdAt?: string; silent?: boolean; stickerIds?: string[] },
   ): Message;
   edit(auth: AuthContext, messageId: string, content: string): Message;
-  /** Applies a bridged edit, without notifying the outbound listeners. */
+  /**
+   * Applies a bridged edit, without notifying the outbound listeners. Null when
+   * the message is gone or the text is unchanged.
+   */
   editBridged(messageId: string, content: string): Message | null;
   /** Renders one message for a broadcast, or null when it is gone or deleted. */
   byId(messageId: string): Message | null;
@@ -173,6 +176,17 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     return parent.id;
   }
 
+  /**
+   * A bridged reply's parent, or null when it can no longer be one. Discord does
+   * not know a message was deleted here, so somebody there may still answer it;
+   * their message must arrive all the same, just not as a reply.
+   */
+  function bridgedReplyTo(channelId: string, replyToId: string | null): string | null {
+    if (!replyToId) return null;
+    const parent = findMessage(sqlite, replyToId);
+    return parent && !parent.deleted_at && parent.channel_id === channelId ? parent.id : null;
+  }
+
   function requireChannel(channelId: string): ChannelRow {
     const channel = findChannel(sqlite, channelId);
     if (!channel) {
@@ -246,12 +260,21 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
    * Turns a client's reaction target into the canonical stored form. For custom
    * emoji the database name is authoritative, so a stale or spoofed shortcode
    * cannot desync the row from the image it points at.
+   *
+   * A custom emoji can be deleted while reactions still use it. Those must stay
+   * removable, so a reaction already on the message is matched as stored and
+   * flagged `gone`; only adding a fresh one is refused.
    */
-  function canonicalReaction(emoji: string, emojiId: string | null): { emoji: string; emojiId: string | null } {
-    if (!emojiId) return { emoji, emojiId: null };
+  function canonicalReaction(
+    messageId: string,
+    emoji: string,
+    emojiId: string | null,
+  ): { emoji: string; emojiId: string | null; gone: boolean } {
+    if (!emojiId) return { emoji, emojiId: null, gone: false };
     const row = findEmoji(sqlite, emojiId);
-    if (!row) throw new HttpError(400, 'invalid_emoji', 'That emoji does not exist.');
-    return { emoji: `:${row.name}:`, emojiId: row.id };
+    if (row) return { emoji: `:${row.name}:`, emojiId: row.id, gone: false };
+    if (countReaction(sqlite, messageId, emoji) > 0) return { emoji, emojiId, gone: true };
+    throw new HttpError(400, 'invalid_emoji', 'That emoji does not exist.');
   }
 
   /**
@@ -272,23 +295,42 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     replyToId: string | null,
     createdAt: string,
   ): void {
-    const targets = new Map<string, 'mention' | 'reply'>();
-
     if (replyToId) {
       const parent = findMessage(sqlite, replyToId);
       const target = parent?.author_id ? findUserById(sqlite, parent.author_id) : null;
-      if (target && target.id !== authorId && target.is_bot === 0) targets.set(target.id, 'reply');
+      if (target && target.id !== authorId && target.is_bot === 0) {
+        insertMention(sqlite, { messageId, userId: target.id, channelId, kind: 'reply', createdAt });
+      }
     }
+    // Written after the reply, whose row then wins for someone who is both.
+    recordNameMentions(messageId, channelId, authorId, content, createdAt);
+  }
 
+  /** The naming half of `recordMentions`, which an edit runs again on its own. */
+  function recordNameMentions(
+    messageId: string,
+    channelId: string,
+    authorId: string,
+    content: string,
+    createdAt: string,
+  ): void {
     for (const username of listMentionUsernames(content)) {
       const user = findUserByUsername(sqlite, username);
       if (!user || user.id === authorId || user.is_bot === 1) continue;
-      if (!targets.has(user.id)) targets.set(user.id, 'mention');
+      insertMention(sqlite, { messageId, userId: user.id, channelId, kind: 'mention', createdAt });
     }
+  }
 
-    for (const [userId, kind] of targets) {
-      insertMention(sqlite, { messageId, userId, channelId, kind, createdAt });
-    }
+  /**
+   * Brings who a message names in line with its edited text: somebody named for
+   * the first time finds it in their inbox, and somebody no longer named stops
+   * finding it there. Rows keep the message's own time, as they had when it was
+   * sent, so an edit never makes an already read channel unread again; like
+   * Discord, adding a name by editing does not ping.
+   */
+  function rerecordNameMentions(row: MessageRow, content: string): void {
+    deleteNameMentions(sqlite, row.id);
+    if (row.author_id) recordNameMentions(row.id, row.channel_id, row.author_id, content, row.created_at);
   }
 
   function insertWithAttachments(
@@ -481,7 +523,7 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
         authorId,
         content,
         attachmentIds,
-        replyToId,
+        bridgedReplyTo(channelId, replyToId),
         options.createdAt,
         options.stickerIds ?? [],
       );
@@ -533,6 +575,7 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
 
       const before = row.content;
       updateMessageContent(sqlite, messageId, content, new Date().toISOString());
+      rerecordNameMentions(row, content);
       const message = render(requireMessage(messageId), auth.user.id);
       announceEdit(message);
       audit.messageEdited(auth.user.id, row.channel_id, before, content);
@@ -542,8 +585,11 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     editBridged(messageId, content) {
       const row = findMessage(sqlite, messageId);
       if (!row || row.deleted_at) return null;
+      // Discord reports link unfurls as updates; the same text is not an edit.
+      if (row.content === content) return null;
 
       updateMessageContent(sqlite, messageId, content, new Date().toISOString());
+      rerecordNameMentions(row, content);
       const message = render(requireMessage(messageId), row.author_id ?? '');
       hub.dispatch(GatewayEvent.MessageUpdate, message, { channelId: message.channelId });
       return message;
@@ -579,11 +625,12 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
       assertNotTimedOut(auth);
       const row = requireMessage(messageId);
       assertChannelAccess(auth.user.id, row.channel_id);
-      const target = canonicalReaction(emoji, emojiId);
+      const target = canonicalReaction(row.id, emoji, emojiId);
 
       // Deleting first makes this a toggle: a row that was there is removed.
       const removed = deleteReaction(sqlite, row.id, auth.user.id, target.emoji);
       if (!removed) {
+        if (target.gone) throw new HttpError(400, 'invalid_emoji', 'That emoji does not exist.');
         insertReaction(sqlite, {
           messageId: row.id,
           userId: auth.user.id,
@@ -613,7 +660,7 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
         throw new HttpError(403, 'forbidden', 'You need Manage Messages to clear reactions.');
       }
 
-      const target = canonicalReaction(emoji, emojiId);
+      const target = canonicalReaction(row.id, emoji, emojiId);
       deleteReactionsForEmoji(sqlite, row.id, target.emoji);
 
       const payload: ReactionsClearPayload = {

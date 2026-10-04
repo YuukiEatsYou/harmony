@@ -27,6 +27,14 @@ export function insertMention(
 }
 
 /**
+ * Forgets who a message names, for an edit to record afresh. Reply rows are
+ * kept: an edit cannot change which message a reply answers.
+ */
+export function deleteNameMentions(sqlite: DatabaseSync, messageId: string): void {
+  sqlite.prepare(`DELETE FROM mentions WHERE message_id = ? AND kind = 'mention'`).run(messageId);
+}
+
+/**
  * The channels holding a mention or reply this member has not read, which is
  * what puts a mark beside them. A mention counts as read exactly when the
  * channel does, so the same cursor that clears a channel's unread mark clears

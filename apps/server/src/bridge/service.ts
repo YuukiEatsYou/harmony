@@ -29,35 +29,55 @@ import {
   rememberBridgeMessage,
 } from '../db/bridge.ts';
 import { findChannel, findChannelByDiscordId, listChannels, setChannelWebhook, type ChannelRow } from '../db/channels.ts';
-import { findEmojiByDiscordId, findEmojiByName, insertEmoji, touchEmojiUsed, type EmojiRow } from '../db/emojis.ts';
+import {
+  findEmoji,
+  findEmojiByDiscordId,
+  findEmojiByName,
+  insertEmoji,
+  toEmoji,
+  touchEmojiUsed,
+  type EmojiRow,
+} from '../db/emojis.ts';
+import { findMessage } from '../db/messages.ts';
+import { countLocalReaction, listReactionsForMessages } from '../db/reactions.ts';
 import {
   findStickerByDiscordId,
   insertSticker,
   touchStickerUsed,
   type StickerRow,
 } from '../db/stickers.ts';
-import { findUserByDiscordId, findUserByUsername, insertGhostUser, presentUser, type UserRow } from '../db/users.ts';
+import {
+  findUserByDiscordId,
+  findUserById,
+  findUserByUsername,
+  insertGhostUser,
+  presentUser,
+  updateUserProfile,
+  type UserRow,
+} from '../db/users.ts';
 import { HttpError } from '../http/errors.ts';
 import type { MessageService, ReactionEvent } from '../messages/service.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import type { UserService } from '../users/service.ts';
 import { createBlobStore } from '../storage/blobs.ts';
-import type {
-  BridgeLogger,
-  DiscordEmoji,
-  DiscordIncomingAttachment,
-  DiscordIncomingDelete,
-  DiscordIncomingEdit,
-  DiscordIncomingMessage,
-  DiscordIncomingPresence,
-  DiscordIncomingReaction,
-  DiscordIncomingSticker,
-  DiscordMention,
-  DiscordTransport,
-  MirrorFile,
-  MirrorResult,
-  WebhookRef,
+import {
+  DISCORD_MAX_CONTENT,
+  type BridgeLogger,
+  type DiscordEmoji,
+  type DiscordIncomingAttachment,
+  type DiscordIncomingDelete,
+  type DiscordIncomingEdit,
+  type DiscordIncomingMessage,
+  type DiscordIncomingPresence,
+  type DiscordIncomingReaction,
+  type DiscordIncomingReactionsRemoved,
+  type DiscordIncomingSticker,
+  type DiscordMention,
+  type DiscordTransport,
+  type MirrorFile,
+  type MirrorResult,
+  type WebhookRef,
 } from './transport.ts';
 
 /** Discord's default upload ceiling for a non-boosted server. */
@@ -69,6 +89,15 @@ const STICKER_MAX_BYTES = 1024 * 1024;
 /** Discord sticker formats: Lottie is a vector graphic, GIF is an animation. */
 const STICKER_FORMAT_LOTTIE = 3;
 const STICKER_FORMAT_GIF = 4;
+
+/**
+ * Ends an edit that no longer fits in one Discord message. Only the first part
+ * of a split message is ours to edit, so whatever is cut is left to Harmony.
+ */
+const DISCORD_SHORTENED_MARKER = '… *(continued in Harmony)*';
+
+/** Marks a message that was forwarded on Discord rather than written there. */
+const FORWARDED_MARKER = '*Forwarded*';
 
 /** A pasted Discord sticker link, as the client's "copy link" produces it. */
 const STICKER_LINK =
@@ -245,8 +274,9 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       const metadata = await sharp(data).metadata();
       const isAnimated = (metadata.pages ?? 1) > 1;
       const now = new Date().toISOString();
+      const emojiId = randomUUID();
       insertEmoji(deps.sqlite, {
-        id: randomUUID(),
+        id: emojiId,
         name,
         hash: blobs.save(data),
         contentType: isAnimated ? 'image/gif' : 'image/png',
@@ -256,6 +286,11 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         discordId: id,
         usedAt: now,
       });
+      // Clients keep their own list of emoji and only refetch it when told to,
+      // so without this the message that taught us the emoji would show its
+      // shortcode as text for everyone already connected.
+      const learned = findEmoji(deps.sqlite, emojiId);
+      if (learned) deps.hub.dispatch(GatewayEvent.EmojiCreate, toEmoji(learned));
       return name;
     } catch (error) {
       logger.debug('could not learn a discord emoji', {
@@ -496,10 +531,26 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     return `> **${who}**${snippet ? `: ${snippet}` : ''}`;
   }
 
-  /** Finds the stand-in account for a Discord author, creating it on first sight. */
-  function resolveGhostUser(discordId: string, displayName: string): UserRow {
+  /**
+   * Finds the stand-in account for a Discord author, creating it on first sight.
+   * With `refreshName`, a stand-in's name follows a change on Discord. Only a
+   * message's author asks for that: a reaction only knows the account's global
+   * name, not the one the person goes by in the guild, and would flip the name
+   * back and forth. A member who linked their own account chose their name here,
+   * so theirs is never touched.
+   */
+  function resolveGhostUser(discordId: string, displayName: string, refreshName = false): UserRow {
     const existing = findUserByDiscordId(deps.sqlite, discordId);
-    if (existing) return existing;
+    if (existing) {
+      if (!refreshName || existing.is_bot !== 1 || !displayName || existing.display_name === displayName) {
+        return existing;
+      }
+      updateUserProfile(deps.sqlite, existing.id, { displayName });
+      // Clients refetch the member list on this, so the new name shows up
+      // without a reload.
+      deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: existing.id });
+      return findUserByDiscordId(deps.sqlite, discordId) ?? existing;
+    }
 
     const id = randomUUID();
     insertGhostUser(deps.sqlite, {
@@ -559,7 +610,47 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     return `${base.replace(/\/+$/, '')}/api/v1/users/${user.id}/avatar?v=${user.avatarHash}`;
   }
 
-  /** Shared by normal mirroring and the admin's test message. */
+  /**
+   * Cuts text into pieces Discord accepts. Harmony allows longer messages than
+   * Discord does, and cutting one short would lose the rest without a word. A
+   * piece breaks at a line if it can, then at a space, so a word is only split
+   * down the middle when there is no other choice.
+   */
+  function splitForDiscord(text: string): string[] {
+    const parts: string[] = [];
+    let rest = text;
+    while (rest.length > DISCORD_MAX_CONTENT) {
+      const window = rest.slice(0, DISCORD_MAX_CONTENT);
+      // A break too near the start would leave a sliver of a message behind.
+      const floor = DISCORD_MAX_CONTENT / 2;
+      let cut = window.lastIndexOf('\n');
+      if (cut < floor) cut = window.lastIndexOf(' ');
+      if (cut < floor) {
+        cut = DISCORD_MAX_CONTENT;
+        // Never split an emoji or other character outside the basic plane.
+        const last = rest.charCodeAt(cut - 1);
+        if (last >= 0xd800 && last <= 0xdbff) cut--;
+      }
+      parts.push(rest.slice(0, cut).trimEnd());
+      rest = rest.slice(cut).replace(/^[\n ]/, '');
+    }
+    parts.push(rest);
+    return parts.filter((part) => part.trim().length > 0);
+  }
+
+  /** Shortens an edit to what fits in the one Discord message it can change. */
+  function fitForDiscord(text: string): string {
+    if (text.length <= DISCORD_MAX_CONTENT) return text;
+    return `${text.slice(0, DISCORD_MAX_CONTENT - DISCORD_SHORTENED_MARKER.length).trimEnd()}${DISCORD_SHORTENED_MARKER}`;
+  }
+
+  /**
+   * Shared by normal mirroring and the admin's test message. Text too long for
+   * one Discord message goes out as several, the files riding on the first. The
+   * first is the one the result names, and so the one later edits, deletions and
+   * reactions reach; the rest are only remembered, so they are never mistaken
+   * for something said on Discord.
+   */
   async function sendToDiscord(
     channel: ChannelRow,
     username: string,
@@ -575,17 +666,30 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       throw new HttpError(400, 'channel_not_bridged', 'That channel is not linked to a Discord channel.');
     }
 
+    const [first = '', ...rest] = splitForDiscord(content);
     const result = await transport.mirror({
       discordChannelId: channel.discord_channel_id,
       webhook: webhookFor(channel),
       username,
       avatarUrl,
       allowedUserMentions,
-      content,
+      content: first,
       files,
     });
-
     setChannelWebhook(deps.sqlite, channel.id, result.webhook.id, result.webhook.token);
+
+    for (const part of rest) {
+      const continued = await transport.mirror({
+        discordChannelId: channel.discord_channel_id,
+        webhook: result.webhook,
+        username,
+        avatarUrl,
+        allowedUserMentions,
+        content: part,
+        files: [],
+      });
+      rememberBridgeMessage(deps.sqlite, continued.messageId, new Date().toISOString());
+    }
     return result;
   }
 
@@ -676,18 +780,49 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     await transport.editMessage({
       webhook: target.webhook,
       discordMessageId: target.discordMessageId,
-      content,
+      content: fitForDiscord(content),
       allowedUserMentions,
     });
   }
 
+  /**
+   * Removes a deleted message's Discord counterpart. Our webhook can delete only
+   * what it posted itself, so a message somebody wrote on Discord - a stand-in's,
+   * or a linked member's when the webhook refuses - is deleted by the bot. The
+   * mapping goes either way: the Harmony message is gone, and a mapping left
+   * behind would have every later attempt fail the same way.
+   */
   async function mirrorDelete(info: MessageDeletePayload): Promise<void> {
-    if (!transport) return;
-    const target = mirrorTarget(info.id, info.channelId);
-    if (!target) return;
+    const active = transport;
+    if (!active) return;
+    const mapping = findBridgeMessageByHarmonyId(deps.sqlite, info.id);
+    if (!mapping) return;
 
-    await transport.deleteMessage({ webhook: target.webhook, discordMessageId: target.discordMessageId });
-    deleteBridgeMessage(deps.sqlite, info.id);
+    try {
+      const channel = findChannel(deps.sqlite, info.channelId);
+      if (!channel?.discord_channel_id) return;
+
+      const row = findMessage(deps.sqlite, info.id);
+      const author = row?.author_id ? findUserById(deps.sqlite, row.author_id) : null;
+      const webhook = webhookFor(channel);
+      if (webhook && author?.is_bot !== 1) {
+        try {
+          await active.deleteMessage({ webhook, discordMessageId: mapping.discord_message_id });
+          return;
+        } catch (error) {
+          logger.debug('the webhook could not delete a message, asking the bot', {
+            discordMessageId: mapping.discord_message_id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      await active.deleteMessageAsBot({
+        channelId: channel.discord_channel_id,
+        discordMessageId: mapping.discord_message_id,
+      });
+    } finally {
+      deleteBridgeMessage(deps.sqlite, info.id);
+    }
   }
 
   /**
@@ -720,7 +855,10 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     if (!target) return;
 
     // For a removal, keep the bot's reaction while others remain in Harmony.
-    if (kind !== 'add' && event.message.reactions.some((reaction) => reaction.emoji === event.emoji)) return;
+    // Discord users' own reactions are stored here under their stand-ins too, but
+    // those are theirs on Discord already; only Harmony's reactors are what the
+    // bot is standing in for.
+    if (kind !== 'add' && countLocalReaction(deps.sqlite, event.message.id, event.emoji) > 0) return;
 
     const emoji = await discordReactionParam(event.emoji);
     if (!emoji) {
@@ -810,20 +948,36 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     }
   }
 
+  /**
+   * Discord messages being ingested right now. The permanent record below is
+   * only written once a message is stored, after its downloads, so a live event
+   * and a history import of the same message could both get past it meanwhile.
+   */
+  const ingesting = new Set<string>();
+
   async function ingest(message: DiscordIncomingMessage, silent = false): Promise<boolean> {
+    if (ingesting.has(message.id)) return false;
+    ingesting.add(message.id);
+    try {
+      return await ingestOnce(message, silent);
+    } finally {
+      ingesting.delete(message.id);
+    }
+  }
+
+  async function ingestOnce(message: DiscordIncomingMessage, silent: boolean): Promise<boolean> {
     const active = transport;
     // Ignore bots, including our own mirrored webhook messages.
     if (!active || message.fromBot) return false;
-    // Already accounted for: a live event and a history import can race here,
-    // and a backfill may meet a message whose Harmony copy was deleted or
-    // pruned. The permanent record answers that even when the mapping is gone,
-    // so removed content is not brought back.
+    // Already accounted for: a backfill may meet a message whose Harmony copy was
+    // deleted or pruned. The permanent record answers that even when the mapping
+    // is gone, so removed content is not brought back.
     if (hasSeenBridgeMessage(deps.sqlite, message.id)) return false;
 
     const channel = findChannelByDiscordId(deps.sqlite, message.channelId);
     if (!channel) return false;
 
-    const author = resolveGhostUser(message.authorId, message.authorName);
+    const author = resolveGhostUser(message.authorId, message.authorName, true);
     await mirrorGhostAvatar(active, author, message);
 
     const attachmentIds: string[] = [];
@@ -863,7 +1017,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     // as a typed one does. Emoji are learned above, so one from another server
     // renders rather than falling back.
     const translated = await translateInboundEmoji(linked.text);
-    const content = [
+    const said = [
       rewriteInboundChannelMentions(
         rewriteInboundMentions(unwrapSuppressedLinks(translated), message.mentions),
       ),
@@ -871,9 +1025,12 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     ]
       .filter((part) => part.trim().length > 0)
       .join('\n');
-    if (!content && attachmentIds.length === 0 && stickerIds.length === 0) return false;
+    if (!said && attachmentIds.length === 0 && stickerIds.length === 0) return false;
+    // A forward carries someone else's words, so it says so, as Discord does.
+    const content = message.forwarded ? `${FORWARDED_MARKER}\n${said}`.trim() : said;
 
     // A Discord reply becomes a real Harmony reply when the parent was bridged.
+    // One whose parent has since been deleted here simply arrives as a message.
     const replyToId = message.replyToDiscordId
       ? (findBridgeMessageByDiscordId(deps.sqlite, message.replyToDiscordId)?.harmony_message_id ?? null)
       : null;
@@ -947,11 +1104,18 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
   }
 
   async function ingestEdit(edit: DiscordIncomingEdit): Promise<void> {
+    // Our own edit of a mirrored message comes back from Discord in Discord's
+    // form: a reply's quote line on top, mentions as raw ids, cut to Discord's
+    // length. Applying it would overwrite what was written here.
+    if (edit.fromBot) return;
     const mapping = findBridgeMessageByDiscordId(deps.sqlite, edit.id);
     if (!mapping) return;
-    // Unwrapped like a fresh message, so an edit that adds or newly suppresses a
-    // link previews on the Harmony side to match.
-    const content = unwrapSuppressedLinks(await translateInboundEmoji(edit.content));
+    // Rewritten like a fresh message, so an edit that adds a mention reads the
+    // same as one sent with it, and one that adds or newly suppresses a link
+    // previews on the Harmony side to match.
+    const content = rewriteInboundChannelMentions(
+      rewriteInboundMentions(unwrapSuppressedLinks(await translateInboundEmoji(edit.content)), edit.mentions),
+    );
     if (!deps.messages.editBridged(mapping.harmony_message_id, content)) return;
     deps.resolvePreview?.(mapping.harmony_message_id, content);
   }
@@ -980,7 +1144,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     }
 
     const learned = transport
-      ? await ensureExternalEmoji(transport, reaction.emojiId, reaction.emoji, false)
+      ? await ensureExternalEmoji(transport, reaction.emojiId, reaction.emoji, reaction.animated)
       : null;
     const row = learned ? findEmojiByName(deps.sqlite, learned) : null;
     return row ? { emoji: `:${row.name}:`, emojiId: row.id } : { emoji: `:${reaction.emoji}:`, emojiId: null };
@@ -1010,6 +1174,21 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
 
     const { emoji, emojiId } = await toHarmonyReaction(reaction);
     deps.messages.clearReactionsBridged(mapping.harmony_message_id, emoji, emojiId);
+  }
+
+  /**
+   * Every reaction was removed from a Discord message at once. Each emoji is
+   * cleared in turn, which is what clients already know how to show.
+   */
+  function ingestReactionsRemovedAll(removed: DiscordIncomingReactionsRemoved): void {
+    const mapping = findBridgeMessageByDiscordId(deps.sqlite, removed.messageId);
+    if (!mapping) return;
+
+    const messageId = mapping.harmony_message_id;
+    const reactions = listReactionsForMessages(deps.sqlite, [messageId], '').get(messageId) ?? [];
+    for (const reaction of reactions) {
+      deps.messages.clearReactionsBridged(messageId, reaction.emoji, reaction.emojiId);
+    }
   }
 
   // Messages created or changed in Harmony are mirrored out; bridged-in changes
@@ -1071,6 +1250,13 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         void ingestReactionCleared(reaction).catch((error: unknown) =>
           logger.info('bridge reaction sync failed', error),
         );
+      });
+      transport.onReactionsRemovedAll((removed) => {
+        try {
+          ingestReactionsRemovedAll(removed);
+        } catch (error) {
+          logger.info('bridge reaction sync failed', error);
+        }
       });
       transport.onPresence((presence) => applyDiscordPresence(presence));
       activeToken = desired;

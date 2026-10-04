@@ -1,5 +1,11 @@
 import type { BridgeStatus, DiscordChannelListResponse } from '@harmony/shared';
 
+/**
+ * Discord rejects message content longer than this. Harmony allows more, so the
+ * bridge splits a longer message into several posts on the way out.
+ */
+export const DISCORD_MAX_CONTENT = 2000;
+
 export interface DiscordIncomingAttachment {
   url: string;
   filename: string;
@@ -41,12 +47,25 @@ export interface DiscordIncomingMessage {
   attachments: DiscordIncomingAttachment[];
   /** True for any bot, including our own webhook mirrors. Never re-bridged. */
   fromBot: boolean;
+  /**
+   * True when the message forwards another one. Discord sends a forward with no
+   * content of its own; the transport fills in the forwarded message's text and
+   * attachments instead.
+   */
+  forwarded?: boolean;
 }
 
 export interface DiscordIncomingEdit {
   id: string;
   channelId: string;
   content: string;
+  /** Users mentioned in the edited text, for rewriting `<@id>` mentions. */
+  mentions: DiscordMention[];
+  /**
+   * True for any bot, including our own webhook mirrors. Our edits of a mirrored
+   * message come back as updates too, and must never be applied to the original.
+   */
+  fromBot: boolean;
 }
 
 export interface DiscordIncomingDelete {
@@ -88,6 +107,14 @@ export interface DiscordIncomingReaction {
   emoji: string;
   /** The custom emoji id, or null for a unicode emoji. */
   emojiId: string | null;
+  /** Whether a custom emoji is animated, so it can be learned as a gif. */
+  animated: boolean;
+}
+
+/** Every reaction was cleared from a Discord message at once. */
+export interface DiscordIncomingReactionsRemoved {
+  messageId: string;
+  channelId: string;
 }
 
 /** Minimal logger the bridge hands down to the transport. */
@@ -134,6 +161,12 @@ export interface DeleteInput {
   discordMessageId: string;
 }
 
+export interface BotDeleteInput {
+  /** Discord channel holding the message. */
+  channelId: string;
+  discordMessageId: string;
+}
+
 export interface ReactionInput {
   /** Discord channel holding the message. Reactions go through the bot, not the webhook. */
   channelId: string;
@@ -162,6 +195,8 @@ export interface DiscordTransport {
   onReactionRemoved(handler: (reaction: DiscordIncomingReaction) => void): void;
   /** Every reaction of one emoji was cleared from a message. */
   onReactionCleared(handler: (reaction: DiscordIncomingReaction) => void): void;
+  /** Every reaction of every emoji was cleared from a message. */
+  onReactionsRemovedAll(handler: (removed: DiscordIncomingReactionsRemoved) => void): void;
   /**
    * Who is online in the linked guild: once per member when the bot connects,
    * then whenever someone's status changes.
@@ -170,6 +205,12 @@ export interface DiscordTransport {
   mirror(input: MirrorInput): Promise<MirrorResult>;
   editMessage(input: EditInput): Promise<void>;
   deleteMessage(input: DeleteInput): Promise<void>;
+  /**
+   * Deletes a message through the bot rather than the webhook. A webhook can
+   * only delete its own messages, so this is how a message somebody wrote on
+   * Discord is removed when a moderator deletes it here.
+   */
+  deleteMessageAsBot(input: BotDeleteInput): Promise<void>;
   /** Custom emoji available in the guild, for translating `:name:` shortcodes. */
   guildEmojis(): Promise<DiscordEmoji[]>;
   addReaction(input: ReactionInput): Promise<void>;

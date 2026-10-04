@@ -46,6 +46,22 @@ export function countReaction(sqlite: DatabaseSync, messageId: string, emoji: st
 }
 
 /**
+ * Like `countReaction`, but leaving out the stand-in accounts of Discord users:
+ * the members who reacted here, as opposed to on the Discord side of a bridge.
+ */
+export function countLocalReaction(sqlite: DatabaseSync, messageId: string, emoji: string): number {
+  const row = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM reactions r
+         JOIN users u ON u.id = r.user_id
+        WHERE r.message_id = ? AND r.emoji = ? AND u.is_bot = 0`,
+    )
+    .get(messageId, emoji) as { count: number };
+  return row.count;
+}
+
+/**
  * Aggregates reactions for several messages at once, keyed by message id.
  * `viewerId` decides the `me` flag on each group. Groups keep their insertion
  * order so the UI stays stable as reactions are added.

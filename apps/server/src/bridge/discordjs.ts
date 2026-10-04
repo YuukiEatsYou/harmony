@@ -3,31 +3,36 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageReferenceType,
   Partials,
   type Message as DiscordMessage,
+  type MessageReaction,
+  type PartialMessageReaction,
   type Presence,
   type TextChannel,
 } from 'discord.js';
 import type { BridgeStatus, DiscordCategoryOption, DiscordChannelOption } from '@harmony/shared';
-import type {
-  BridgeLogger,
-  DiscordEmoji,
-  DiscordIncomingDelete,
-  DiscordIncomingEdit,
-  DiscordIncomingMessage,
-  DiscordIncomingPresence,
-  DiscordIncomingReaction,
-  DiscordTransport,
-  EditInput,
-  DeleteInput,
-  MirrorInput,
-  MirrorResult,
-  ReactionInput,
-  WebhookRef,
+import {
+  DISCORD_MAX_CONTENT,
+  type BotDeleteInput,
+  type BridgeLogger,
+  type DiscordEmoji,
+  type DiscordIncomingDelete,
+  type DiscordIncomingEdit,
+  type DiscordIncomingMessage,
+  type DiscordIncomingPresence,
+  type DiscordIncomingReaction,
+  type DiscordIncomingReactionsRemoved,
+  type DiscordMention,
+  type DiscordTransport,
+  type EditInput,
+  type DeleteInput,
+  type MirrorInput,
+  type MirrorResult,
+  type ReactionInput,
+  type WebhookRef,
 } from './transport.ts';
 
-/** Discord rejects content longer than this. */
-const MAX_DISCORD_CONTENT = 2000;
 const MAX_DISCORD_USERNAME = 80;
 
 /** What Discord's attachment refresh endpoint answers with. */
@@ -56,6 +61,7 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
   const reactionAddedHandlers: Array<(reaction: DiscordIncomingReaction) => void> = [];
   const reactionRemovedHandlers: Array<(reaction: DiscordIncomingReaction) => void> = [];
   const reactionClearedHandlers: Array<(reaction: DiscordIncomingReaction) => void> = [];
+  const reactionsRemovedAllHandlers: Array<(removed: DiscordIncomingReactionsRemoved) => void> = [];
   const presenceHandlers: Array<(presence: DiscordIncomingPresence) => void> = [];
   let status: BridgeStatus = { ready: false, botTag: null, guildName: null, error: null };
 
@@ -84,8 +90,22 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
     }
   });
 
+  /** The users a message mentions, by the name they go by in the guild. */
+  function mentionsOf(message: Pick<DiscordMessage, 'mentions'>): DiscordMention[] {
+    return [...message.mentions.users.values()].map((user) => ({
+      id: user.id,
+      name: message.mentions.members?.get(user.id)?.displayName ?? user.globalName ?? user.username,
+    }));
+  }
+
   /** Maps a discord.js message onto the shape the bridge works with. */
   function toIncomingMessage(message: DiscordMessage): DiscordIncomingMessage {
+    // A forward has no content of its own: what was forwarded travels as a
+    // snapshot, and that is what the bridge should carry across. Its reference
+    // points at the original message, which must not turn it into a reply.
+    const forward =
+      message.reference?.type === MessageReferenceType.Forward ? (message.messageSnapshots.first() ?? null) : null;
+    const body = forward ?? message;
     return {
       id: message.id,
       channelId: message.channelId,
@@ -95,26 +115,45 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
       // generic default avatars.
       authorAvatarUrl:
         message.member?.avatarURL({ size: 128 }) ?? message.author.avatarURL({ size: 128 }),
-      replyToDiscordId: message.reference?.messageId ?? null,
-      mentions: [...message.mentions.users.values()].map((user) => ({
-        id: user.id,
-        name: message.mentions.members?.get(user.id)?.displayName ?? user.globalName ?? user.username,
-      })),
-      stickers: [...message.stickers.values()].map((sticker) => ({
+      replyToDiscordId: forward ? null : (message.reference?.messageId ?? null),
+      mentions: mentionsOf(body),
+      stickers: [...body.stickers.values()].map((sticker) => ({
         id: sticker.id,
         name: sticker.name,
         formatType: sticker.format,
       })),
       createdAt: message.createdAt.toISOString(),
-      content: message.content,
-      attachments: [...message.attachments.values()].map((attachment) => ({
+      content: body.content,
+      attachments: [...body.attachments.values()].map((attachment) => ({
         url: attachment.url,
         filename: attachment.name,
         contentType: attachment.contentType ?? 'application/octet-stream',
         size: attachment.size,
       })),
       // Webhook messages are ours; never echo them back.
-      fromBot: message.author.bot || message.webhookId !== null,
+      fromBot: isFromBot(message),
+      forwarded: forward !== null,
+    };
+  }
+
+  /** Bots and webhooks, our own mirrors among them, are never bridged in. */
+  function isFromBot(message: DiscordMessage): boolean {
+    return message.author.bot || message.webhookId !== null;
+  }
+
+  /** Maps a discord.js reaction onto the shape the bridge works with. */
+  function toIncomingReaction(
+    full: MessageReaction | PartialMessageReaction,
+    user: { id: string; globalName?: string | null; username?: string | null } | null,
+  ): DiscordIncomingReaction {
+    return {
+      messageId: full.message.id,
+      channelId: full.message.channelId ?? '',
+      userId: user?.id ?? '',
+      userName: user ? (user.globalName ?? user.username ?? 'Discord user') : '',
+      emoji: full.emoji.name ?? '',
+      emojiId: full.emoji.id ?? null,
+      animated: full.emoji.animated ?? false,
     };
   }
 
@@ -123,7 +162,11 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
     for (const handler of createdHandlers) handler(incoming);
   });
 
-  client.on(Events.MessageUpdate, (_previous, next) => {
+  client.on(Events.MessageUpdate, (previous, next) => {
+    // Discord also sends an update when it finishes unfurling a link, often more
+    // than once for a gif. The text is unchanged, so it is not an edit, and
+    // passing it on would mark the message edited and resolve its link again.
+    if (!previous.partial && !next.partial && previous.content === next.content) return;
     void (async () => {
       try {
         const message = (next.partial ? await next.fetch() : next) as DiscordMessage;
@@ -131,6 +174,10 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
           id: message.id,
           channelId: message.channelId,
           content: message.content,
+          mentions: mentionsOf(message),
+          // Our own webhook edits come back as updates. Carrying the authorship
+          // lets the bridge drop them, as it does bot messages.
+          fromBot: isFromBot(message),
         };
         for (const handler of editedHandlers) handler(edit);
       } catch {
@@ -144,6 +191,15 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
     for (const handler of deletedHandlers) handler(deletion);
   });
 
+  // A moderator's purge arrives as one bulk event rather than a delete per
+  // message; each is passed on exactly like a single deletion.
+  client.on(Events.MessageBulkDelete, (messages, channel) => {
+    for (const message of messages.values()) {
+      const deletion: DiscordIncomingDelete = { id: message.id, channelId: message.channelId ?? channel.id };
+      for (const handler of deletedHandlers) handler(deletion);
+    }
+  });
+
   // Reactions from bots or webhooks (including our own mirrored ones) are ignored,
   // exactly like bot messages, so nothing ping-pongs across the bridge.
   client.on(Events.MessageReactionAdd, (reaction, user) => {
@@ -151,14 +207,7 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
       if (user.bot) return;
       try {
         const full = reaction.partial ? await reaction.fetch() : reaction;
-        const incoming: DiscordIncomingReaction = {
-          messageId: full.message.id,
-          channelId: full.message.channelId ?? '',
-          userId: user.id,
-          userName: user.globalName ?? user.username ?? 'Discord user',
-          emoji: full.emoji.name ?? '',
-          emojiId: full.emoji.id ?? null,
-        };
+        const incoming = toIncomingReaction(full, user);
         for (const handler of reactionAddedHandlers) handler(incoming);
       } catch {
         // The message was gone before we could read the reaction.
@@ -171,14 +220,7 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
       if (user.bot) return;
       try {
         const full = reaction.partial ? await reaction.fetch() : reaction;
-        const incoming: DiscordIncomingReaction = {
-          messageId: full.message.id,
-          channelId: full.message.channelId ?? '',
-          userId: user.id,
-          userName: user.globalName ?? user.username ?? 'Discord user',
-          emoji: full.emoji.name ?? '',
-          emojiId: full.emoji.id ?? null,
-        };
+        const incoming = toIncomingReaction(full, user);
         for (const handler of reactionRemovedHandlers) handler(incoming);
       } catch {
         // The message was gone before we could read the reaction.
@@ -191,19 +233,18 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
     void (async () => {
       try {
         const full = reaction.partial ? await reaction.fetch() : reaction;
-        const incoming: DiscordIncomingReaction = {
-          messageId: full.message.id,
-          channelId: full.message.channelId ?? '',
-          userId: '',
-          userName: '',
-          emoji: full.emoji.name ?? '',
-          emojiId: full.emoji.id ?? null,
-        };
+        const incoming = toIncomingReaction(full, null);
         for (const handler of reactionClearedHandlers) handler(incoming);
       } catch {
         // The message was gone before we could read the reaction.
       }
     })();
+  });
+
+  // Every reaction on a message was removed at once, usually by a moderator.
+  client.on(Events.MessageReactionRemoveAll, (message) => {
+    const removed: DiscordIncomingReactionsRemoved = { messageId: message.id, channelId: message.channelId };
+    for (const handler of reactionsRemovedAllHandlers) handler(removed);
   });
 
   // Somebody came online, went idle or signed off.
@@ -319,6 +360,10 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
       reactionClearedHandlers.push(handler);
     },
 
+    onReactionsRemovedAll(handler) {
+      reactionsRemovedAllHandlers.push(handler);
+    },
+
     onPresence(handler) {
       presenceHandlers.push(handler);
     },
@@ -364,7 +409,7 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
           query: new URLSearchParams({ wait: 'true' }),
           ...(files.length > 0 ? { files } : {}),
           body: {
-            content: input.content.slice(0, MAX_DISCORD_CONTENT),
+            content: input.content.slice(0, DISCORD_MAX_CONTENT),
             username: input.username.slice(0, MAX_DISCORD_USERNAME),
             ...(input.avatarUrl ? { avatar_url: input.avatarUrl } : {}),
             // Only ping the users we deliberately mirrored as mentions. `parse`
@@ -393,7 +438,7 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
       await client.rest.patch(`/webhooks/${input.webhook.id}/${input.webhook.token}/messages/${input.discordMessageId}`, {
         auth: false,
         body: {
-          content: input.content.slice(0, MAX_DISCORD_CONTENT),
+          content: input.content.slice(0, DISCORD_MAX_CONTENT),
           allowed_mentions:
             input.allowedUserMentions.length > 0
               ? { users: input.allowedUserMentions }
@@ -407,6 +452,11 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
         `/webhooks/${input.webhook.id}/${input.webhook.token}/messages/${input.discordMessageId}`,
         { auth: false },
       );
+    },
+
+    async deleteMessageAsBot(input: BotDeleteInput) {
+      // Needs the bot's "Manage Messages" permission in the channel.
+      await client.rest.delete(`/channels/${input.channelId}/messages/${input.discordMessageId}`);
     },
 
     async addReaction(input: ReactionInput) {

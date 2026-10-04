@@ -13,8 +13,11 @@ import { Database } from '../src/db/index.ts';
 import { insertChannel, listChannels } from '../src/db/channels.ts';
 import { listCategories } from '../src/db/categories.ts';
 import { findUserById, findUserByDiscordId, insertUser } from '../src/db/users.ts';
-import { findBridgeMessageByHarmonyId } from '../src/db/bridge.ts';
-import { findEmojiByName, insertEmoji, toEmoji } from '../src/db/emojis.ts';
+import { findBridgeMessageByHarmonyId, hasSeenBridgeMessage } from '../src/db/bridge.ts';
+import { listLinkedAttachments } from '../src/db/attachments.ts';
+import { createEmbedService } from '../src/embeds/service.ts';
+import { deleteEmoji, findEmojiByName, insertEmoji, toEmoji } from '../src/db/emojis.ts';
+import { Permission } from '@harmony/shared';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createEmojiService } from '../src/emojis/service.ts';
 import { createEmojiImportService } from '../src/emojis/import.ts';
@@ -43,6 +46,9 @@ function createFakeTransport() {
     mirrors: [],
     edits: [],
     deletes: [],
+    // Deletions made through the bot, for messages the webhook did not post.
+    botDeletes: [],
+    failBotDelete: false,
     reactions: [],
     created: [],
     edited: [],
@@ -50,6 +56,7 @@ function createFakeTransport() {
     reactionAdded: [],
     reactionRemoved: [],
     reactionCleared: [],
+    reactionsRemovedAll: [],
     presence: [],
     guildEmojis: [{ id: '700', name: 'YES', animated: false }],
     // A mutable channel list, so a test can add one to import selectively.
@@ -103,6 +110,9 @@ function createFakeTransport() {
     onReactionCleared(handler) {
       state.reactionCleared.push(handler);
     },
+    onReactionsRemovedAll(handler) {
+      state.reactionsRemovedAll.push(handler);
+    },
     onPresence(handler) {
       state.presence.push(handler);
     },
@@ -128,6 +138,10 @@ function createFakeTransport() {
     async deleteMessage(input) {
       state.deletes.push(input);
     },
+    async deleteMessageAsBot(input) {
+      if (state.failBotDelete) throw new Error('Missing Permissions');
+      state.botDeletes.push(input);
+    },
     async download(url) {
       state.downloads.push(url);
       return state.downloadBytes;
@@ -142,19 +156,22 @@ function createFakeTransport() {
       }
     },
     emitEdit(edit) {
-      for (const handler of state.edited) handler(edit);
+      for (const handler of state.edited) handler({ mentions: [], fromBot: false, ...edit });
     },
     emitDelete(deletion) {
       for (const handler of state.deleted) handler(deletion);
     },
     emitReactionAdd(reaction) {
-      for (const handler of state.reactionAdded) handler(reaction);
+      for (const handler of state.reactionAdded) handler({ animated: false, ...reaction });
     },
     emitReactionRemove(reaction) {
-      for (const handler of state.reactionRemoved) handler(reaction);
+      for (const handler of state.reactionRemoved) handler({ animated: false, ...reaction });
     },
     emitReactionClear(reaction) {
-      for (const handler of state.reactionCleared) handler(reaction);
+      for (const handler of state.reactionCleared) handler({ animated: false, ...reaction });
+    },
+    emitReactionsRemovedAll(removed) {
+      for (const handler of state.reactionsRemovedAll) handler(removed);
     },
     emitPresence(presence) {
       for (const handler of state.presence) handler(presence);
@@ -1140,6 +1157,375 @@ try {
   check('and is no longer reported as online', !bridge.onlineDiscordIds().has('999'));
 
   transport.emitPresence({ userId: '999', online: true });
+
+  // 13b. A gif link from Discord arrives once. Discord sends an update each time
+  // it finishes unfurling the link, often while we are still downloading the
+  // gif, and each of those used to store a copy of its own.
+  settings.update({ embedsEnabled: true });
+  const embeds = createEmbedService({
+    sqlite: db.sqlite,
+    settings,
+    hub,
+    attachments,
+    renderMessage: (id) => messages.byId(id),
+  });
+  const gifUrl = 'https://93.184.216.34/funny.png';
+  const gifMessage = messages.createBridged(channelId, userId, gifUrl, [], null, { silent: true });
+  const realFetch = globalThis.fetch;
+  let gifFetches = 0;
+  globalThis.fetch = async () => {
+    gifFetches++;
+    await sleep(150);
+    return new Response(png, { headers: { 'content-type': 'image/png' } });
+  };
+  try {
+    for (let i = 0; i < 3; i++) embeds.resolve(gifMessage.id, gifUrl);
+    await sleep(800);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  check(
+    'a link resolved three times at once is kept once',
+    listLinkedAttachments(db.sqlite, gifMessage.id).length === 1,
+    `${listLinkedAttachments(db.sqlite, gifMessage.id).length} kept`,
+  );
+  check('and downloaded once', gifFetches === 1, `${gifFetches} fetches`);
+
+  // The unfurl updates carry the same text, so they are not edits.
+  check('an update with the same text is not an edit', messages.editBridged(gifMessage.id, gifUrl) === null);
+  check('and does not mark the message edited', !messages.byId(gifMessage.id)?.editedAt);
+
+  // The same Discord message delivered twice while the first is still being
+  // stored (a live event racing a history import) is only stored once.
+  transport.emit({
+    id: 'twice',
+    channelId: '111',
+    authorId: '999',
+    authorName: 'Discord Sam',
+    authorAvatarUrl: null,
+    replyToDiscordId: null,
+    content: 'delivered twice',
+    attachments: [{ url: 'https://cdn.example/twice.png', filename: 'twice.png', contentType: 'image/png', size: png.length }],
+    fromBot: false,
+  });
+  transport.emit({
+    id: 'twice',
+    channelId: '111',
+    authorId: '999',
+    authorName: 'Discord Sam',
+    authorAvatarUrl: null,
+    replyToDiscordId: null,
+    content: 'delivered twice',
+    attachments: [{ url: 'https://cdn.example/twice.png', filename: 'twice.png', contentType: 'image/png', size: png.length }],
+    fromBot: false,
+  });
+  await sleep(100);
+  check(
+    'a Discord message delivered twice at once is stored once',
+    messages.history(channelId, { limit: 50 }, userId).messages.filter((m) => m.content === 'delivered twice').length === 1,
+  );
+
+  // 13c. Keeping the two sides in step. Messages below come from the same
+  // Discord author unless a test says otherwise.
+  const fromDiscord = (fields) => ({
+    channelId: '111',
+    authorId: '999',
+    authorName: 'Discord Sam',
+    authorAvatarUrl: null,
+    replyToDiscordId: null,
+    attachments: [],
+    fromBot: false,
+    ...fields,
+  });
+  const recent = () => messages.history(channelId, { limit: 100 }, userId).messages;
+  const modAuth = { user: { id: userId }, permissions: Permission.ManageMessages, sessionId: 'sm', token: 'tm' };
+
+  // Our own edit of a mirrored message comes back from Discord as an update, in
+  // Discord's form. It must not be applied over what was written here.
+  const ownWords = messages.create(auth, channelId, 'my own words, @bob', [], original.id);
+  await sleep(50);
+  const ownDiscordId = findBridgeMessageByHarmonyId(db.sqlite, ownWords.id)?.discord_message_id;
+  transport.emitEdit({
+    id: ownDiscordId,
+    channelId: '111',
+    content: '> **alice**: the original\nmy own words, @bob',
+    fromBot: true,
+  });
+  await sleep(50);
+  check(
+    'our own edit echoed back by discord is ignored',
+    messages.byId(ownWords.id)?.content === 'my own words, @bob' && !messages.byId(ownWords.id)?.editedAt,
+    String(messages.byId(ownWords.id)?.content),
+  );
+
+  // A Discord edit that adds a mention reads the same as a message sent with one.
+  transport.emit(fromDiscord({ id: 'e1', content: 'before the edit' }));
+  await sleep(50);
+  transport.emitEdit({ id: 'e1', channelId: '111', content: 'after <@555>', mentions: [{ id: '555', name: 'Rhea' }] });
+  await sleep(50);
+  check(
+    'a discord edit rewrites its mentions',
+    recent().some((m) => m.content === 'after @discord_555'),
+  );
+
+  // A Discord-authored message deleted here is deleted through the bot, since
+  // the webhook can only delete its own; the mapping goes either way.
+  transport.emit(fromDiscord({ id: 'p1', content: 'deleted here by a moderator' }));
+  await sleep(50);
+  const doomed = recent().find((m) => m.content === 'deleted here by a moderator');
+  const webhookDeletesBefore = transport.state.deletes.length;
+  messages.remove(modAuth, doomed.id);
+  await sleep(50);
+  check(
+    'a discord message deleted here is deleted by the bot',
+    transport.state.botDeletes.at(-1)?.discordMessageId === 'p1' && transport.state.botDeletes.at(-1)?.channelId === '111',
+    JSON.stringify(transport.state.botDeletes),
+  );
+  check('the webhook is not asked to delete it', transport.state.deletes.length === webhookDeletesBefore);
+  check('and its mapping is dropped', findBridgeMessageByHarmonyId(db.sqlite, doomed.id) === null);
+
+  transport.emit(fromDiscord({ id: 'p2', content: 'the bot may not delete this' }));
+  await sleep(50);
+  const undeletable = recent().find((m) => m.content === 'the bot may not delete this');
+  transport.state.failBotDelete = true;
+  messages.remove(modAuth, undeletable.id);
+  await sleep(50);
+  transport.state.failBotDelete = false;
+  check(
+    'the mapping is dropped even when discord refuses the delete',
+    findBridgeMessageByHarmonyId(db.sqlite, undeletable.id) === null,
+  );
+
+  // A Discord reply to a message deleted here still arrives, as a plain message.
+  // The deletion is applied the way one made while the bridge was down would be,
+  // leaving the mapping to the deleted parent in place.
+  transport.emit(fromDiscord({ id: 'p3', content: 'about to be deleted' }));
+  await sleep(50);
+  const deletedParent = recent().find((m) => m.content === 'about to be deleted');
+  messages.deleteBridged(deletedParent.id);
+  transport.state.downloadBytes = png;
+  transport.emit(
+    fromDiscord({
+      id: 'p4',
+      replyToDiscordId: 'p3',
+      content: 'answering a deleted message',
+      attachments: [{ url: 'https://cdn.example/answer.png', filename: 'answer.png', contentType: 'image/png', size: png.length }],
+    }),
+  );
+  await sleep(100);
+  const orphanReply = recent().find((m) => m.content === 'answering a deleted message');
+  check('a discord reply to a message deleted here still arrives', orphanReply !== undefined);
+  check('as a plain message with its attachment', orphanReply?.replyTo === null && orphanReply?.attachments.length === 1);
+  check('and is recorded as seen', hasSeenBridgeMessage(db.sqlite, 'p4'));
+
+  // A message longer than Discord allows goes out in several parts, the first
+  // carrying the files and standing for the message in later edits.
+  const longText = `${'word '.repeat(700)}end`;
+  const mirrorsBeforeLong = transport.state.mirrors.length;
+  const longMessage = messages.create(auth, channelId, longText, [], null);
+  await sleep(50);
+  const longParts = transport.state.mirrors.slice(mirrorsBeforeLong);
+  check(
+    'a long message is split for discord',
+    longParts.length === 2 && longParts.every((part) => part.content.length <= 2000),
+    longParts.map((part) => part.content.length).join(','),
+  );
+  check(
+    'nothing is lost in the split',
+    longParts.map((part) => part.content).join(' ') === longText,
+  );
+  check(
+    'the first part stands for the message',
+    findBridgeMessageByHarmonyId(db.sqlite, longMessage.id)?.discord_message_id === `discord-${mirrorsBeforeLong + 1}`,
+  );
+  check('the following parts are remembered as ours', hasSeenBridgeMessage(db.sqlite, `discord-${mirrorsBeforeLong + 2}`));
+  messages.edit(auth, longMessage.id, `${longText} edited`);
+  await sleep(50);
+  check(
+    'an edit too long for one discord message is shortened visibly',
+    transport.state.edits.at(-1)?.content.length <= 2000 &&
+      transport.state.edits.at(-1)?.content.endsWith('*(continued in Harmony)*'),
+  );
+
+  // Every reaction cleared at once on Discord clears them here too.
+  check('the target message has reactions to clear', (messages.byId(target.id)?.reactions.length ?? 0) > 0);
+  const reactionsOutBeforeClear = transport.state.reactions.length;
+  transport.emitReactionsRemovedAll({ messageId: targetDiscordId, channelId: '111' });
+  await sleep(50);
+  check('removing every reaction on discord clears them here', messages.byId(target.id)?.reactions.length === 0);
+  check(
+    'and clients are told',
+    broadcasts.some((entry) => entry.event === 'MESSAGE_REACTIONS_CLEAR' && entry.payload?.messageId === target.id),
+  );
+  check('and nothing is mirrored back', transport.state.reactions.length === reactionsOutBeforeClear);
+
+  // A forward carries the forwarded message's text and files, marked as a forward.
+  transport.state.downloadBytes = png;
+  transport.emit(
+    fromDiscord({
+      id: 'fw1',
+      forwarded: true,
+      content: 'words from elsewhere',
+      attachments: [{ url: 'https://cdn.example/fw.png', filename: 'fw.png', contentType: 'image/png', size: png.length }],
+    }),
+  );
+  await sleep(100);
+  const forwarded = recent().find((m) => m.content.endsWith('words from elsewhere'));
+  check(
+    'a forwarded discord message arrives, marked as a forward',
+    forwarded?.content === '*Forwarded*\nwords from elsewhere' && forwarded.attachments.length === 1,
+    String(forwarded?.content),
+  );
+
+  // Several deletions in a row, as a bulk delete hands them on, all land.
+  transport.emit(fromDiscord({ id: 'b1', content: 'purged one' }));
+  transport.emit(fromDiscord({ id: 'b2', content: 'purged two' }));
+  await sleep(50);
+  transport.emitDelete({ id: 'b1', channelId: '111' });
+  transport.emitDelete({ id: 'b2', channelId: '111' });
+  await sleep(50);
+  check(
+    'a run of discord deletions removes every message',
+    !recent().some((m) => m.content === 'purged one' || m.content === 'purged two'),
+  );
+
+  // An emoji learned from a message is announced, so connected clients render it.
+  transport.emit(fromDiscord({ id: 'em1', content: 'look <:fresh:802>' }));
+  await sleep(100);
+  check(
+    'a learned emoji is announced to clients',
+    broadcasts.some((entry) => entry.event === 'EMOJI_CREATE' && entry.payload?.name === 'fresh' && entry.payload?.external === true),
+  );
+
+  // An animated emoji first seen in a reaction is learned as a gif.
+  transport.emitReactionAdd({
+    messageId: targetDiscordId,
+    channelId: '111',
+    userId: '777',
+    userName: 'Discord Rhea',
+    emoji: 'spin',
+    emojiId: '803',
+    animated: true,
+  });
+  await sleep(100);
+  check(
+    'an animated reaction emoji is fetched as a gif',
+    transport.state.downloads.includes('https://cdn.discordapp.com/emojis/803.gif'),
+  );
+
+  // The bot's reaction stands in for Harmony's reactors only. A Discord user
+  // reacting the same way must not keep it there once the last of them leaves.
+  const shared = messages.create(auth, channelId, 'react together', [], null);
+  await sleep(50);
+  const sharedDiscordId = findBridgeMessageByHarmonyId(db.sqlite, shared.id)?.discord_message_id;
+  messages.toggleReaction(auth, shared.id, '🌟', null);
+  await sleep(50);
+  transport.emitReactionAdd({
+    messageId: sharedDiscordId,
+    channelId: '111',
+    userId: '777',
+    userName: 'Discord Rhea',
+    emoji: '🌟',
+    emojiId: null,
+  });
+  await sleep(50);
+  messages.toggleReaction(auth, shared.id, '🌟', null);
+  await sleep(50);
+  check(
+    'the bot reaction goes once no harmony member is left reacting',
+    transport.state.reactions.at(-1)?.kind === 'remove' &&
+      transport.state.reactions.at(-1)?.discordMessageId === sharedDiscordId &&
+      transport.state.reactions.at(-1)?.emoji === encodeURIComponent('🌟'),
+    JSON.stringify(transport.state.reactions.at(-1)),
+  );
+
+  // A reaction whose custom emoji has since been deleted can still be taken
+  // away, but not added again.
+  insertEmoji(db.sqlite, {
+    id: 'emoji-temp',
+    name: 'temp',
+    hash: 'deadbeef',
+    contentType: 'image/png',
+    animated: false,
+    createdBy: userId,
+    createdAt: new Date().toISOString(),
+  });
+  messages.toggleReaction(auth, shared.id, ':temp:', 'emoji-temp');
+  messages.toggleReaction(bobAuth, shared.id, ':temp:', 'emoji-temp');
+  deleteEmoji(db.sqlite, 'emoji-temp');
+  let removeError = null;
+  try {
+    messages.toggleReaction(auth, shared.id, ':temp:', 'emoji-temp');
+  } catch (error) {
+    removeError = error;
+  }
+  check('a reaction of a deleted emoji can be removed', removeError === null, String(removeError?.message));
+  check(
+    'and only that one reaction is gone',
+    messages.byId(shared.id)?.reactions.find((reaction) => reaction.emoji === ':temp:')?.count === 1,
+  );
+  let addError = null;
+  try {
+    messages.toggleReaction(auth, shared.id, ':temp:', 'emoji-temp');
+  } catch (error) {
+    addError = error;
+  }
+  check('but a deleted emoji cannot be added', addError?.code === 'invalid_emoji', String(addError?.code));
+  let clearError = null;
+  try {
+    messages.clearReactions(modAuth, shared.id, ':temp:', 'emoji-temp');
+  } catch (error) {
+    clearError = error;
+  }
+  check(
+    'a moderator can clear a deleted emoji',
+    clearError === null && !messages.byId(shared.id)?.reactions.some((reaction) => reaction.emoji === ':temp:'),
+    String(clearError?.message),
+  );
+
+  // A stand-in's name follows the one its Discord author goes by, and clients
+  // hear about it. A reaction, which only knows the account's global name, does
+  // not change it.
+  const samId = findUserByDiscordId(db.sqlite, '999')?.id;
+  transport.emit(fromDiscord({ id: 'n1', authorName: 'Samuel', content: 'new name, who dis' }));
+  await sleep(50);
+  check('a stand-in takes on a new discord name', findUserByDiscordId(db.sqlite, '999')?.display_name === 'Samuel');
+  check(
+    'and clients are told',
+    broadcasts.some((entry) => entry.event === 'MEMBER_UPDATE' && entry.payload?.userId === samId),
+  );
+  transport.emitReactionAdd({
+    messageId: sharedDiscordId,
+    channelId: '111',
+    userId: '777',
+    userName: 'rhea_global',
+    emoji: '👋',
+    emojiId: null,
+  });
+  await sleep(50);
+  check('a reaction does not rename a stand-in', findUserByDiscordId(db.sqlite, '777')?.display_name === 'Discord Rhea');
+
+  // An edit brings the inbox in line: a name added to a message is found there,
+  // a name taken out is not, and a reply stays a reply throughout.
+  const inbox = () => messages.mentions(bobAuth, { limit: 50 }).mentions;
+  const plain = messages.create(auth, channelId, 'nobody named yet', [], null);
+  messages.edit(auth, plain.id, 'now naming @bob');
+  check('naming someone in an edit reaches their inbox', inbox().some((entry) => entry.message.id === plain.id && entry.kind === 'mention'));
+  messages.edit(auth, plain.id, 'nobody named again');
+  check('taking the name out removes it', !inbox().some((entry) => entry.message.id === plain.id));
+
+  const bobSays = messages.create(bobAuth, channelId, 'bob says something', [], null);
+  const answer = messages.create(auth, channelId, 'an answer', [], bobSays.id);
+  messages.edit(auth, answer.id, 'an answer for @bob');
+  messages.edit(auth, answer.id, 'an answer, edited');
+  check(
+    'a reply stays in the inbox through edits',
+    inbox().some((entry) => entry.message.id === answer.id && entry.kind === 'reply'),
+  );
+
+  const bridgedMention = messages.createBridged(channelId, samId, 'from discord', [], null);
+  messages.editBridged(bridgedMention.id, 'from discord, for @bob');
+  check('a bridged edit that names someone reaches their inbox', inbox().some((entry) => entry.message.id === bridgedMention.id));
 
   // 14. Disabling stops the transport, and takes the presence with it.
   settings.updateBridge({ enabled: false });

@@ -145,7 +145,10 @@ The bridge mirrors messages both ways. On the Discord side you need to:
    message text readable. Presence is what tells Harmony who on the Discord side is
    online, for the member list of a bridged channel.
 3. Invite the bot with at least **View Channels**, **Send Messages**, **Read
-   Message History**, **Add Reactions** and **Manage Webhooks**.
+   Message History**, **Add Reactions** and **Manage Webhooks**. Add **Manage
+   Messages** too if a message written on Discord should also disappear there when
+   it is deleted in Harmony; a webhook can only delete its own messages, so the bot
+   does that itself.
 
 Intents are read when the bot connects, so restart Harmony after changing them. If
 an intent is requested that has not been enabled, Discord refuses the connection
@@ -175,8 +178,19 @@ Text, images, videos, avatars, replies, reactions, edits and deletes are all
 mirrored in both directions. Images and clips are transferred between the two
 systems, and anything that cannot be mirrored (an unsupported file type, or one
 above the instance's upload limit) is preserved as a link instead of being dropped.
-Discord's 2000 character message limit means longer Harmony messages are truncated
-when mirrored out.
+A forwarded Discord message arrives with the forwarded text and files, under a
+*Forwarded* line. A moderator's bulk delete on Discord deletes every message here,
+and clearing all reactions from a message there clears them here. Our own webhook
+messages, and Discord's echo of our own edits to them, are never bridged back in.
+
+Discord allows 2000 characters in a message and Harmony 4000, so a longer Harmony
+message is split into several Discord messages, breaking at a line or a space where
+it can. Files ride on the first part, and the first part is the one mapped to the
+Harmony message: edits, deletes and reactions reach it alone. An edit that no longer
+fits in it is shortened with a *(continued in Harmony)* note, and the later parts of
+a split message keep their original text and are not deleted with it. Messages that
+long are rare, and tracking every part would need its own table; this keeps the
+mapping one to one.
 
 Custom emoji are matched by name: a Harmony `:YES:` is sent to Discord as its
 `<:YES:id>` tag, and a Discord `<:YES:id>` tag is turned back into `:YES:` on the
@@ -204,11 +218,13 @@ Two limitations come from mirroring through a single app account: Discord webhoo
 cannot post real replies, so a Harmony reply is mirrored as a quoted line, and
 Discord has no webhook reaction route at all, so the bot places reactions itself —
 they appear as the bot, and one reaction stands in for however many Harmony users
-reacted.
+reacted. It is removed once the last Harmony member takes theirs back; Discord
+users' own reactions, which Harmony also shows, do not keep it there.
 
 Display names and profile pictures are mirrored to Discord automatically (they
 become the webhook username and avatar). A Discord user's name and picture are
-imported into Harmony the first time they post. Since Discord fetches avatars
+imported into Harmony the first time they post, and a stand-in's name follows later
+changes as they post again. Since Discord fetches avatars
 directly from this instance, outbound avatars need a **Public base URL** set in
 **Admin → Bridge** — the address people use to reach the instance from the
 internet. A `localhost` address will not work. Leave it blank to send names only.
