@@ -1490,14 +1490,17 @@ button.mention:hover {
   padding: 0 1.1rem 1.1rem;
 }
 
+/* The buttons sit by the last line, so a draft that grows taller does not leave them floating mid-box. */
 .composer form {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 0.5rem;
 }
 
 .composer form button {
   flex-shrink: 0;
+  /* Centers the 38px buttons on the field while it is one line tall (see .text-input). */
+  margin-bottom: calc((0.925rem * 1.4 + 1.5rem + 2px - 38px) / 2);
 }
 
 .file-input {
@@ -1514,6 +1517,11 @@ button.mention:hover {
   color: var(--h-text);
   font: inherit;
   font-size: 0.925rem;
+  line-height: 1.4;
+  /* The composer sizes itself to its content (fitToContent) up to this cap, then scrolls. */
+  max-height: min(40vh, 16rem);
+  overflow-y: auto;
+  resize: none;
   transition: border-color var(--h-duration) var(--h-ease),
               box-shadow var(--h-duration) var(--h-ease),
               background var(--h-duration) var(--h-ease);
@@ -1528,12 +1536,6 @@ button.mention:hover {
 
 .text-input::placeholder {
   color: var(--h-text-faint);
-}
-
-.text-input::-webkit-search-cancel-button,
-.text-input::-webkit-search-decoration {
-  -webkit-appearance: none;
-  appearance: none;
 }
 
 .attach {

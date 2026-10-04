@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import {
     ALLOWED_ATTACHMENT_TYPES,
     LIMITS,
@@ -12,6 +12,7 @@
   import { ApiError, api } from '../lib/api';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
+  import { drafts, type Draft } from '../lib/drafts.svelte';
   import { emojis } from '../lib/emojis.svelte';
   import { mediaFilesFrom } from '../lib/files';
   import { members } from '../lib/members.svelte';
@@ -28,14 +29,31 @@
   const maxSuggestions = 8;
   /** How stale the member directory may be before a mention refreshes it. */
   const directoryMaxAgeMs = 30_000;
+  /**
+   * Safari honors `autocorrect` on a textarea too, but Svelte's element types
+   * only list it for inputs, so it is spread in rather than written inline.
+   */
+  const noAutocorrect: Record<string, string> = { autocorrect: 'off' };
 
-  let value = $state('');
+  /**
+   * The composer is mounted once and stays put while channels change, so what is
+   * being written is kept per channel rather than in the component: otherwise a
+   * draft started in one channel would be sent into whichever is open next.
+   */
+  const draftKey = $derived(
+    session.user && chat.activeChannelId ? `${session.user.id}:${chat.activeChannelId}` : null,
+  );
+  const value = $derived(drafts.get(draftKey).text);
+  const pending = $derived(drafts.get(draftKey).attachments);
+
   let busy = $state(false);
-  let uploading = $state(false);
+  /** Upload batches queued or running; each waits for the one before it. */
+  let uploadBatches = $state(0);
+  const uploading = $derived(uploadBatches > 0);
+  let uploadChain: Promise<void> = Promise.resolve();
   let error = $state<string | null>(null);
-  let pending = $state<Attachment[]>([]);
   let fileInput = $state<HTMLInputElement | null>(null);
-  let textInput = $state<HTMLInputElement | null>(null);
+  let textInput = $state<HTMLTextAreaElement | null>(null);
   let showPicker = $state(false);
   let showGifs = $state(false);
 
@@ -68,32 +86,53 @@
     return `${file.name} is too large — ${kind} are at most ${Math.round(limit / (1024 * 1024))} MB.`;
   }
 
-  /** Uploads each file and queues it on the message being written. */
-  async function uploadFiles(files: File[]): Promise<void> {
-    if (files.length === 0) return;
+  /**
+   * Uploads each file and queues it on the draft of the channel it was added in.
+   *
+   * A paste, a drop and the file picker can each start a batch while another is
+   * still going, so batches run one after another: that keeps the attachment
+   * limit check honest and keeps Send disabled until the last one is done.
+   */
+  function uploadFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return Promise.resolve();
+    const key = draftKey;
     error = null;
-    uploading = true;
-    try {
-      for (const file of files) {
-        if (pending.length >= maxAttachments) {
-          error = `You can attach at most ${maxAttachments} files per message.`;
-          break;
-        }
-        const rejection = tooLarge(file);
-        if (rejection) {
-          error = rejection;
-          continue;
-        }
+    uploadBatches += 1;
+    uploadChain = uploadChain
+      .then(() => uploadBatch(key, files))
+      .finally(() => {
+        uploadBatches -= 1;
+      });
+    return uploadChain;
+  }
+
+  /**
+   * One file failing does not stop the rest of the batch; whatever could not be
+   * attached is listed together once the batch is done.
+   */
+  async function uploadBatch(key: string | null, files: File[]): Promise<void> {
+    const problems: string[] = [];
+    for (const file of files) {
+      if (drafts.get(key).attachments.length >= maxAttachments) {
+        problems.push(`You can attach at most ${maxAttachments} files per message.`);
+        break;
+      }
+      const rejection = tooLarge(file);
+      if (rejection) {
+        problems.push(rejection);
+        continue;
+      }
+      try {
         const form = new FormData();
         form.append('file', file);
         const attachment = await api<Attachment>('/attachments', { method: 'POST', body: form });
-        pending = [...pending, attachment];
+        drafts.setAttachments(key, [...drafts.get(key).attachments, attachment]);
+      } catch (cause) {
+        const reason = cause instanceof ApiError ? cause.message : String(cause);
+        problems.push(`${file.name} could not be uploaded: ${reason}`);
       }
-    } catch (cause) {
-      error = cause instanceof ApiError ? cause.message : String(cause);
-    } finally {
-      uploading = false;
     }
+    if (problems.length > 0) error = problems.join(' ');
   }
 
   async function onFiles(event: Event): Promise<void> {
@@ -116,11 +155,16 @@
   /** Uploads whatever was dropped on the chat pane, handed over by the queue. */
   $effect(() => {
     if (uploads.count === 0) return;
-    void uploadFiles(uploads.take());
+    const files = uploads.take();
+    // Only the queue should rerun this, not the draft or upload state it touches.
+    untrack(() => void uploadFiles(files));
   });
 
   function removePending(id: string): void {
-    pending = pending.filter((attachment) => attachment.id !== id);
+    drafts.setAttachments(
+      draftKey,
+      pending.filter((attachment) => attachment.id !== id),
+    );
   }
 
   /**
@@ -135,18 +179,33 @@
       return;
     }
     error = null;
-    pending = [...pending, attachment];
+    drafts.setAttachments(draftKey, [...pending, attachment]);
   }
 
   /**
-   * Inserts whatever the picker chose. A server emoji arrives as its `:name:`
-   * shortcode and a unicode one as the character itself, so either way the text
-   * is what goes in the field.
+   * Inserts whatever the picker chose where the caret was, replacing any
+   * selection, then puts the caret back after it so typing carries on. A server
+   * emoji arrives as its `:name:` shortcode and a unicode one as the character
+   * itself, so either way the text is what goes in the field.
+   *
+   * A textarea keeps its selection while the picker has focus, which is what
+   * makes the caret still readable here.
    */
-  function insertEmoji(emoji: string): void {
-    const separator = value.length > 0 && !value.endsWith(' ') ? ' ' : '';
-    value = `${value}${separator}${emoji}`;
+  async function insertEmoji(emoji: string): Promise<void> {
+    const input = textInput;
+    const start = input?.selectionStart ?? value.length;
+    const end = input?.selectionEnd ?? value.length;
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const lead = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const trail = after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+    drafts.setText(draftKey, `${before}${lead}${emoji}${trail}${after}`);
     showPicker = false;
+
+    await tick();
+    const position = start + lead.length + emoji.length + trail.length;
+    input?.focus();
+    input?.setSelectionRange(position, position);
   }
 
   const replyName = $derived(
@@ -193,10 +252,11 @@
       : 0,
   );
 
-  function startSlowmodeCooldown(): void {
-    if (!slowmodeApplies) return;
-    cooldownChannelId = chat.activeChannelId;
-    cooldownEndsAt = Date.now() + slowmodeSeconds * 1000;
+  /** Takes the channel and its wait as they were when the post was sent. */
+  function startSlowmodeCooldown(channelId: string | null, seconds: number): void {
+    if (seconds <= 0) return;
+    cooldownChannelId = channelId;
+    cooldownEndsAt = Date.now() + seconds * 1000;
     clock = Date.now();
   }
 
@@ -362,7 +422,7 @@
     if (!input || !trigger) return;
 
     const caret = input.selectionStart ?? input.value.length;
-    value = `${input.value.slice(0, trigger.start)}${suggestion.insert}${input.value.slice(caret)}`;
+    drafts.setText(draftKey, `${input.value.slice(0, trigger.start)}${suggestion.insert}${input.value.slice(caret)}`);
     activeTrigger = null;
 
     await tick();
@@ -395,6 +455,17 @@
       }
     }
 
+    // Enter sends and Shift+Enter starts a new line, as in Discord. A key that
+    // finishes an IME composition is left to the IME, or picking a Japanese
+    // candidate would send the message. On touch keyboards there is no Shift, so
+    // the send key keeps sending; multi-line text there comes from pasting.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      void send();
+      return;
+    }
+
+    // Escape only ever backs out of something; the draft itself is never cleared.
     if (event.key === 'Escape') {
       if (activeTrigger) {
         event.preventDefault();
@@ -408,34 +479,126 @@
     }
   }
 
-  async function submit(event: SubmitEvent): Promise<void> {
+  function onSubmit(event: SubmitEvent): void {
     event.preventDefault();
+    void send();
+  }
+
+  /**
+   * Sends the draft. The composer is emptied as soon as the message is on its
+   * way, so anything typed while the request is in flight belongs to the next
+   * message; if the send fails, the failed text is put back in front of it
+   * rather than either one being lost.
+   */
+  async function send(): Promise<void> {
+    const key = draftKey;
     const content = value.trim();
-    if (busy || uploading || timeoutUntil !== null || slowmodeRemaining > 0) return;
+    if (key === null || busy || uploading || timeoutUntil !== null || slowmodeRemaining > 0) return;
     if (!content && pending.length === 0) return;
+
+    const sent = drafts.get(key);
+    const replyTarget = chat.replyTarget;
+    const channelId = chat.activeChannelId;
+    const cooldownSeconds = slowmodeApplies ? slowmodeSeconds : 0;
 
     busy = true;
     error = null;
+    // sendMessage reads the open channel before it awaits anything, so it posts
+    // where the draft was written even if the channel changes right after.
+    const request = chat.sendMessage(
+      content,
+      sent.attachments.map((attachment) => attachment.id),
+      replyTarget?.id ?? null,
+    );
+    drafts.clear(key);
+    chat.replyTarget = null;
+    activeTrigger = null;
+
     try {
-      await chat.sendMessage(
-        content,
-        pending.map((attachment) => attachment.id),
-        chat.replyTarget?.id ?? null,
-      );
-      value = '';
-      pending = [];
-      chat.replyTarget = null;
-      activeTrigger = null;
-      startSlowmodeCooldown();
+      await request;
+      startSlowmodeCooldown(channelId, cooldownSeconds);
     } catch (cause) {
       // The server refused for slowmode: honor it even if this tab had not
       // started its own countdown, e.g. the first post after a reload.
-      if (cause instanceof ApiError && cause.code === 'slowmode') startSlowmodeCooldown();
+      if (cause instanceof ApiError && cause.code === 'slowmode') startSlowmodeCooldown(channelId, cooldownSeconds);
       error = cause instanceof ApiError ? cause.message : String(cause);
+      await restoreDraft(key, sent, replyTarget, channelId);
     } finally {
       busy = false;
     }
   }
+
+  /**
+   * Puts a failed message back in its channel's draft. Text typed since goes on
+   * a new line after it, with the caret kept where it was in that newer text.
+   */
+  async function restoreDraft(
+    key: string,
+    sent: Draft,
+    replyTarget: typeof chat.replyTarget,
+    channelId: string | null,
+  ): Promise<void> {
+    const current = drafts.get(key);
+    const prefix = current.text.length > 0 ? `${sent.text}\n` : sent.text;
+    const known = new Set(sent.attachments.map((attachment) => attachment.id));
+    drafts.set(key, {
+      text: `${prefix}${current.text}`,
+      attachments: [...sent.attachments, ...current.attachments.filter((attachment) => !known.has(attachment.id))],
+    });
+    if (chat.activeChannelId === channelId && chat.replyTarget === null) chat.replyTarget = replyTarget;
+
+    const input = textInput;
+    if (key !== draftKey || !input || document.activeElement !== input) return;
+    const caretStart = input.selectionStart + prefix.length;
+    const caretEnd = input.selectionEnd + prefix.length;
+    await tick();
+    input.setSelectionRange(caretStart, caretEnd);
+  }
+
+  /**
+   * Grows the field with its content. CSS caps the height, after which it
+   * scrolls; measuring from `auto` lets it shrink again as lines are removed.
+   */
+  function fitToContent(): void {
+    const input = textInput;
+    if (!input) return;
+    input.style.height = 'auto';
+    // scrollHeight leaves out the border, which the border-box height includes.
+    const style = getComputedStyle(input);
+    const borders = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+    input.style.height = `${input.scrollHeight + borders}px`;
+  }
+
+  $effect(() => {
+    void value;
+    fitToContent();
+  });
+
+  /*
+   * A change of width rewraps the draft onto a different number of lines: a
+   * resized window, a sidebar opening, or the page coming back from being hidden,
+   * where it measured nothing. Height changes are this composer's own doing, so
+   * they are ignored rather than fed back in.
+   */
+  $effect(() => {
+    const input = textInput;
+    if (!input) return;
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      fitToContent();
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
+  });
+
+  /** A suggestion list or error from another channel's draft does not apply here. */
+  $effect(() => {
+    void draftKey;
+    activeTrigger = null;
+    error = null;
+  });
 </script>
 
 <div class="composer" onpaste={onPaste}>
@@ -512,7 +675,7 @@
     </ul>
   {/if}
 
-  <form onsubmit={submit}>
+  <form onsubmit={onSubmit}>
     <button
       type="button"
       class="attach"
@@ -543,25 +706,33 @@
       {#if uploading}…{:else}<Icon name="paperclip" size={20} />{/if}
     </button>
     <input class="file-input" type="file" accept={acceptAttribute} multiple bind:this={fileInput} onchange={onFiles} />
-    <input
+    <!--
+      Slowmode only holds back sending (see `send`): the field stays enabled so
+      the next message can be written during the wait, and a phone keyboard is
+      not dismissed after every post.
+    -->
+    <textarea
       class="text-input"
-      type="search"
-      bind:value
+      rows="1"
+      bind:value={() => value, (text) => drafts.setText(draftKey, text)}
       bind:this={textInput}
       placeholder={`Message #${chat.activeChannel?.name ?? ''}`}
       autocomplete="off"
-      autocorrect="off"
+      {...noAutocorrect}
       enterkeyhint="send"
       aria-label="Message"
       aria-autocomplete="list"
-      disabled={timeoutUntil !== null || slowmodeRemaining > 0}
+      disabled={timeoutUntil !== null}
       oninput={onInput}
       onkeydown={onKeydown}
       onclick={updateAutocomplete}
-      onkeyup={updateAutocomplete}
+      onkeyup={(event) => {
+        // Escape has just dismissed the list; looking again would reopen it.
+        if (event.key !== 'Escape') updateAutocomplete();
+      }}
       onfocus={updateAutocomplete}
       onblur={() => (activeTrigger = null)}
-    />
+    ></textarea>
     <button type="submit" disabled={busy || uploading || timeoutUntil !== null || slowmodeRemaining > 0}>Send</button>
   </form>
 </div>
