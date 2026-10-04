@@ -2,6 +2,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import {
   GatewayCloseCode,
+  GatewayEvent,
   Permission,
   changePasswordSchema,
   permissionsToString,
@@ -32,10 +33,22 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
     };
   }
 
+  /**
+   * Everyone else sees a member's name and picture too, in the member list and on
+   * their messages, so a change to their own profile is announced just like an
+   * administrator's edit. Settings only they see ride along harmlessly, since the
+   * event carries nothing but the id.
+   */
+  function announce(userId: string): void {
+    deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId });
+  }
+
   app.patch('/api/v1/users/@me', async (request) => {
     const auth = requireAuth(request);
     const input = parseBody(updateProfileSchema, request.body);
-    return present(deps.users.updateProfile(auth.user.id, input));
+    const response = present(deps.users.updateProfile(auth.user.id, input));
+    announce(auth.user.id);
+    return response;
   });
 
   /**
@@ -74,12 +87,16 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
       throw new HttpError(413, 'payload_too_large', 'That image is too large.');
     }
 
-    return present(await deps.users.updateAvatar(auth.user.id, { contentType: file.mimetype, data }));
+    const response = present(await deps.users.updateAvatar(auth.user.id, { contentType: file.mimetype, data }));
+    announce(auth.user.id);
+    return response;
   });
 
   app.delete('/api/v1/users/@me/avatar', async (request) => {
     const auth = requireAuth(request);
-    return present(deps.users.clearAvatar(auth.user.id));
+    const response = present(deps.users.clearAvatar(auth.user.id));
+    announce(auth.user.id);
+    return response;
   });
 
   app.get('/api/v1/users/:id/avatar', async (request, reply) => {

@@ -93,7 +93,7 @@ status codes and their codes:
 
 | Status | Codes you may see |
 | --- | --- |
-| 400 | `validation_error`, `invalid_reply`, `invalid_emoji`, `invalid_attachment`, `invalid_upload`, `default_role`, `cannot_moderate_self`, `cannot_moderate_bot` |
+| 400 | `validation_error`, `bad_request`, `invalid_reply`, `invalid_emoji`, `invalid_attachment`, `invalid_upload`, `default_role`, `cannot_moderate_self`, `cannot_moderate_bot` |
 | 401 | `unauthorized`, `invalid_credentials` |
 | 403 | `forbidden`, `timed_out`, `account_banned`, `target_is_admin`, `invite_required`, `invalid_invite`, `invite_expired`, `invite_exhausted`, `immutable_role`, `permission_escalation` |
 | 404 | `not_found`, `channel_not_found`, `message_not_found`, `role_not_found`, `user_not_found`, `emoji_not_found`, `sticker_not_found`, `sticker_missing`, `attachment_not_found`, `avatar_not_found`, `not_banned` |
@@ -104,7 +104,8 @@ status codes and their codes:
 | 500 | `internal_error` |
 
 `validation_error` means the body or query string failed schema validation; its `message` names the
-offending field. A missing route returns `404` with `{ "error": { "code": "not_found", ... } }`.
+offending field. `bad_request` means the request was refused before reaching a handler, such as a body
+that is not valid JSON or a JSON request with an empty body. A missing route returns `404` with `{ "error": { "code": "not_found", ... } }`.
 
 ## Permissions
 
@@ -1814,12 +1815,28 @@ The protocol mirrors Discord's framing: every message is a JSON object `{ op, t?
    ```json
    { "op": 0, "t": "READY", "d": { "user": { "...": "..." }, "gateway_version": 1 } }
    ```
-   On failure it closes the socket with code **4004**.
+   On failure it closes the socket with code **4004**. IDENTIFY must arrive within one
+   `heartbeat_interval`, or the socket is closed with **4003**.
 
 ### Heartbeat
 
-Send `{ "op": 1, "d": null }` every `heartbeat_interval` milliseconds; the server replies with
-`{ "op": 11, "d": null }`. Heartbeats are optional but recommended to detect dead connections.
+Send `{ "op": 1, "d": null }` every `heartbeat_interval` milliseconds (45 seconds by default); the
+server replies with `{ "op": 11, "d": null }`. Heartbeats are **required**:
+
+- A connection the server hears nothing from for about two intervals (the exact allowance is
+  `2 × heartbeat_interval` plus up to five seconds) is presumed dead and closed with `4009`, and its
+  member goes offline if it was their last connection. Any frame counts, but only heartbeats are
+  sent on an idle socket.
+- A connection that has not sent IDENTIFY within one interval of HELLO is closed with `4003`.
+
+Clients should treat a missing ACK the same way from their side: if the previous heartbeat is still
+unanswered when the next one is due, the connection has gone quiet without closing (a network
+change, a proxy holding a dead line), so close it and reconnect. The web client does exactly this,
+and also checks the connection at once when the browser reports it is back online or the tab
+returns to the foreground.
+
+Because a healthy socket carries a heartbeat and its ACK every interval, a reverse proxy's idle
+timeout only needs to be comfortably longer than `heartbeat_interval`.
 
 ### Dispatch events
 
@@ -1848,8 +1865,16 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `EMOJI_DELETE` | `{ id }` |
 | `RETENTION_APPLIED` | `PruneSummary` |
 
-`MEMBER_UPDATE` also fires for timeouts, kicks and bans, so a client should refetch the roster (and
-its own profile) whenever it sees one.
+`MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
+role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,
+when the `userId` is its own) whenever it sees one.
+
+`CHANNEL_DELETE` and `CATEGORY_DELETE` reach every member who could see the channel or category
+before it went. They are also how a member learns they have **lost access**: when an administrator
+locks a channel or category behind a role (or moves a channel into a locked category), members who
+could see it but no longer can receive a `CHANNEL_DELETE` / `CATEGORY_DELETE` carrying only the id,
+while the `CHANNEL_UPDATE` / `CATEGORY_UPDATE` goes only to those who still can. Treat either as
+"this is gone for you"; refetching `GET /api/v1/channels` gives the authoritative list.
 
 `ReactionUpdatePayload` carries the reacting user so each client can decide whether the `me` flag
 applies to itself; the server broadcasts one payload to everyone:
@@ -1906,8 +1931,14 @@ as offline. A client can treat it exactly like any other presence update.
 
 | Code | Meaning |
 | --- | --- |
+| `4003` | No IDENTIFY arrived within one heartbeat interval of connecting. Safe to reconnect. |
 | `4004` | The session was rejected. Re-authenticate instead of retrying. |
 | `4005` | The session was ended by moderation (a kick or ban). |
+| `4009` | No heartbeat (or any other frame) arrived for about two heartbeat intervals. Safe to reconnect. |
+
+The close frame's reason is a human-readable sentence (for instance "You were banned from this
+server." or "Your password was changed on another device."), suitable for showing on a sign-in
+screen after a `4004` or `4005`.
 
 ### Reconnecting
 
@@ -1915,8 +1946,8 @@ The gateway has no sequence numbers and no resume support. On reconnect, re-iden
 the state you care about (`GET /api/v1/channels`, the open channel's history). Do not reconnect
 after a `4004` or `4005` close: re-authenticate first.
 
-Events are broadcast to every authenticated client. There is no per-channel filtering, which is
-fine because Harmony's permissions are server-wide rather than per-channel.
+Events about a locked channel or category, including its messages, typing and reactions, only go to
+members who can see it. Everything else is broadcast to every authenticated client.
 
 ## Worked example
 

@@ -137,6 +137,58 @@ export class GatewayHub {
     }
   }
 
+  /**
+   * The connected members who may currently see a resource. Taken just before a
+   * change that can hide it (a delete, or a new role requirement), because once
+   * the change lands the access check can no longer say who used to see it.
+   */
+  audience(visibility: DispatchVisibility): Set<string> {
+    const userIds = new Set<string>();
+    for (const client of this.#clients.values()) {
+      if (!client.auth || userIds.has(client.auth.user.id)) continue;
+      if (this.#canSee(client.auth.user.id, visibility)) userIds.add(client.auth.user.id);
+    }
+    return userIds;
+  }
+
+  /**
+   * Sends a dispatch event to exactly these members, on every connection they
+   * hold. The caller has already decided who may hear it, usually with
+   * {@link audience}, so no further access check is made here.
+   */
+  dispatchToUsers(event: GatewayEventName, payload: unknown, userIds: ReadonlySet<string>): void {
+    if (userIds.size === 0) return;
+    const frame = JSON.stringify({ op: GatewayOp.Dispatch, t: event, d: payload });
+    for (const client of this.#clients.values()) {
+      if (!client.auth || !userIds.has(client.auth.user.id)) continue;
+      try {
+        client.send(frame);
+      } catch {
+        // A dead socket will be cleaned up by its own close handler.
+      }
+    }
+  }
+
+  /**
+   * Tells the members in `before` who can no longer see a resource that it is
+   * gone for them. Used after a lock change: the update itself only reaches
+   * those who may still see it, so without this the rest would keep a channel in
+   * their sidebar that every request now refuses. The payload is the bare id they
+   * already knew, so nothing about the new requirement leaks.
+   */
+  dispatchLostAccess(
+    event: GatewayEventName,
+    payload: unknown,
+    before: ReadonlySet<string>,
+    visibility: DispatchVisibility,
+  ): void {
+    const lost = new Set<string>();
+    for (const userId of before) {
+      if (!this.#canSee(userId, visibility)) lost.add(userId);
+    }
+    this.dispatchToUsers(event, payload, lost);
+  }
+
   #announcePresence(user: User, online: boolean): void {
     const payload: PresenceUpdatePayload = { user, online };
     this.dispatch(GatewayEvent.PresenceUpdate, payload);

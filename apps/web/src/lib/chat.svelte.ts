@@ -4,6 +4,7 @@ import type {
   ChannelListResponse,
   MeResponse,
   Message,
+  PruneSummary,
   Reaction,
   ReactionsClearPayload,
   ReactionUpdatePayload,
@@ -30,6 +31,23 @@ const typingTtlMs = 8000;
 const typingSweepMs = 2000;
 /** How long a read marker waits when it rides on incoming messages. */
 const readDebounceMs = 1000;
+/** Page size, and most pages, used to re-check what is loaded after a prune. */
+const reconcilePageSize = 100;
+const reconcileMaxPages = 10;
+/** The longest delay `setTimeout` honors; anything longer fires at once. */
+const maxTimerMs = 2 ** 31 - 1;
+
+/** Whether two copies of a user would look any different beside a message. */
+function sameFace(a: User, b: User): boolean {
+  return (
+    a.username === b.username &&
+    a.displayName === b.displayName &&
+    a.avatarHash === b.avatarHash &&
+    a.roleColor === b.roleColor &&
+    a.badge === b.badge &&
+    a.isBot === b.isBot
+  );
+}
 
 /** Merges a single reaction event into a message's reaction list. */
 function applyReactionDelta(
@@ -99,6 +117,19 @@ class ChatStore {
    * deliberately refuses to scroll for.
    */
   scrollSignal = $state(0);
+  /**
+   * Whether the open channel is showing an older stretch of history, after a
+   * jump to a search or inbox result, rather than its newest messages. Live
+   * messages are held back while it is, since putting them right after an old
+   * page would hide everything in between; the view offers a way back instead.
+   */
+  detached = $state(false);
+  /**
+   * Why the gateway ended this session, when it did so on purpose (a kick, a ban,
+   * a password change elsewhere), for the sign-in screen to explain. Whoever
+   * shows it clears it.
+   */
+  signedOutReason = $state<string | null>(null);
 
   #gateway = new GatewayClient(GatewayClient.defaultUrl());
   #started = false;
@@ -111,6 +142,14 @@ class ChatStore {
   #readTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards the channel-list refresh that a denied channel triggers. */
   #healing = false;
+  /**
+   * Counts history loads, so only the latest one decides when loading is over.
+   * Switching channels quickly would otherwise let a superseded load clear the
+   * flag while the current one is still out, flashing "No messages yet".
+   */
+  #historyLoad = 0;
+  /** Refreshes the session when a timeout runs out, so the composer reopens. */
+  #timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
   get activeChannel(): Channel | null {
     return this.channels.find((channel) => channel.id === this.activeChannelId) ?? null;
@@ -125,6 +164,7 @@ class ChatStore {
     this.#started = true;
     this.#gateway.onEvent((frame) => this.#handleEvent(frame));
     document.addEventListener('visibilitychange', this.#onVisibility);
+    this.#scheduleTimeoutLift();
     await this.loadChannels();
     await emojis.load();
     await gifs.loadFavorites();
@@ -145,11 +185,15 @@ class ChatStore {
     this.replyTarget = null;
     this.hasMore = false;
     this.loadingOlder = false;
+    this.loading = false;
+    this.detached = false;
     this.highlightedId = null;
     this.unreadChannelIds = [];
     this.mentionChannelIds = [];
     if (this.#highlightTimer) clearTimeout(this.#highlightTimer);
     this.#highlightTimer = null;
+    if (this.#timeoutTimer) clearTimeout(this.#timeoutTimer);
+    this.#timeoutTimer = null;
     if (this.#readTimer) clearTimeout(this.#readTimer);
     this.#readTimer = null;
     this.#readPending.clear();
@@ -180,19 +224,110 @@ class ChatStore {
     void gifs.loadFavorites();
     void this.#refreshSession();
 
+    // Someone reading an older stretch after a jump stays where they are; the
+    // newest page is what "Jump to present" fetches when they want it.
+    if (this.detached) return;
+    await this.#catchUp();
+  }
+
+  /**
+   * Fetches the open channel's newest page and folds it into what is loaded,
+   * without the loading state, so nobody loses their place. Messages deleted
+   * meanwhile go; if more arrived than one page holds, the list starts over at
+   * the present rather than hiding the gap.
+   */
+  async #catchUp(): Promise<void> {
     const channelId = this.activeChannelId;
     if (!channelId) return;
 
     try {
       const page = await this.#fetchHistory(channelId);
       // A channel switch while this was in flight must not splice a page from
-      // the wrong channel into the open one.
-      if (channelId !== this.activeChannelId) return;
-      this.messages = mergeLatest(this.messages, page);
+      // the wrong channel into the open one, and a jump elsewhere in history
+      // must not be undone by it.
+      if (channelId !== this.activeChannelId || this.detached) return;
+      const complete = page.length < historyPageSize;
+      const merged = mergeLatest(this.messages, page, complete);
+      this.messages = merged.messages;
+      if (merged.reset) {
+        this.hasMore = !complete;
+        // The place the reader had is gone, so put them at the newest message,
+        // which a replaced list would not do on its own.
+        if (!complete) this.scrollSignal += 1;
+      }
     } catch {
       // Still offline, or the channel was locked away while we were gone. The
-      // channel list refresh above is what deals with the second case.
+      // channel list refresh is what deals with the second case.
     }
+  }
+
+  /**
+   * Checks every loaded message against the server again, page by page from the
+   * newest one loaded back to the oldest, and drops whatever has gone. Used after
+   * a retention prune, which deletes old messages and attachments but does not
+   * say which; refetching only the newest page would never reach them.
+   */
+  async #reconcileLoaded(): Promise<void> {
+    const channelId = this.activeChannelId;
+    const first = this.messages[0];
+    const last = this.messages.at(-1);
+    if (!channelId || !first || !last) return;
+
+    try {
+      // One millisecond past the newest loaded message, so the walk includes it.
+      let cursor: { before: string; beforeId?: string } = {
+        before: new Date(Date.parse(last.createdAt) + 1).toISOString(),
+      };
+      const window: Message[] = [];
+      let complete = false;
+      for (let pages = 0; pages < reconcileMaxPages; pages++) {
+        const page = await this.#fetchHistory(channelId, cursor, reconcilePageSize);
+        window.unshift(...page);
+        const top = page[0];
+        if (!top || page.length < reconcilePageSize) {
+          complete = true;
+          break;
+        }
+        if (top.createdAt < first.createdAt) break;
+        cursor = { before: top.createdAt, beforeId: top.id };
+      }
+
+      if (channelId !== this.activeChannelId) return;
+      const merged = mergeLatest(this.messages, window, complete);
+      this.messages = merged.messages;
+      if (merged.reset) this.hasMore = false;
+    } catch {
+      // Offline or locked away; the next catch-up will get it right.
+    }
+  }
+
+  /**
+   * Re-dresses loaded messages in their authors' current names, pictures and
+   * role colors, from the freshly loaded member directory. Cheaper than
+   * refetching history, keeps the reader's place, and reaches the older pages a
+   * refetch of the newest one would miss. Without `userId` everyone is checked,
+   * as after a role change that can recolor many people at once.
+   */
+  #refreshAuthors(userId?: string): void {
+    const current = (user: User | null): User | null => {
+      if (!user || (userId !== undefined && user.id !== userId)) return user;
+      const fresh = members.byId.get(user.id);
+      return fresh && !sameFace(fresh, user) ? fresh : user;
+    };
+
+    let changed = false;
+    const next = this.messages.map((message) => {
+      const author = current(message.author);
+      const replyAuthor = message.replyTo ? current(message.replyTo.author) : null;
+      if (author === message.author && replyAuthor === (message.replyTo?.author ?? null)) return message;
+      changed = true;
+      return {
+        ...message,
+        author,
+        replyTo: message.replyTo ? { ...message.replyTo, author: replyAuthor } : null,
+      };
+    });
+    if (changed) this.messages = next;
   }
 
   async loadChannels(): Promise<void> {
@@ -274,31 +409,40 @@ class ChatStore {
     this.messages = [];
     this.hasMore = false;
     this.loadingOlder = false;
+    this.detached = false;
     this.replyTarget = null;
     this.highlightedId = null;
     if (channelId) this.#markRead(channelId, false);
     this.#clearTyping();
     if (channelId) await this.loadHistory(channelId);
+    // Nothing to load, and any load still out belongs to a channel left behind.
+    else this.loading = false;
   }
 
   /** One page of a channel's history, ending just before the cursor when given. */
-  async #fetchHistory(channelId: string, cursor?: { before: string; beforeId: string }): Promise<Message[]> {
-    const query = new URLSearchParams({ limit: String(historyPageSize) });
+  async #fetchHistory(
+    channelId: string,
+    cursor?: { before: string; beforeId?: string },
+    limit: number = historyPageSize,
+  ): Promise<Message[]> {
+    const query = new URLSearchParams({ limit: String(limit) });
     if (cursor) {
       query.set('before', cursor.before);
-      query.set('beforeId', cursor.beforeId);
+      if (cursor.beforeId) query.set('beforeId', cursor.beforeId);
     }
     const data = await api<{ messages: Message[] }>(`/channels/${channelId}/messages?${query}`);
     return data.messages;
   }
 
   async loadHistory(channelId: string): Promise<void> {
+    const load = ++this.#historyLoad;
     this.loading = true;
     try {
       const messages = await this.#fetchHistory(channelId);
-      if (channelId === this.activeChannelId) {
+      if (load === this.#historyLoad && channelId === this.activeChannelId) {
         this.messages = messages;
         this.hasMore = messages.length >= historyPageSize;
+        this.detached = false;
       }
     } catch (cause) {
       // Access to a locked channel can be taken away while it is open. Refresh the
@@ -317,7 +461,7 @@ class ChatStore {
         }
       }
     } finally {
-      this.loading = false;
+      if (load === this.#historyLoad) this.loading = false;
     }
   }
 
@@ -325,12 +469,17 @@ class ChatStore {
    * Opens a channel at a particular message, for a search result. The page holds
    * the messages just before it and the message itself is put on the end, so it
    * appears with its context above it rather than alone.
+   *
+   * The newest page is fetched alongside. When the message is in it, the two
+   * join up and the view is simply the present; otherwise the view is detached
+   * from the present until the reader asks to go back.
    */
   async jumpToMessage(channelId: string, message: Message): Promise<void> {
     this.activeChannelId = channelId;
     this.messages = [];
     this.hasMore = false;
     this.loadingOlder = false;
+    this.detached = false;
     this.replyTarget = null;
     this.highlightedId = null;
     this.#clearTyping();
@@ -338,25 +487,45 @@ class ChatStore {
     // clears a search result's channel and the inbox entry that led here.
     this.#markRead(channelId, false);
 
+    const load = ++this.#historyLoad;
     this.loading = true;
     try {
-      const page = await this.#fetchHistory(channelId, {
-        before: message.createdAt,
-        beforeId: message.id,
-      });
-      if (channelId !== this.activeChannelId) return;
-      this.messages = [...page, message];
+      const [page, newest] = await Promise.all([
+        this.#fetchHistory(channelId, { before: message.createdAt, beforeId: message.id }),
+        this.#fetchHistory(channelId),
+      ]);
+      if (load !== this.#historyLoad || channelId !== this.activeChannelId) return;
+      const newestIds = new Set(newest.map((entry) => entry.id));
+      if (newestIds.has(message.id)) {
+        this.messages = [...page.filter((entry) => !newestIds.has(entry.id)), ...newest];
+      } else {
+        this.messages = [...page, message];
+        this.detached = true;
+      }
       this.hasMore = page.length >= historyPageSize;
     } catch {
       // A message that vanished between searching and jumping is not worth an
       // error: the channel still opens, just at its newest page.
-      await this.loadHistory(channelId);
+      if (load === this.#historyLoad) await this.loadHistory(channelId);
     } finally {
-      this.loading = false;
+      if (load === this.#historyLoad) this.loading = false;
     }
 
     this.#highlight(message.id);
-    // The jumped-to message is the last one loaded, so bring it into view.
+    // Bring the jumped-to message into view. When it is the last one loaded the
+    // end of the list is exactly that; when newer ones follow it, the message
+    // view looks for the highlighted row instead.
+    this.scrollSignal += 1;
+  }
+
+  /** Leaves an older stretch of history for the channel's newest messages. */
+  async jumpToPresent(): Promise<void> {
+    const channelId = this.activeChannelId;
+    if (!channelId) return;
+    this.highlightedId = null;
+    await this.loadHistory(channelId);
+    if (channelId !== this.activeChannelId) return;
+    if (document.visibilityState === 'visible') this.#markRead(channelId, false);
     this.scrollSignal += 1;
   }
 
@@ -395,8 +564,7 @@ class ChatStore {
   async sendMessage(content: string, attachmentIds: string[] = [], replyToId: string | null = null): Promise<void> {
     const channelId = this.activeChannelId;
     if (!channelId) return;
-    // The message comes back over the gateway as MESSAGE_CREATE, so we don't append it here.
-    await api(`/channels/${channelId}/messages`, {
+    const message = await api<Message>(`/channels/${channelId}/messages`, {
       method: 'POST',
       body: JSON.stringify({
         content,
@@ -404,6 +572,40 @@ class ChatStore {
         replyToId: replyToId ?? undefined,
       }),
     });
+    if (channelId !== this.activeChannelId) return;
+
+    // Sending from an older stretch of history means wanting to see the reply
+    // land, so go back to the present, which will include it.
+    if (this.detached) {
+      await this.jumpToPresent();
+      return;
+    }
+    // The gateway echoes it as MESSAGE_CREATE too, but a socket that died without
+    // saying so would never deliver it and the message would seem to vanish. The
+    // response is the same message, and the insert ignores whichever comes second.
+    this.#insertMessage(message);
+  }
+
+  /**
+   * Puts a message into the open channel's list in time order, unless it is
+   * already there. A history import can deliver older messages, so it is placed
+   * by timestamp rather than always appended.
+   */
+  #insertMessage(message: Message): void {
+    if (this.messages.some((existing) => existing.id === message.id)) return;
+    // An older stretch of history only takes messages that belong inside it.
+    const last = this.messages.at(-1);
+    if (this.detached && (!last || message.createdAt > last.createdAt)) return;
+
+    const next = [...this.messages];
+    let index = next.length;
+    while (index > 0) {
+      const previous = next[index - 1];
+      if (!previous || previous.createdAt <= message.createdAt) break;
+      index--;
+    }
+    next.splice(index, 0, message);
+    this.messages = next;
   }
 
   /** Adds or removes the current user's reaction; the gateway echoes the result. */
@@ -477,6 +679,32 @@ class ChatStore {
         session.permissions = '0';
       }
     }
+    this.#scheduleTimeoutLift();
+  }
+
+  /**
+   * A timeout ends on its own, with no event to say so, and whether one applies
+   * is read from the session user against the clock. So the session is refreshed
+   * just after it runs out: the new user object is what makes the composer look
+   * again and reopen.
+   */
+  #scheduleTimeoutLift(): void {
+    if (this.#timeoutTimer) clearTimeout(this.#timeoutTimer);
+    this.#timeoutTimer = null;
+
+    const until = session.user?.timedOutUntil;
+    if (!until) return;
+    const remaining = Date.parse(until) - Date.now();
+    if (!(remaining > 0)) return;
+    // A moment's grace so the server agrees it is over. A timeout too long for
+    // one timer simply refreshes early and schedules the rest.
+    this.#timeoutTimer = setTimeout(
+      () => {
+        this.#timeoutTimer = null;
+        void this.#refreshSession();
+      },
+      Math.min(remaining + 1000, maxTimerMs),
+    );
   }
 
   /**
@@ -520,7 +748,9 @@ class ChatStore {
         const active = message.channelId === this.activeChannelId;
         // An open channel in a tab nobody is looking at has not really been read,
         // so only the visible case counts. Coming back to the tab readies it again.
-        if (active && document.visibilityState === 'visible') {
+        // Neither has one showing an older stretch, where the message is held back.
+        const reading = active && document.visibilityState === 'visible' && !this.detached;
+        if (reading) {
           this.#markRead(message.channelId, true);
         } else if (!this.unread.has(message.channelId)) {
           this.unreadChannelIds = [...this.unreadChannelIds, message.channelId];
@@ -529,27 +759,17 @@ class ChatStore {
         // A mention aims at this member wherever they are, so it earns the red
         // mark even in a channel they are not looking at. Reading it clears the
         // mark, so the open-and-visible case is left to #markRead above.
-        if (
-          !(active && document.visibilityState === 'visible') &&
-          this.#mentionsMe(message) &&
-          !this.mention.has(message.channelId)
-        ) {
+        if (!reading && this.#mentionsMe(message) && !this.mention.has(message.channelId)) {
           this.mentionChannelIds = [...this.mentionChannelIds, message.channelId];
         }
 
         if (!active) break;
-        if (this.messages.some((existing) => existing.id === message.id)) break;
-        // A history import can deliver older messages, so insert by timestamp
-        // rather than always appending, keeping the list chronological.
-        const next = [...this.messages];
-        let index = next.length;
-        while (index > 0) {
-          const previous = next[index - 1];
-          if (!previous || previous.createdAt <= message.createdAt) break;
-          index--;
+        // Whoever sent it has stopped typing it, so their notice goes now rather
+        // than lingering for the rest of its few seconds under their message.
+        if (message.author && this.typingUsers.some((entry) => entry.user.id === message.author?.id)) {
+          this.typingUsers = this.typingUsers.filter((entry) => entry.user.id !== message.author?.id);
         }
-        next.splice(index, 0, message);
-        this.messages = next;
+        this.#insertMessage(message);
         break;
       }
       case 'MESSAGE_UPDATE': {
@@ -628,28 +848,35 @@ class ChatStore {
       case 'ROLE_UPDATE':
       case 'ROLE_DELETE':
         // Roles decide username colors, member list grouping and which channels
-        // are locked, so refresh the channel list, the open channel and the roster.
+        // are locked, so refresh the channel list and the roster, and recolor the
+        // names on screen. Reloading the history would do that too, but would
+        // also throw a reader scrolled back through it to the newest messages.
         void this.loadChannels();
-        if (this.activeChannelId) void this.loadHistory(this.activeChannelId);
         void roster.load();
+        void members.load().then(() => this.#refreshAuthors());
         break;
       case 'MEMBER_UPDATE': {
         const payload = frame.d as { userId: string };
         // The roster and mention list may have changed, and if it was us the
-        // change could be our own timeout or a role that unlocks channels.
-        void members.load();
+        // change could be our own timeout or a role that unlocks channels. Their
+        // messages only need their new name, picture or color, not a reload.
+        void members.load().then(() => this.#refreshAuthors(payload.userId));
         void roster.load();
         if (payload.userId === session.user?.id) {
           void this.loadChannels();
           void this.#refreshSession();
         }
-        if (this.activeChannelId) void this.loadHistory(this.activeChannelId);
         break;
       }
       case 'CLOSE': {
-        const payload = frame.d as { code: number };
-        // 4004 and 4005 mean the session is gone: logged out, kicked or banned.
+        const payload = frame.d as { code: number; reason?: string };
+        // 4004 and 4005 mean the session is gone: logged out, kicked, banned, or
+        // signed out by a password change. Keep the server's reason so the
+        // sign-in screen can say what happened instead of just appearing.
         if (payload.code === 4004 || payload.code === 4005) {
+          this.signedOutReason =
+            payload.reason ||
+            (payload.code === 4005 ? 'You were removed from this server.' : 'Your session has ended.');
           session.user = null;
           session.permissions = '0';
         }
@@ -659,10 +886,22 @@ class ChatStore {
       case 'EMOJI_DELETE':
         void emojis.load();
         break;
-      case 'RETENTION_APPLIED':
-        // Content may have been pruned from the open channel.
-        if (this.activeChannelId) void this.loadHistory(this.activeChannelId);
+      case 'RETENTION_APPLIED': {
+        // Old messages or attachments may have been pruned from the open channel.
+        // Take them out where they sit instead of reloading, which would throw
+        // the reader to the newest messages every time the hourly prune runs.
+        const summary = frame.d as PruneSummary | undefined;
+        if (
+          summary &&
+          summary.deletedMessages === 0 &&
+          summary.deletedAttachments === 0 &&
+          summary.deletedStickers === 0
+        ) {
+          break;
+        }
+        void this.#reconcileLoaded();
         break;
+      }
     }
   }
 }

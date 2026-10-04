@@ -39,13 +39,21 @@ export type GatewayEventName = (typeof GatewayEvent)[keyof typeof GatewayEvent];
 
 /** WebSocket close codes used by the gateway (mirrors Discord's range). */
 export const GatewayCloseCode = {
+  /** The client never sent IDENTIFY. Reconnecting is fine. */
+  NotAuthenticated: 4003,
   AuthenticationFailed: 4004,
   /** The session was ended by moderation (kicked or banned). */
   Removed: 4005,
+  /** No heartbeat arrived in time, so the connection was presumed dead. Reconnecting is fine. */
+  SessionTimedOut: 4009,
 } as const;
 
 /** Server -> client payload sent immediately on connect. */
 export interface GatewayHello {
+  /**
+   * How often, in milliseconds, the client must send a heartbeat. A connection
+   * that stays silent for about two intervals is closed with `SessionTimedOut`.
+   */
   heartbeat_interval: number;
   gateway_version: number;
 }

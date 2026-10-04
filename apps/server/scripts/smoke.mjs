@@ -36,6 +36,7 @@ const serverDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 8791;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const BASE = `${ORIGIN}/api/v1`;
+const HEARTBEAT_MS = 1000;
 const dataDir = mkdtempSync(join(tmpdir(), 'harmony-smoke-'));
 
 // A stand-in for the built client, so the static serving and SPA fallback can be
@@ -72,6 +73,9 @@ const server = spawn('node', ['src/index.ts'], {
     HARMONY_WEB_DIR: webDir,
     HARMONY_REQUIRE_INVITE: 'true',
     HARMONY_LOG_LEVEL: 'error',
+    // Short enough that a socket going silent is closed within a few seconds,
+    // long enough that the heartbeating helper below never misses one.
+    HARMONY_GATEWAY_HEARTBEAT_MS: String(HEARTBEAT_MS),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -114,20 +118,30 @@ async function req(path, { method = 'GET', body, cookie, token } = {}) {
   };
 }
 
-/** Opens a gateway connection, identifies, and returns the events it receives. */
+/**
+ * Opens a gateway connection, identifies, and returns the events it receives.
+ * It heartbeats on the server's schedule like a real client, since the server
+ * closes a connection that goes quiet.
+ */
 function openGateway(auth = {}) {
   return new Promise((resolveGateway, reject) => {
     const options = auth.cookie ? { headers: { cookie: auth.cookie } } : {};
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/gateway`, options);
     const events = [];
     const timer = setTimeout(() => reject(new Error('gateway ready timeout')), 5000);
+    let heartbeat = null;
+    ws.on('close', () => clearInterval(heartbeat));
 
     ws.on('message', (raw) => {
       const frame = JSON.parse(raw.toString());
       if (frame.op === 10) {
         ws.send(JSON.stringify({ op: 2, d: auth.token ? { token: auth.token } : {} }));
+        heartbeat = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 1, d: null }));
+        }, frame.d.heartbeat_interval);
         return;
       }
+      if (frame.op === 11) return;
       if (frame.t === 'READY') {
         clearTimeout(timer);
         resolveGateway({ ws, events, ready: frame.d });
@@ -1376,6 +1390,136 @@ try {
   await req(`/categories/${staffCategory.json.id}`, { method: 'DELETE', token: ownerToken });
   await req(`/channels/${staffChannel.json.id}`, { method: 'DELETE', token: ownerToken });
   await req(`/roles/${staffRole.json.id}`, { method: 'DELETE', token: ownerToken });
+
+  // Deleting a channel reaches everyone who could see it, not just the
+  // administrators: checked after the row is gone, the access check used to say
+  // nobody else could.
+  const goneWatcher = await openGateway({ token: bobToken });
+  const doomedChannel = await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'doomed' } });
+  await sleep(150);
+  await req(`/channels/${doomedChannel.json.id}`, { method: 'DELETE', token: ownerToken });
+  await sleep(250);
+  check(
+    'a member hears that a channel was deleted',
+    goneWatcher.events.some((frame) => frame.t === 'CHANNEL_DELETE' && frame.d?.id === doomedChannel.json.id),
+  );
+
+  // Locking a channel away from someone tells them it is gone for them, and
+  // nothing more; the update itself only goes to those who can still see it.
+  const vaultRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Vault' } });
+  const lockable = await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'lockable' } });
+  await sleep(150);
+  goneWatcher.events.length = 0;
+  await req(`/channels/${lockable.json.id}`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { requiredRoleId: vaultRole.json.id },
+  });
+  await sleep(250);
+  check(
+    'a member who loses a channel to a lock is told it is gone',
+    goneWatcher.events.some((frame) => frame.t === 'CHANNEL_DELETE' && frame.d?.id === lockable.json.id),
+  );
+  check(
+    'the locked channel update itself does not reach them',
+    goneWatcher.events.every((frame) => frame.t !== 'CHANNEL_UPDATE'),
+  );
+
+  const lockableCategory = await req('/categories', { method: 'POST', token: ownerToken, body: { name: 'Lockable' } });
+  await sleep(150);
+  goneWatcher.events.length = 0;
+  await req(`/categories/${lockableCategory.json.id}`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { requiredRoleId: vaultRole.json.id },
+  });
+  await sleep(250);
+  check(
+    'a member who loses a category to a lock is told it is gone',
+    goneWatcher.events.some(
+      (frame) => frame.t === 'CATEGORY_DELETE' && frame.d?.id === lockableCategory.json.id,
+    ) && goneWatcher.events.every((frame) => frame.t !== 'CATEGORY_UPDATE'),
+  );
+  await req(`/channels/${lockable.json.id}`, { method: 'DELETE', token: ownerToken });
+  await req(`/categories/${lockableCategory.json.id}`, { method: 'DELETE', token: ownerToken });
+  await req(`/roles/${vaultRole.json.id}`, { method: 'DELETE', token: ownerToken });
+
+  // Editing your own profile is announced like an administrator's edit, so other
+  // people's member lists and messages pick up the new name.
+  const profileWatcher = await openGateway({ token: ownerToken });
+  await req('/users/@me', { method: 'PATCH', token: bobToken, body: { displayName: 'Bobby' } });
+  await sleep(250);
+  check(
+    'editing your own profile dispatches MEMBER_UPDATE',
+    profileWatcher.events.some((frame) => frame.t === 'MEMBER_UPDATE' && frame.d?.userId === bob.json.user.id),
+  );
+  await req('/users/@me', { method: 'PATCH', token: bobToken, body: { displayName: null } });
+  profileWatcher.ws.close();
+
+  // The server closes connections that stop heartbeating, and ones that never
+  // identify, so a vanished client does not stay online forever. The helper
+  // above heartbeats, so its socket outlives both deadlines.
+  const silentClose = new Promise((resolveClose) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/gateway`);
+    const openedAt = Date.now();
+    ws.on('message', (raw) => {
+      const frame = JSON.parse(raw.toString());
+      if (frame.op === 10) ws.send(JSON.stringify({ op: 2, d: { token: bobToken } }));
+    });
+    ws.on('close', (code) => resolveClose({ code, after: Date.now() - openedAt }));
+  });
+  const unidentifiedClose = new Promise((resolveClose) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/gateway`);
+    ws.on('close', (code) => resolveClose(code));
+  });
+  const silent = await Promise.race([silentClose, sleep(HEARTBEAT_MS * 6).then(() => null)]);
+  check(
+    'a socket that stops heartbeating is closed (4009)',
+    silent?.code === 4009 && silent.after >= HEARTBEAT_MS * 2,
+    JSON.stringify(silent),
+  );
+  check(
+    'a socket that never identifies is closed (4003)',
+    (await Promise.race([unidentifiedClose, sleep(HEARTBEAT_MS * 3).then(() => null)])) === 4003,
+  );
+  check('a heartbeating socket stays open', goneWatcher.ws.readyState === WebSocket.OPEN);
+  goneWatcher.ws.close();
+
+  // Fastify's own refusals are the client's fault and say so.
+  const badJson = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{"username": ',
+  });
+  const badJsonBody = await badJson.json();
+  check(
+    'invalid JSON is a 400, not a 500',
+    badJson.status === 400 && badJsonBody?.error?.code === 'bad_request',
+    `status ${badJson.status}`,
+  );
+  const emptyJson = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '',
+  });
+  check('an empty JSON body is a 400, not a 500', emptyJson.status === 400, `status ${emptyJson.status}`);
+  const hugeJson = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'x'.repeat(2 * 1024 * 1024) }),
+  });
+  const hugeJsonBody = await hugeJson.json();
+  check(
+    'an oversized body is a 413, not a 500',
+    hugeJson.status === 413 && hugeJsonBody?.error?.code === 'payload_too_large',
+    `status ${hugeJson.status}`,
+  );
+  const wrongType = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-something' },
+    body: 'hello',
+  });
+  check('an unsupported content type is a 415, not a 500', wrongType.status === 415, `status ${wrongType.status}`);
 
   const patched = await req('/settings', {
     method: 'PATCH',

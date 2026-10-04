@@ -320,7 +320,14 @@
     if (signal === seenScrollSignal) return;
     seenScrollSignal = signal;
     const element = scroller;
-    if (element) element.scrollTo({ top: element.scrollHeight });
+    if (!element) return;
+    // A jump that landed among recent messages has newer ones below it, so the
+    // end of the list is not where it is; find the flashed row itself.
+    const target = chat.highlightedId
+      ? element.querySelector(`[data-message-id="${CSS.escape(chat.highlightedId)}"]`)
+      : null;
+    if (target) target.scrollIntoView({ block: 'center' });
+    else element.scrollTo({ top: element.scrollHeight });
   });
 </script>
 
@@ -428,6 +435,7 @@
         class:selected={chat.replyTarget?.id === message.id}
         class:actions-open={actionsFor === message.id}
         class:highlighted={chat.highlightedId === message.id}
+        data-message-id={message.id}
         use:trackSize
         onclick={(event) => onMessageClick(event, message)}
       >
@@ -696,4 +704,38 @@
       </article>
     {/each}
   {/if}
+
+  <!--
+    After a jump to a search or inbox result the list can be an older stretch of
+    history with newer messages held back, so the way back is always in reach.
+  -->
+  {#if chat.detached && !chat.loading}
+    <div class="present-bar" role="status">
+      <span>You are viewing older messages.</span>
+      <button type="button" onclick={() => void chat.jumpToPresent()}>Jump to present</button>
+    </div>
+  {/if}
 </div>
+
+<style>
+  .present-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin: 0.75rem -0.6rem 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--h-radius-sm);
+    background: var(--h-bg-deep);
+    border: 1px solid var(--h-border);
+    color: var(--h-text-muted);
+    font-size: 0.85rem;
+  }
+
+  .present-bar button {
+    flex-shrink: 0;
+  }
+</style>

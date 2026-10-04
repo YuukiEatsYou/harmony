@@ -209,6 +209,9 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
     const row = requireChannelRow(id);
 
     const input = parseBody(updateChannelSchema, request.body);
+    // A new role requirement, or a move into a locked category, can hide the
+    // channel from members who see it now, so remember who they are.
+    const before = hub.audience({ channelId: id });
     if (input.categoryId) requireCategoryRow(input.categoryId);
     if (input.discordChannelId) assertDiscordChannelFree(input.discordChannelId, id);
     if (input.requiredRoleId) assertRoleExists(input.requiredRoleId);
@@ -233,6 +236,7 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
 
     const channel = toChannel(requireChannelRow(id));
     hub.dispatch(GatewayEvent.ChannelUpdate, channel, { channelId: channel.id });
+    hub.dispatchLostAccess(GatewayEvent.ChannelDelete, { id }, before, { channelId: id });
     if (input.discordChannelId) backfill(channel.id);
     return channel;
   });
@@ -277,10 +281,13 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
     const { id } = request.params as { id: string };
     requireChannelRow(id);
 
+    // Once the row is gone the access check cannot tell who could see it, so the
+    // audience is taken first. Checked afterwards, only administrators heard.
+    const audience = hub.audience({ channelId: id });
     deleteChannel(db.sqlite, id);
     // Do not leave the default pointing at a channel that no longer exists.
     if (settings.get().defaultChannelId === id) settings.update({ defaultChannelId: null });
-    hub.dispatch(GatewayEvent.ChannelDelete, { id }, { channelId: id });
+    hub.dispatchToUsers(GatewayEvent.ChannelDelete, { id }, audience);
     return reply.status(204).send();
   });
 
@@ -311,6 +318,7 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
 
     const input = parseBody(updateCategorySchema, request.body);
     if (input.requiredRoleId) assertRoleExists(input.requiredRoleId);
+    const before = hub.audience({ categoryId: id });
     updateCategory(db.sqlite, id, {
       name: input.name,
       position: input.position,
@@ -319,6 +327,9 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
 
     const category = toCategory(requireCategoryRow(id));
     hub.dispatch(GatewayEvent.CategoryUpdate, category, { categoryId: category.id });
+    // Members the new lock shuts out are told the category is gone for them,
+    // which takes its channels out of their sidebar along with it.
+    hub.dispatchLostAccess(GatewayEvent.CategoryDelete, { id }, before, { categoryId: id });
     return category;
   });
 

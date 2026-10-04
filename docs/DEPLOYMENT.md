@@ -57,6 +57,7 @@ Copy `.env.example` to `.env` and set what you need. Everything has a default.
 | `HARMONY_COOKIE_SECURE` | `false` | **Set true when served over HTTPS.** Marks the cookie `Secure`. |
 | `HARMONY_TRUST_PROXY` | `false` | **Set true behind a reverse proxy** so client IPs come from `X-Forwarded-For`. |
 | `HARMONY_PRUNE_INTERVAL_MINUTES` | `60` | How often automatic retention pruning runs. |
+| `HARMONY_GATEWAY_HEARTBEAT_MS` | `45000` | How often gateway clients must heartbeat. A silent connection is closed after about two intervals. Leave it alone unless your proxy's idle timeout is shorter than 45s. |
 | `HARMONY_LOG_LEVEL` | `info` | `fatal`…`trace`, or `silent`. |
 | `HARMONY_CSP` | built-in policy | `Content-Security-Policy` to send; `off` disables the header. |
 
@@ -79,6 +80,13 @@ Point your hostname at the proxy, and have the proxy forward to
 `Host` header, the client's address (`X-Forwarded-For`) and the original scheme
 (`X-Forwarded-Proto`). WebSocket upgrades must be allowed through for `/gateway`,
 which is how live messages arrive.
+
+Clients heartbeat over that WebSocket every 45 seconds (`HARMONY_GATEWAY_HEARTBEAT_MS`) and the
+server answers each one, so a healthy connection is never idle for longer than that. Any idle or
+read timeout on the proxy must be comfortably longer than the interval, or the proxy will cut quiet
+connections and every client will reconnect and resync on each cut. Connections that stop
+heartbeating for about two intervals are closed by the server itself, which is what takes a
+vanished phone or laptop offline.
 
 ### Caddy
 
@@ -122,8 +130,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # The gateway heartbeats every 45s; keep the connection open between them.
+        # Clients heartbeat the gateway every 45s and the server acknowledges
+        # each beat, so a live WebSocket is never quiet for longer than that.
+        # This only has to outlast one interval with room to spare.
         proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
     }
 }
 ```

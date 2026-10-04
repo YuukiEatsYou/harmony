@@ -168,31 +168,63 @@ check('rewriting leaves an unknown name', rewriteChannelMentions('go #nope now',
 check('rewriting leaves a mid-word hash', rewriteChannelMentions('a#general', ['general'], () => 'X') === 'a#general');
 
 // --- Catching up after being away ---
-// A stand-in shape: mergeLatest only ever compares ids and copies references.
-const message = (id, extra = {}) => ({ id, channelId: 'c1', content: id, ...extra });
+// A stand-in shape: mergeLatest compares ids and timestamps and copies
+// references. A numeric id doubles as its second of the minute, so the order of
+// the ids is the order in time.
+const message = (id, extra = {}) => ({
+  id,
+  channelId: 'c1',
+  content: id,
+  createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, Number(id) || 0)).toISOString(),
+  ...extra,
+});
+const ids = (result) => result.messages.map((entry) => entry.id).join(',');
+const list = (...names) => names.map((name) => message(name));
 
 check(
   'a catch-up page is appended in the order the server sent it',
-  mergeLatest([message('1'), message('2')], [message('2'), message('3'), message('4')])
-    .map((entry) => entry.id)
-    .join(',') === '1,2,3,4',
+  ids(mergeLatest(list('1', '2'), list('2', '3', '4'), false)) === '1,2,3,4',
 );
 check(
   'a message already loaded is refreshed rather than duplicated',
-  mergeLatest([message('1', { content: 'old' })], [message('1', { content: 'edited' })])[0]?.content === 'edited',
+  mergeLatest([message('1', { content: 'old' })], [message('1', { content: 'edited' })], true).messages[0]
+    ?.content === 'edited',
 );
 check(
-  'a refreshed message keeps its position',
-  mergeLatest([message('1'), message('2'), message('3')], [message('2')])
-    .map((entry) => entry.id)
-    .join(',') === '1,2,3',
+  'older pages outside the fresh page are kept as they were',
+  ids(mergeLatest(list('1', '2', '3'), list('2', '3', '4'), false)) === '1,2,3,4',
 );
 check(
-  'a refresh never drops what was already loaded',
-  mergeLatest([message('1'), message('2')], [message('2')]).length === 2,
+  'a message deleted while away is dropped from the range the page covers',
+  ids(mergeLatest(list('1', '2', '3', '4'), list('2', '4', '5'), false)) === '1,2,4,5',
 );
-check('catching up on an empty channel loads the page', mergeLatest([], [message('1')]).length === 1);
-check('an empty catch-up page changes nothing', mergeLatest([message('1')], []).length === 1);
+check(
+  'a message that arrived after the page was fetched is kept',
+  ids(mergeLatest(list('1', '2', '9'), list('2', '3'), false)) === '1,2,3,9',
+);
+check(
+  'a message sharing the page’s oldest millisecond is not taken for deleted',
+  ids(
+    mergeLatest(
+      [message('a', { createdAt: message('2').createdAt }), message('2')],
+      [message('2'), message('3')],
+      false,
+    ),
+  ) === 'a,2,3',
+);
+const gap = mergeLatest(list('1', '2'), list('5', '6', '7'), false);
+check(
+  'a page that does not reach what is loaded replaces it instead of hiding the gap',
+  ids(gap) === '5,6,7' && gap.reset === true,
+);
+check(
+  'an overlapping page keeps the older history reachable',
+  mergeLatest(list('1', '2'), list('2', '3'), false).reset === false,
+);
+const whole = mergeLatest(list('1', '2', '3'), list('3'), true);
+check('a complete page is the whole channel', ids(whole) === '3' && whole.reset === true);
+check('catching up on an empty channel loads the page', ids(mergeLatest([], list('1'), true)) === '1');
+check('an empty catch-up page means the channel was emptied', mergeLatest(list('1'), [], true).messages.length === 0);
 
 // --- Whether a message is aimed at you ---
 // This decides the louder notification sound, so it is worth being exact about.

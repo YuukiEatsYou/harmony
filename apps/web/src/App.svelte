@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { MeResponse, ServerSettingsResponse } from '@harmony/shared';
   import { api } from './lib/api';
+  import { chat } from './lib/chat.svelte';
   import { meta } from './lib/meta.svelte';
   import { session } from './lib/session.svelte';
   import { ui } from './lib/ui.svelte';
@@ -17,7 +18,10 @@
 
   let loading = $state(true);
   let setupOpen = $state(false);
-  /** A one-off message about a Discord sign-in round trip, shown then dismissible. */
+  /**
+   * A one-off message about a Discord sign-in round trip or a session the server
+   * ended, shown then dismissible.
+   */
   let notice = $state<{ text: string; kind: 'ok' | 'error' } | null>(null);
   /**
    * The owner whose setup has already been looked up. A plain variable, not
@@ -67,6 +71,15 @@
         : { text: DISCORD_OK[ok ?? ''] ?? 'Discord connected.', kind: 'ok' };
       window.history.replaceState(null, '', window.location.pathname + window.location.hash);
     }
+  });
+
+  // Being kicked, banned or signed out by a password change drops straight to
+  // the sign-in screen; say why, rather than leave it looking like a glitch.
+  $effect(() => {
+    const reason = chat.signedOutReason;
+    if (!reason) return;
+    notice = { text: reason, kind: 'error' };
+    chat.signedOutReason = null;
   });
 
   /*

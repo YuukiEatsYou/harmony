@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { loadEnvFile } from 'node:process';
 import { resolve } from 'node:path';
-import { HARMONY_NAME } from '@harmony/shared';
+import { GATEWAY_HEARTBEAT_MS, HARMONY_NAME } from '@harmony/shared';
 import { DEFAULT_CSP } from './http/security.ts';
 
 export interface Config {
@@ -28,6 +28,11 @@ export interface Config {
   trustProxy: boolean;
   /** How often automatic retention pruning runs, in minutes. */
   pruneIntervalMinutes: number;
+  /**
+   * How often gateway clients must heartbeat, in milliseconds. Rarely worth
+   * changing outside tests, which shorten it to see a silent socket closed.
+   */
+  gatewayHeartbeatMs: number;
   /** `Content-Security-Policy` sent to browsers, or null to leave the header off. */
   csp: string | null;
 }
@@ -89,6 +94,8 @@ export function loadConfig(): Config {
     cookieSecure: readBoolean(process.env.HARMONY_COOKIE_SECURE, false),
     trustProxy: readBoolean(process.env.HARMONY_TRUST_PROXY, false),
     pruneIntervalMinutes: readNumber(process.env.HARMONY_PRUNE_INTERVAL_MINUTES, 60),
+    // A floor keeps a typo from turning every connection into a heartbeat storm.
+    gatewayHeartbeatMs: Math.max(250, readNumber(process.env.HARMONY_GATEWAY_HEARTBEAT_MS, GATEWAY_HEARTBEAT_MS)),
     csp: readCsp(process.env.HARMONY_CSP),
   };
 }

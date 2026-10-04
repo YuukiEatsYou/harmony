@@ -5,7 +5,6 @@ import websocket from '@fastify/websocket';
 import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
-  GATEWAY_HEARTBEAT_MS,
   MAX_UPLOAD_CEILING_BYTES,
 } from '@harmony/shared';
 import { loadConfig } from './config.ts';
@@ -227,7 +226,7 @@ registerEmojiRoutes(app, { service: emojiService, importer: emojiImport, hub });
 registerStickerRoutes(app, { service: stickerService });
 registerUserRoutes(app, { db, users: userService, hub });
 registerGateway(app, {
-  heartbeatIntervalMs: GATEWAY_HEARTBEAT_MS,
+  heartbeatIntervalMs: config.gatewayHeartbeatMs,
   cookieName: config.cookieName,
   resolveToken: authService.resolveToken,
   hub,
