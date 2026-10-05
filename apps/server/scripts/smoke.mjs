@@ -3835,6 +3835,11 @@ try {
   check('from: a name nobody has finds nothing', texts(await flt({ from: 'nobody-here' })).length === 0);
   check('mentions: finds messages naming a member', texts(await flt({ mentions: ownerName })).length === 1);
   check('mentions: leaves out messages naming nobody', texts(await flt({ mentions: bobName })).length === 0);
+  await postInSearch(bobToken, `fltz @${ownerName}by and x@${ownerName}`);
+  check(
+    'mentions: a longer name or an email address is not a mention',
+    texts(await search({ q: 'fltz', limit: '50', mentions: ownerName }, ownerToken)).length === 0,
+  );
   check('in: narrows to a channel by name, ignoring case', texts(await flt({ in: 'SearchRoom' })).length === 5);
   check('in: another channel finds nothing here', texts(await flt({ in: 'general' })).length === 0);
   const inUnknown = await flt({ in: 'no-such-room' });

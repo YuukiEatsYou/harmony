@@ -896,10 +896,11 @@
   {/if}
 
   {#if showSchedule && chat.activeChannel}
+    <!-- Scheduled text goes through the slash helpers too, as sending it now would. -->
     <SchedulePicker
       channelId={chat.activeChannel.id}
       channelName={chat.activeChannel.name}
-      content={value}
+      content={applySlashCommand(value.trim())}
       attachmentIds={pending.map((attachment) => attachment.id)}
       replyToId={chat.replyTarget?.id ?? null}
       onscheduled={onScheduled}

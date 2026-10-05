@@ -5,6 +5,7 @@
   import { chat } from '../lib/chat.svelte';
   import { members } from '../lib/members.svelte';
   import {
+    FILTER_KEYS,
     activeToken,
     applySuggestion,
     buildSearchParams,
@@ -12,6 +13,7 @@
     mergeFilters,
     parseSearchInput,
     suggestFor,
+    type FilterKey,
     type SearchFilter,
     type Suggestion,
   } from '../lib/search-query';
@@ -24,8 +26,6 @@
   const debounceMs = 300;
 
   let term = $state('');
-  let channelFilter = $state('');
-  let authorFilter = $state('');
   /** Filters typed as from:alice and finished, shown as chips above the results. */
   let chips = $state<SearchFilter[]>([]);
   let caret = $state(0);
@@ -49,7 +49,7 @@
   const searchText = $derived(typed.text);
   const request = $derived(buildSearchParams(typed.text, mergeFilters(chips, typed.filters)));
   /** A term on its own, or a filter on its own, is enough to search. */
-  const canSearch = $derived(request.searchable || channelFilter !== '' || authorFilter !== '');
+  const canSearch = $derived(request.searchable);
   const filteringOnly = $derived(searchText.length === 0 && canSearch);
 
   const active = $derived(activeToken(term, caret));
@@ -59,6 +59,8 @@
       : [],
   );
   const listOpen = $derived(suggestions.length > 0);
+  /** A filter still being typed that does not read yet, such as half a date. */
+  const typingFilter = $derived(active !== null && request.problems.length > 0);
 
   function fail(cause: unknown): void {
     error = cause instanceof ApiError ? cause.message : String(cause);
@@ -98,8 +100,6 @@
   function buildQuery(before?: Message): string {
     const query = new URLSearchParams(request.params);
     query.set('limit', String(pageSize));
-    if (channelFilter) query.set('channelId', channelFilter);
-    if (authorFilter) query.set('authorId', authorFilter);
     if (before) {
       query.set('before', before.createdAt);
       query.set('beforeId', before.id);
@@ -107,7 +107,13 @@
     return query.toString();
   }
 
-  async function search(): Promise<void> {
+  /**
+   * Runs the search. One started by typing pausing leaves alone a filter that is
+   * still under the caret: `after:2024-05-0` is a date on its way, not a mistake,
+   * so it waits for Enter or more typing rather than wiping the results.
+   */
+  async function search(fromTyping = false): Promise<void> {
+    if (fromTyping && active && request.problems.length > 0) return;
     if (request.problems.length > 0) {
       results = [];
       searched = false;
@@ -219,7 +225,7 @@
     if (listOpen) return;
     debounce = setTimeout(() => {
       debounce = null;
-      void search();
+      void search(true);
     }, debounceMs);
   }
 
@@ -228,6 +234,28 @@
     if (debounce) clearTimeout(debounce);
     takeFilters(true);
     void search();
+  }
+
+  /**
+   * Starts a filter from its button: the key goes at the end of the box with the
+   * caret after it, so the suggestion list for it opens straight away.
+   */
+  async function startFilter(key: FilterKey): Promise<void> {
+    const base = term.trimEnd();
+    term = `${base}${base ? ' ' : ''}${key}:`;
+    listDismissed = false;
+    highlighted = -1;
+    await tick();
+    searchInput?.focus();
+    searchInput?.setSelectionRange(term.length, term.length);
+    caret = term.length;
+  }
+
+  /** Puts the suggestions away once focus leaves the box and its list. */
+  function onFocusOut(event: FocusEvent): void {
+    const next = event.relatedTarget;
+    if (next instanceof Node && (event.currentTarget as HTMLElement).contains(next)) return;
+    listDismissed = true;
   }
 
   async function open(message: Message): Promise<void> {
@@ -242,22 +270,24 @@
 
 <div class="admin-overlay">
   <div class="admin search-panel">
-    <div class="admin-body">
+    <!-- The box and its filters stay put; only the results scroll. -->
+    <div class="search-top">
       <div class="search-head">
         <h3>Search messages</h3>
         <button type="button" onclick={onclose}>Close</button>
       </div>
 
       <form class="inline" onsubmit={(event) => { event.preventDefault(); onFilter(); }}>
-        <div class="search-box">
+        <div class="search-box" onfocusout={onFocusOut}>
           <input
             bind:this={searchInput}
             bind:value={term}
             oninput={onInput}
             onkeydown={onKeydown}
             onkeyup={syncCaret}
-            onclick={syncCaret}
-            placeholder="Search, or try from: in: has: before: after:"
+            onclick={() => { syncCaret(); listDismissed = false; }}
+            onfocus={() => (listDismissed = false)}
+            placeholder="Search messages"
             aria-label="Search messages"
             autocomplete="off"
             role="combobox"
@@ -292,6 +322,17 @@
         <button type="submit" disabled={busy}>Search</button>
       </form>
 
+      <!--
+        The filters are typed tokens (from:alice) and these buttons only start
+        one, so there is a single way to narrow a search and one place, the
+        chips, that shows what is applied.
+      -->
+      <div class="search-filter-keys" role="group" aria-label="Add a filter">
+        {#each FILTER_KEYS as key (key)}
+          <button type="button" class="search-filter-key" onclick={() => startFilter(key)}>{key}:</button>
+        {/each}
+      </div>
+
       {#if chips.length > 0}
         <ul class="search-chips" aria-label="Active filters">
           {#each chips as chip (`${chip.key}:${chip.value}`)}
@@ -303,30 +344,17 @@
         </ul>
       {/if}
 
-      <div class="inline">
-        <select bind:value={channelFilter} onchange={onFilter} title="Which channel to search">
-          <option value="">All channels</option>
-          {#each chat.channels as channel (channel.id)}
-            <option value={channel.id}>#{channel.name}</option>
-          {/each}
-        </select>
-
-        <select bind:value={authorFilter} onchange={onFilter} title="Who wrote it">
-          <option value="">Anyone</option>
-          {#each members.list as person (person.id)}
-            <option value={person.id}>{person.displayName ?? person.username}</option>
-          {/each}
-        </select>
-      </div>
-
       {#if error}<p class="form-error">{error}</p>{/if}
+    </div>
 
-      {#if !canSearch}
+    <div class="search-scroll">
+      <!-- Half a date keeps the last results on screen until it reads as one. -->
+      {#if !canSearch && !(typingFilter && searched)}
         <p class="muted">
-          Search across every channel you can see. Narrow it with <code>from:name</code>,
-          <code>mentions:name</code>, <code>in:channel</code>, <code>has:image</code> (or video, gif, file, link, embed,
-          sticker, pin), <code>before:</code>, <code>after:</code> or <code>on:</code> a date like 2024-05-01, today or
-          yesterday. Quote names with spaces: <code>from:"Some Name"</code>.
+          Search across every channel you can see. Pick a filter above or type one:
+          <code>from:name</code>, <code>mentions:name</code>, <code>in:channel</code>, <code>has:image</code> (or video,
+          gif, file, link, embed, sticker, pin), <code>before:</code>, <code>after:</code> or <code>on:</code> a date like
+          2024-05-01, today or yesterday. Quote names with spaces: <code>from:"Some Name"</code>.
         </p>
       {:else if busy && results.length === 0}
         <p class="muted">Searching…</p>

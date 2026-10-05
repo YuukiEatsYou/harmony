@@ -61,9 +61,13 @@ export interface PollService {
   stop(): void;
   /**
    * A Discord voter picked an answer (`add`) or took it back. `importing` lets the
-   * first read of a poll that Discord has already closed record who voted.
+   * first read of a poll that Discord has already closed record who voted, and
+   * stays quiet: an import records every voter, so it announces once at the end
+   * with `announceBridged` rather than once per vote.
    */
   voteBridged(messageId: string, discordAnswerId: number, userId: string, add: boolean, importing?: boolean): boolean;
+  /** Tells the channel a poll's counts after a quiet import. */
+  announceBridged(messageId: string): void;
   /** Discord closed a poll made there. */
   closeBridged(messageId: string): boolean;
   /** Notified when a member ends a poll by hand, never for bridged closes or the clock. */
@@ -267,8 +271,13 @@ export function createPollService(
       } else {
         changed = deleteVote(sqlite, option.id, userId);
       }
-      announce(message, userId);
+      if (changed && !importing) announce(message, userId);
       return changed;
+    },
+
+    announceBridged(messageId) {
+      const message = findMessage(sqlite, messageId);
+      if (message && !message.deleted_at && findPollByMessage(sqlite, messageId)) announce(message, null);
     },
 
     closeBridged(messageId) {

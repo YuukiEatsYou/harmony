@@ -539,7 +539,9 @@ their Discord vote and their Harmony vote are the same row, and in a single-answ
 choice from either side replaces the earlier one. There is no loop to guard against beyond the usual
 rule: bridged votes and closes go through `voteBridged` / `closeBridged`, which skip permission
 checks and notify no listener, and only a local early end notifies the bridge. The poll's Discord
-message is also recorded in the permanent seen-set, like any other mirrored message.
+message is also recorded in the permanent seen-set, like any other mirrored message. Reading a
+Discord poll for the first time records every existing voter quietly and then sends one
+`POLL_UPDATE` (`announceBridged`), so a large poll does not flood the gateway with one frame per vote.
 
 ## Saved messages
 

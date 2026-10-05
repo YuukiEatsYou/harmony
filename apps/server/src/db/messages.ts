@@ -128,6 +128,19 @@ const HAS_CONDITIONS: Record<SearchHas, string> = {
   pin: 'pinned_at IS NOT NULL',
 };
 
+/** A character that cannot be part of a username, as a GLOB class (see USERNAME_PATTERN). */
+const NOT_NAME = '[^a-z0-9._-]';
+
+/**
+ * GLOB patterns for `@name` as a whole mention, at the start or after a
+ * non-name character and at the end or before one, over lowercased content.
+ * Usernames hold none of GLOB's special characters, so they need no escaping.
+ */
+function mentionGlobs(username: string): string[] {
+  const mention = `@${username.toLowerCase()}`;
+  return [mention, `${mention}${NOT_NAME}*`, `*${NOT_NAME}${mention}`, `*${NOT_NAME}${mention}${NOT_NAME}*`];
+}
+
 /**
  * Case-insensitive substring search over message text, newest first. With no term
  * the filters alone decide what comes back, e.g. everything one member said.
@@ -163,9 +176,11 @@ export function searchMessages(sqlite: DatabaseSync, options: SearchOptions): Me
   }
   if (mentionedUsernames !== undefined) {
     if (mentionedUsernames.length === 0) return [];
-    // A mention is the literal text @name, so the filter is a substring match on it.
-    conditions.push(`(${mentionedUsernames.map(() => "content LIKE ? ESCAPE '\\'").join(' OR ')})`);
-    values.push(...mentionedUsernames.map((name) => likePattern(`@${name}`)));
+    // A mention is the literal text @name, standing alone the way the mention
+    // parser reads it: @bob must not find @bobby, nor the bob in x@bob.
+    const patterns = mentionedUsernames.flatMap(mentionGlobs);
+    conditions.push(`(${patterns.map(() => 'lower(content) GLOB ?').join(' OR ')})`);
+    values.push(...patterns);
   }
   for (const trait of new Set(has ?? [])) conditions.push(HAS_CONDITIONS[trait]);
   if (sentAfter !== undefined) {

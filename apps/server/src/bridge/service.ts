@@ -1189,7 +1189,9 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         });
       }
     }
-    if (poll.finalized) deps.polls.closeBridged(created.id);
+    // The votes went in quietly; one update carries them all, and closing a
+    // finished poll sends its own.
+    if (!poll.finalized || !deps.polls.closeBridged(created.id)) deps.polls.announceBridged(created.id);
     return true;
   }
 

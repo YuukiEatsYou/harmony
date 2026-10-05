@@ -36,21 +36,25 @@
   const serverMatches = $derived(filterByName(emojis.picker, query));
   const unicodeMatches = $derived(filterUnicodeGroups(unicodeGroups, query));
 
-  /** Unicode names by character, so frequently used emoji can be searched too. */
+  /** Unicode names by character, for the frequently used tab's hover titles. */
   const unicodeNames = $derived(
     new Map(unicodeGroups.flatMap((group) => group.emojis.map((emoji) => [emoji.emoji, emoji.name] as const))),
   );
-  const recentMatches = $derived.by(() => {
-    const needle = query.trim().toLowerCase();
-    return emojiUsage.ranked.filter((used) =>
-      !needle ? true : (used.emojiId ? used.emoji : (unicodeNames.get(used.emoji) ?? '')).toLowerCase().includes(needle),
-    );
-  });
 
   /** Searching is a different task from browsing, so the shortcuts step aside. */
   const searching = $derived(query.trim().length > 0);
 
   let picker = $state<HTMLDivElement | null>(null);
+  let searchInput = $state<HTMLInputElement | null>(null);
+
+  /** Every unicode match in one list, for a search that ignores the tabs. */
+  const unicodeFlat = $derived(unicodeMatches.flatMap((group) => group.emojis));
+
+  // Ready to type into on a desktop. A phone keeps its keyboard down until the
+  // field is tapped, since raising it would cover the emoji being browsed.
+  $effect(() => {
+    if (searchInput && window.matchMedia('(pointer: fine)').matches) searchInput.focus({ preventScroll: true });
+  });
 
   /**
    * Keeps the picker clear of the keyboard.
@@ -94,12 +98,13 @@
     <input
       class="emoji-search"
       type="search"
+      bind:this={searchInput}
       bind:value={query}
       placeholder="Search emoji"
       aria-label="Search emoji"
       autocomplete="off"
     />
-    <div class="emoji-tabs">
+    <div class="emoji-tabs" hidden={searching}>
       {#if emojiUsage.ranked.length > 0}
         <button
           type="button"
@@ -141,33 +146,61 @@
       </div>
     {/if}
 
-    {#if tab === 'recent' && emojiUsage.ranked.length > 0}
-      {#if recentMatches.length === 0}
-        <p class="muted emoji-empty">No frequently used emoji match that.</p>
+    {#if searching}
+      <!--
+        A search looks everywhere at once: someone typing "fire" wants the
+        emoji, not to guess first which tab it lives on.
+      -->
+      {#if serverMatches.length === 0 && unicodeFlat.length === 0}
+        <p class="muted emoji-empty">{unicodeGroups.length === 0 && !unicodeFailed ? 'Loading…' : 'No emoji match that.'}</p>
       {:else}
-        <span class="emoji-group-name">Frequently used</span>
-        <div class="emoji-options">
-          {#each recentMatches as used (used.emojiId ?? used.emoji)}
-            <button
-              type="button"
-              class="emoji-option"
-              title={used.emojiId ? used.emoji : (unicodeNames.get(used.emoji) ?? used.emoji)}
-              onclick={() => onpick(used.emoji, used.emojiId)}
-            >
-              {#if used.emojiId}
-                <img src={`/api/v1/emojis/${used.emojiId}`} alt={used.emoji} />
-              {:else}
-                {used.emoji}
-              {/if}
-            </button>
-          {/each}
-        </div>
+        {#if serverMatches.length > 0}
+          <span class="emoji-group-name">Server</span>
+          <div class="emoji-options">
+            {#each serverMatches as emoji (emoji.id)}
+              <button
+                type="button"
+                class="emoji-option"
+                title={`:${emoji.name}:`}
+                onclick={() => onpick(`:${emoji.name}:`, emoji.id)}
+              >
+                <img src={`/api/v1/emojis/${emoji.id}`} alt={emoji.name} />
+              </button>
+            {/each}
+          </div>
+        {/if}
+        {#if unicodeFlat.length > 0}
+          {#if serverMatches.length > 0}<span class="emoji-group-name">Unicode</span>{/if}
+          <div class="emoji-options">
+            {#each unicodeFlat as emoji (emoji.emoji)}
+              <button type="button" class="emoji-option" title={emoji.name} onclick={() => onpick(emoji.emoji, null)}>
+                {emoji.emoji}
+              </button>
+            {/each}
+          </div>
+        {/if}
       {/if}
+    {:else if tab === 'recent' && emojiUsage.ranked.length > 0}
+      <span class="emoji-group-name">Frequently used</span>
+      <div class="emoji-options">
+        {#each emojiUsage.ranked as used (used.emojiId ?? used.emoji)}
+          <button
+            type="button"
+            class="emoji-option"
+            title={used.emojiId ? used.emoji : (unicodeNames.get(used.emoji) ?? used.emoji)}
+            onclick={() => onpick(used.emoji, used.emojiId)}
+          >
+            {#if used.emojiId}
+              <img src={`/api/v1/emojis/${used.emojiId}`} alt={used.emoji} />
+            {:else}
+              {used.emoji}
+            {/if}
+          </button>
+        {/each}
+      </div>
     {:else if tab !== 'unicode'}
       {#if serverMatches.length === 0}
-        <p class="muted emoji-empty">
-          {searching ? 'No server emoji match that.' : 'This server has no custom emoji yet.'}
-        </p>
+        <p class="muted emoji-empty">This server has no custom emoji yet.</p>
       {:else}
         <div class="emoji-options">
           {#each serverMatches as emoji (emoji.id)}
@@ -186,16 +219,10 @@
       <p class="muted emoji-empty">Could not load the unicode emoji list. Check your connection.</p>
     {:else if unicodeGroups.length === 0}
       <p class="muted emoji-empty">Loading…</p>
-    {:else if unicodeMatches.length === 0}
-      <p class="muted emoji-empty">No emoji match that.</p>
     {:else}
       {#each unicodeMatches as group (group.name)}
         <div>
-          <!--
-            The heading is dropped while searching: a handful of results split
-            across nine headings reads worse than one plain list.
-          -->
-          {#if !searching}<span class="emoji-group-name">{group.name}</span>{/if}
+          <span class="emoji-group-name">{group.name}</span>
           <div class="emoji-options">
             {#each group.emojis as emoji (emoji.emoji)}
               <button type="button" class="emoji-option" title={emoji.name} onclick={() => onpick(emoji.emoji, null)}>

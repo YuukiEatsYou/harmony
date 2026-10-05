@@ -1991,6 +1991,7 @@ try {
   transport.state.pollVoters['dp1:1'] = [{ id: '5001', name: 'Discord Dee' }, { id: '5002', name: 'Discord Eli' }];
   transport.state.pollVoters['dp1:2'] = [{ id: '4242', name: 'Bobby on Discord' }];
   const mirrorsAtDiscordPoll = transport.state.mirrors.length;
+  const pollEventsBeforeImport = pollEvents().length;
   transport.emit(
     fromDiscord({
       id: 'dp1',
@@ -2011,6 +2012,11 @@ try {
   );
   await sleep(100);
   const arrived = recent().find((m) => m.poll?.question === 'Movie night?');
+  check(
+    'importing a Discord poll sends one update for all its voters, not one each',
+    pollEvents().length - pollEventsBeforeImport === 1,
+    `got ${pollEvents().length - pollEventsBeforeImport}`,
+  );
   check(
     'a poll made on Discord arrives as a poll message with its options',
     arrived?.content === 'Movie night?' &&

@@ -1061,7 +1061,7 @@ is one they can already read.
 | `before` | ISO 8601 string | — | Return matches older than this timestamp |
 | `beforeId` | string | — | Id of the match `before` came from |
 | `from` | string ≤64, repeatable (up to 10) | — | Author username or display name, case-insensitive. Several values mean any of them; a name nobody has matches nothing |
-| `mentions` | string ≤64, repeatable | — | Messages whose text names `@username`, for any of the given members. A substring match on the literal `@name` |
+| `mentions` | string ≤64, repeatable | — | Messages whose text names `@username`, for any of the given members. The `@name` must stand alone, as the mention parser reads it: `@bob` does not find `@bobby` or `x@bob` |
 | `in` | string ≤64, repeatable | — | Channel name, case-insensitive, leading `#` ignored. Several mean any of them. A channel that is unknown **or hidden from the caller** returns `404 no_such_channel` |
 | `has` | `image` `video` `gif` `file` `link` `embed` `sticker` `pin`, repeatable | — | Every listed trait must hold. `image` includes gifs, `file` is any attachment, `link` is an `http(s)://` address in the text, `embed` a resolved link preview, `pin` a pinned message. Anything else is `400` |
 | `sentAfter` | integer, epoch ms | — | Only messages sent at or after this instant |
