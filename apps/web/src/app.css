@@ -1757,6 +1757,24 @@ button.mention:hover {
   padding: 0 1.1rem 1.1rem;
 }
 
+/* A draft's custom emoji drawn as they will look once sent; the textarea still holds the :names:. */
+.composer-preview {
+  max-height: 6em;
+  padding: 0.35rem 0.75rem;
+  overflow-y: auto;
+  border-radius: var(--h-radius);
+  border: 1px dashed var(--h-border);
+  background: var(--h-bg-elevated);
+  color: var(--h-text-muted);
+  font-size: 0.925rem;
+  line-height: 1.4;
+}
+
+/* The message styles space blocks apart; the ends should not leave a gap inside the strip. */
+.composer-preview .content {
+  margin: 0;
+}
+
 /* The buttons sit by the last line, so a draft that grows taller does not leave them floating mid-box. */
 .composer form {
   display: flex;

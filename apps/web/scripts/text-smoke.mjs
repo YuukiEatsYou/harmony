@@ -40,6 +40,7 @@ import {
 } from '../src/lib/time-input.ts';
 import { firstUnreadIndex, muteLabel, newMessageCount, newMessagesLabel, pillCount } from '../src/lib/unread.ts';
 import { formatTimestamp, formatTimestampTitle } from '../src/lib/timestamp.ts';
+import { draftPreview } from '../src/lib/composer-preview.ts';
 import { filterByName, filterUnicodeGroups } from '../src/lib/unicode-emoji.ts';
 
 const require = createRequire(import.meta.url);
@@ -774,6 +775,24 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('one message is singular', newMessagesLabel(1, false, at(1), clock) === '1 new message since 12:01');
   check('a partial count gets a plus', newMessagesLabel(50, true, at(1), clock) === '50+ new messages since 12:01');
   check('pills cap at 99+', pillCount(5) === '5' && pillCount(99) === '99' && pillCount(100) === '99+');
+}
+
+// --- Composer preview ---
+{
+  const lookup = new Map([['YES', { id: 'e1', name: 'YES', hash: 'h', animated: false }]]);
+  const draft = (text, map = lookup) => draftPreview(text, map, noMention);
+  const hasEmoji = (blocks) => blocks !== null && inlineSegmentsOf(blocks).some((segment) => segment.type === 'emoji');
+  check('a known emoji gets a preview', hasEmoji(draft('hi :YES:')));
+  check('plain text gets none', draft('hello world') === null);
+  check('text with a colon but no emoji gets none', draft('see http://example.com at 3:4') === null);
+  check('an unknown name gets none', draft(':NOPE:') === null);
+  check('names are case sensitive', draft(':yes:') === null);
+  check('no custom emoji at all gets none', draft(':YES:', new Map()) === null);
+  check('an escaped shortcode gets none', draft('\\:YES:') === null);
+  check('inside a code block gets none', draft('```\n:YES:\n```') === null);
+  check('inside inline code gets none', draft('`:YES:`') === null);
+  check('next to a link it still counts', hasEmoji(draft(':YES: https://example.com/a')));
+  check('formatting is kept in the preview', hasEmoji(draft('**bold** :YES:')));
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);

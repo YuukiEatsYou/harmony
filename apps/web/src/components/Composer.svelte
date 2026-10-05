@@ -13,6 +13,7 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { drafts, type Draft } from '../lib/drafts.svelte';
+  import { draftPreview } from '../lib/composer-preview';
   import { emojis } from '../lib/emojis.svelte';
   import { mediaFilesFrom } from '../lib/files';
   import { members } from '../lib/members.svelte';
@@ -22,6 +23,7 @@
   import { parseTimeExpression, timestampChoices, type ParsedMoment } from '../lib/time-input';
   import { loadUnicodeEmoji, type UnicodeEmoji } from '../lib/unicode-emoji';
   import { uploads } from '../lib/upload-queue.svelte';
+  import ComposerPreview from './ComposerPreview.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import GifPicker from './GifPicker.svelte';
   import Icon from './Icon.svelte';
@@ -50,6 +52,10 @@
     session.user && chat.activeChannelId ? `${session.user.id}:${chat.activeChannelId}` : null,
   );
   const value = $derived(drafts.get(draftKey).text);
+  /** The draft with its custom emoji drawn, or null while there is nothing to show. */
+  const preview = $derived(
+    draftPreview(value, emojis.lookup, (name) => members.byUsername.get(name.toLowerCase()), chat.channels),
+  );
   const pending = $derived(drafts.get(draftKey).attachments);
 
   let busy = $state(false);
@@ -834,6 +840,10 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if preview}
+    <ComposerPreview blocks={preview} />
   {/if}
 
   <form onsubmit={onSubmit}>
