@@ -10,6 +10,11 @@ export function avatarUrl(user: User | null | undefined): string | null {
   return `/api/v1/users/${user.id}/avatar?v=${user.avatarHash}`;
 }
 
+/** URL of a user's banner, or null when they have none. Same cache rule as avatars. */
+export function bannerUrl(userId: string, hash: string | null): string | null {
+  return hash ? `/api/v1/users/${userId}/banner?v=${hash}` : null;
+}
+
 /** The letter to show when a user has no profile picture. */
 export function initial(user: User | null | undefined): string {
   return (user?.displayName ?? user?.username ?? '?').charAt(0).toUpperCase();

@@ -3,11 +3,20 @@ import sharp from 'sharp';
 import {
   ALLOWED_IMAGE_TYPES,
   AVATAR_SIZE,
+  BANNER_HEIGHT,
+  BANNER_WIDTH,
+  BIO_MAX,
   DEFAULT_MAX_AVATAR_BYTES,
+  DEFAULT_MAX_BANNER_BYTES,
+  SOCIAL_PLATFORM_KEYS,
+  STATUS_MAX,
+  validSocialValue,
   type ImageContentType,
+  type SocialLinks,
 } from '@harmony/shared';
 import type { Config } from '../config.ts';
 import { hasPassword, hashPassword, verifyPassword } from '../auth/passwords.ts';
+import { averageColor } from '../media/color.ts';
 import {
   findUserById,
   findUserByDiscordId,
@@ -29,6 +38,10 @@ export interface UserService {
       showTyping?: boolean;
       notifyMajor?: boolean;
       notifyMinor?: boolean;
+      bio?: string;
+      status?: string;
+      accentColor?: number | null;
+      socialLinks?: Record<string, string>;
     },
   ): UserRow;
   /**
@@ -58,8 +71,13 @@ export interface UserService {
    */
   setAvatarFromData(userId: string, data: Buffer): Promise<UserRow | null>;
   clearAvatar(userId: string): UserRow;
+  /** Stores a normalized banner from an uploaded image. */
+  updateBanner(userId: string, file: { contentType: string; data: Buffer }): Promise<UserRow>;
+  clearBanner(userId: string): UserRow;
   /** Absolute path of an avatar blob. */
   avatarPath(hash: string): string;
+  /** Absolute path of a banner blob. */
+  bannerPath(hash: string): string;
 }
 
 export function createUserService(sqlite: DatabaseSync, config: Config): UserService {
@@ -97,6 +115,42 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
     } catch {
       return null;
     }
+  }
+
+  /** Banners are cropped to a wide, fixed size, the same way avatars are squared. */
+  async function normalizeBanner(data: Buffer): Promise<Buffer | null> {
+    if (data.length > DEFAULT_MAX_BANNER_BYTES) return null;
+    try {
+      return await sharp(data)
+        .resize(BANNER_WIDTH, BANNER_HEIGHT, { fit: 'cover', position: 'center' })
+        .webp({ quality: 85 })
+        .toBuffer();
+    } catch {
+      return null;
+    }
+  }
+
+  /** A trimmed value, or null when it reads as empty so nothing blank is stored. */
+  function trimToNull(value: string | null | undefined): string | null {
+    const trimmed = value?.trim() ?? '';
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  /**
+   * Keeps only the known platforms with a value that is valid for them, dropping
+   * anything else. A handle is never rewritten here; it is only ever joined to a
+   * fixed base when it becomes a link.
+   */
+  function cleanSocialLinks(input: Record<string, string> | undefined): SocialLinks {
+    const clean: SocialLinks = {};
+    if (!input) return clean;
+    for (const platform of SOCIAL_PLATFORM_KEYS) {
+      const raw = input[platform];
+      if (raw === undefined) continue;
+      const value = raw.trim();
+      if (value.length > 0 && validSocialValue(platform, value)) clean[platform] = value;
+    }
+    return clean;
   }
 
   /**
@@ -141,6 +195,7 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
 
   return {
     avatarPath: blobs.pathFor,
+    bannerPath: blobs.pathFor,
 
     updateProfile(userId, patch) {
       const row = require(userId);
@@ -149,6 +204,10 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
         showTyping?: boolean;
         notifyMajor?: boolean;
         notifyMinor?: boolean;
+        bio?: string | null;
+        status?: string | null;
+        accentColor?: number | null;
+        socialLinks?: SocialLinks;
       } = {};
       if (patch.displayName !== undefined) {
         // Empty means "go back to the username".
@@ -158,6 +217,10 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
       if (patch.showTyping !== undefined) clean.showTyping = patch.showTyping;
       if (patch.notifyMajor !== undefined) clean.notifyMajor = patch.notifyMajor;
       if (patch.notifyMinor !== undefined) clean.notifyMinor = patch.notifyMinor;
+      if (patch.bio !== undefined) clean.bio = trimToNull(patch.bio.slice(0, BIO_MAX));
+      if (patch.status !== undefined) clean.status = trimToNull(patch.status.slice(0, STATUS_MAX));
+      if (patch.accentColor !== undefined) clean.accentColor = patch.accentColor;
+      if (patch.socialLinks !== undefined) clean.socialLinks = cleanSocialLinks(patch.socialLinks);
       updateUserProfile(sqlite, row.id, clean);
       return require(userId);
     },
@@ -223,7 +286,10 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
         throw new HttpError(415, 'invalid_image', 'That file is not a readable image.');
       }
 
-      updateUserProfile(sqlite, row.id, { avatarHash: blobs.save(normalized) });
+      updateUserProfile(sqlite, row.id, {
+        avatarHash: blobs.save(normalized),
+        avatarColor: await averageColor(normalized),
+      });
       return require(userId);
     },
 
@@ -234,14 +300,52 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
       const normalized = await normalizeAvatar(data);
       if (!normalized) return null;
 
-      updateUserProfile(sqlite, row.id, { avatarHash: blobs.save(normalized) });
+      updateUserProfile(sqlite, row.id, {
+        avatarHash: blobs.save(normalized),
+        avatarColor: await averageColor(normalized),
+      });
       return require(userId);
     },
 
     clearAvatar(userId) {
       const row = require(userId);
       assertEditable(row);
-      updateUserProfile(sqlite, row.id, { avatarHash: null });
+      updateUserProfile(sqlite, row.id, { avatarHash: null, avatarColor: null });
+      return require(userId);
+    },
+
+    async updateBanner(userId, file) {
+      const row = require(userId);
+      assertEditable(row);
+
+      if (!ALLOWED_IMAGE_TYPES.includes(file.contentType as ImageContentType)) {
+        throw new HttpError(
+          415,
+          'unsupported_media_type',
+          `Unsupported image type "${file.contentType}". Allowed: ${ALLOWED_IMAGE_TYPES.join(', ')}.`,
+        );
+      }
+      if (file.data.length > DEFAULT_MAX_BANNER_BYTES) {
+        throw new HttpError(
+          413,
+          'payload_too_large',
+          `Banners must be at most ${DEFAULT_MAX_BANNER_BYTES / (1024 * 1024)} MB.`,
+        );
+      }
+
+      const normalized = await normalizeBanner(file.data);
+      if (!normalized) {
+        throw new HttpError(415, 'invalid_image', 'That file is not a readable image.');
+      }
+
+      updateUserProfile(sqlite, row.id, { bannerHash: blobs.save(normalized) });
+      return require(userId);
+    },
+
+    clearBanner(userId) {
+      const row = require(userId);
+      assertEditable(row);
+      updateUserProfile(sqlite, row.id, { bannerHash: null });
       return require(userId);
     },
   };

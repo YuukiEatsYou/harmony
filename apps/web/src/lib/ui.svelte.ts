@@ -1,3 +1,4 @@
+import type { User } from '@harmony/shared';
 import type { AdminTabId } from './admin';
 
 class UiState {
@@ -12,6 +13,8 @@ class UiState {
   savedOpen = $state(false);
   scheduledOpen = $state(false);
   eventsOpen = $state(false);
+  /** The member whose full profile viewer is open, or null. */
+  profileViewerUser = $state<User | null>(null);
   /** Off-canvas navigation, used on narrow screens. */
   sidebarOpen = $state(false);
   rosterOpen = $state(false);
@@ -107,6 +110,17 @@ class UiState {
     this.profileOpen = false;
   }
 
+  /** Opens the big, fixed profile viewer for one member. */
+  openProfileViewer(user: User): void {
+    this.closeDrawers();
+    this.#closePanels();
+    this.profileViewerUser = user;
+  }
+
+  closeProfileViewer(): void {
+    this.profileViewerUser = null;
+  }
+
   /**
    * Only one modal panel is ever open at once, so opening any of them closes
    * the rest, however they were reached. Bumping a panel through the console or
@@ -122,6 +136,7 @@ class UiState {
     this.savedOpen = false;
     this.scheduledOpen = false;
     this.eventsOpen = false;
+    this.profileViewerUser = null;
   }
 
   /** Only one drawer is ever open, so they never overlap. */

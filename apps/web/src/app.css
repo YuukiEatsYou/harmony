@@ -2502,6 +2502,308 @@ button.roster-member:hover {
   border-radius: 50%;
 }
 
+/* ---- Profile viewer ---- */
+
+/* A full-screen click-catcher behind the fixed panel, so a click anywhere closes it. */
+.profile-viewer-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+}
+
+/* A button backdrop, so the shared hover/active styles are pinned off it. Kept
+   more specific than button:hover:not(:disabled), or the whole scrim tints
+   accent the moment the pointer is anywhere over it. */
+.admin-overlay .profile-viewer-backdrop:hover:not(:disabled),
+.admin-overlay .profile-viewer-backdrop:active:not(:disabled) {
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.profile-viewer {
+  position: relative;
+  z-index: 1;
+  margin: auto;
+  width: min(520px, 96vw);
+  max-height: min(760px, 92vh);
+  overflow: hidden auto;
+  border-radius: var(--h-radius-xl);
+  /*
+   * The whole panel takes the member's color, mixed down toward the panel surface
+   * so the text stays readable whatever they pick. The tint is strongest at the
+   * bottom and fades out toward the top, so the banner area is left clear and a
+   * banner image is not washed out. `--profile-accent` is set per member, falling
+   * back to the theme accent.
+   */
+  background: linear-gradient(
+    0deg,
+    color-mix(in srgb, var(--profile-accent) 34%, var(--h-bg-elevated)) 0%,
+    var(--h-bg-elevated) 55%
+  );
+  border: 1px solid var(--h-glass-border);
+  box-shadow: var(--h-shadow-xl);
+  /*
+   * A fade, not a scale. Flex centering can land the panel on a half pixel, and
+   * an entrance that composites a transform then hands it back re-rasterises the
+   * content at that fractional origin, which reads as everything settling a hair
+   * off the moment the animation ends. A fade leaves no transform behind.
+   */
+  animation: overlay-in var(--h-duration-slow) var(--h-ease);
+}
+
+/* The member's color over a banner image, kept light so the banner stays visible. */
+.profile-viewer-tint {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--profile-accent) 22%, transparent);
+}
+
+.profile-viewer-banner {
+  position: relative;
+  height: 150px;
+  background-size: cover;
+  background-position: center;
+}
+
+.profile-viewer-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 40%, rgb(0 0 0 / 45%));
+}
+
+.profile-viewer-close {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--h-radius-full);
+  background: rgb(0 0 0 / 45%);
+  color: #fff;
+}
+
+.profile-viewer-close:hover:not(:disabled) {
+  background: rgb(0 0 0 / 65%);
+  box-shadow: none;
+}
+
+.profile-viewer-body {
+  padding: 0 1.5rem 1.5rem;
+}
+
+.profile-viewer-avatar {
+  position: relative;
+  width: max-content;
+  margin-top: -56px;
+  margin-bottom: 0.7rem;
+}
+
+.profile-viewer-avatar .avatar {
+  width: 112px;
+  height: 112px;
+  /* A ring in the panel's own color, so the picture reads as set into the panel. */
+  border: 4px solid var(--h-bg-elevated);
+  font-size: 2.2rem;
+  /* And a glow in the member's color, so it still sits in a pool of it. */
+  box-shadow: 0 0 28px 3px color-mix(in srgb, var(--profile-accent) 55%, transparent);
+}
+
+.profile-viewer-online {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 18px;
+  height: 18px;
+  border: 4px solid var(--h-bg-elevated);
+  border-radius: var(--h-radius-full);
+  background: var(--h-ok);
+}
+
+.profile-viewer-names {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.profile-viewer-names strong {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--h-text);
+  font-size: 1.4rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.profile-viewer-status {
+  margin: 0.7rem 0 0;
+  font-size: 0.95rem;
+}
+
+.profile-viewer-bio {
+  margin: 0.7rem 0 0;
+  color: var(--h-text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.profile-viewer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 1rem;
+}
+
+.profile-viewer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--h-radius-full);
+  /* The member's color again, mixed down so the label stays readable. */
+  background: color-mix(in srgb, var(--profile-accent) 26%, var(--h-bg-deep));
+  border: 1px solid color-mix(in srgb, var(--profile-accent) 40%, var(--h-border));
+  color: var(--h-text-muted);
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+
+.profile-viewer-link:hover {
+  border-color: var(--h-border-strong);
+  color: var(--h-text);
+}
+
+.profile-viewer-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1.2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--h-border);
+}
+
+/* Leaving the instance is worth a pause; the server name is the reassurance. */
+.profile-leave {
+  position: relative;
+  z-index: 1;
+  margin: auto;
+  width: min(420px, 92vw);
+  padding: 1.4rem;
+  border-radius: var(--h-radius-lg);
+  background: var(--h-bg-elevated);
+  border: 1px solid var(--h-glass-border);
+  box-shadow: var(--h-shadow-xl);
+}
+
+.profile-leave h3 {
+  margin: 0 0 0.6rem;
+}
+
+.profile-leave p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-leave code {
+  overflow-wrap: anywhere;
+}
+
+/* ---- Profile customization ---- */
+
+.custom-label {
+  margin: 0 0 0.3rem;
+  color: var(--h-text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.custom-banner {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  height: 120px;
+  margin-bottom: 0.6rem;
+  padding: 0.6rem;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius);
+  background-position: center;
+  background-size: cover;
+}
+
+.custom-banner-tint {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0.35;
+}
+
+/* The buttons sit above the tint. */
+.custom-banner .editor-actions {
+  position: relative;
+  z-index: 1;
+}
+
+.custom-accent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.custom-accent input[type='color'] {
+  width: 44px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-deep);
+}
+
+.custom-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.custom-preset {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-full);
+}
+
+.custom-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius);
+}
+
+.custom-links legend {
+  padding: 0 0.4rem;
+}
+
 /* ============================================================
    EMOJI PICKER
    ============================================================ */

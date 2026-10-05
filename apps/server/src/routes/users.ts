@@ -13,7 +13,7 @@ import { resolvePermissions } from '../auth/permissions.ts';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
 import type { Database } from '../db/index.ts';
 import { deleteOtherSessionsForUser } from '../db/sessions.ts';
-import { findUserById, presentUser, type UserRow } from '../db/users.ts';
+import { findUserById, presentUser, presentUserProfile, type UserRow } from '../db/users.ts';
 import { HttpError } from '../http/errors.ts';
 import { parseBody } from '../http/validation.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
@@ -99,6 +99,47 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
     return response;
   });
 
+  app.put('/api/v1/users/@me/banner', async (request) => {
+    const auth = requireAuth(request);
+
+    if (!request.isMultipart()) {
+      throw new HttpError(415, 'unsupported_media_type', 'Expected a multipart/form-data upload.');
+    }
+    const file = await request.file();
+    if (!file) throw new HttpError(400, 'file_required', 'No image was uploaded.');
+
+    let data: Buffer;
+    try {
+      data = await file.toBuffer();
+    } catch {
+      throw new HttpError(413, 'payload_too_large', 'That image is too large.');
+    }
+
+    const response = present(await deps.users.updateBanner(auth.user.id, { contentType: file.mimetype, data }));
+    announce(auth.user.id);
+    return response;
+  });
+
+  app.delete('/api/v1/users/@me/banner', async (request) => {
+    const auth = requireAuth(request);
+    const response = present(deps.users.clearBanner(auth.user.id));
+    announce(auth.user.id);
+    return response;
+  });
+
+  /**
+   * The full profile a member sets about themselves: bio, status, colors and
+   * social links. Fetched on its own rather than carried on every User, since it
+   * is only needed when somebody actually opens a profile.
+   */
+  app.get('/api/v1/users/:id/profile', async (request) => {
+    requirePermission(request, Permission.ViewChannels);
+    const { id } = request.params as { id: string };
+    const row = findUserById(deps.db.sqlite, id);
+    if (!row) throw new HttpError(404, 'user_not_found', 'That user does not exist.');
+    return presentUserProfile(row);
+  });
+
   app.get('/api/v1/users/:id/avatar', async (request, reply) => {
     const { id } = request.params as { id: string };
 
@@ -125,6 +166,33 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
       .header('Content-Type', 'image/webp')
       .header('Cache-Control', 'private, max-age=31536000, immutable')
       .header('ETag', `"${row.avatar_hash}"`);
+    return reply.send(createReadStream(path));
+  });
+
+  app.get('/api/v1/users/:id/banner', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const row = findUserById(deps.db.sqlite, id);
+    if (!row?.banner_hash) {
+      throw new HttpError(404, 'banner_not_found', 'That user has no banner.');
+    }
+
+    // Same hash-as-capability rule as avatars: the hash in the URL is what lets a
+    // cached image load, and everyone else still needs to be able to see channels.
+    const provided = (request.query as { v?: string }).v;
+    if (provided !== row.banner_hash) {
+      requirePermission(request, Permission.ViewChannels);
+    }
+
+    const path = deps.users.bannerPath(row.banner_hash);
+    if (!existsSync(path)) {
+      throw new HttpError(404, 'banner_missing', 'That banner is missing from storage.');
+    }
+
+    reply
+      .header('Content-Type', 'image/webp')
+      .header('Cache-Control', 'private, max-age=31536000, immutable')
+      .header('ETag', `"${row.banner_hash}"`);
     return reply.send(createReadStream(path));
   });
 }

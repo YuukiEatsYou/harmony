@@ -14,6 +14,7 @@
   import Lightbox from './components/Lightbox.svelte';
   import ProfileCard from './components/ProfileCard.svelte';
   import ProfilePanel from './components/ProfilePanel.svelte';
+  import ProfileViewer from './components/ProfileViewer.svelte';
   import SearchPanel from './components/SearchPanel.svelte';
   import SetupWizard from './components/SetupWizard.svelte';
 
@@ -124,6 +125,9 @@
   {/if}
   {#if ui.profileOpen}
     <ProfilePanel />
+  {/if}
+  {#if ui.profileViewerUser}
+    <ProfileViewer />
   {/if}
   {#if ui.aboutOpen}
     <AboutPanel />

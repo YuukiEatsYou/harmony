@@ -12,8 +12,9 @@
   import { lightbox } from '../lib/lightbox.svelte';
   import { members } from '../lib/members.svelte';
   import { meta } from '../lib/meta.svelte';
-  import { profileCard } from '../lib/profile-card.svelte';
+  import { profileCard, hoverCapable } from '../lib/profile-card.svelte';
   import { session } from '../lib/session.svelte';
+  import { ui } from '../lib/ui.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import EditHistory from './EditHistory.svelte';
   import EmbedVideo from './EmbedVideo.svelte';
@@ -28,12 +29,19 @@
 
   /** Opens the profile card for an author, when there is one to show. */
   function openCard(user: User | null | undefined, element: HTMLElement): void {
-    if (user) profileCard.show(user, element);
+    if (user && hoverCapable()) profileCard.show(user, element);
   }
 
   /** Opens it after the pointer rests, for the hover triggers. */
   function restCard(user: User | null | undefined, element: HTMLElement): void {
-    if (user) profileCard.scheduleShow(user, element);
+    if (user && hoverCapable()) profileCard.scheduleShow(user, element);
+  }
+
+  /** Opens the full, fixed profile viewer: the click action on a member's name or picture. */
+  function openViewer(user: User | null | undefined): void {
+    if (!user) return;
+    profileCard.hide();
+    ui.openProfileViewer(user);
   }
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -501,6 +509,7 @@
         {#if grouped}
           <div class="avatar-spacer" aria-hidden="true"><span class="gutter-time">{formatTime(message.createdAt)}</span></div>
         {:else if picture}
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
           <img
             class="avatar profile-trigger"
             src={picture}
@@ -508,6 +517,7 @@
             loading="lazy"
             onmouseenter={(event) => restCard(message.author, event.currentTarget)}
             onmouseleave={() => profileCard.scheduleHide()}
+            onclick={() => openViewer(message.author)}
           />
         {:else}
           <button
@@ -518,7 +528,7 @@
             onmouseleave={() => profileCard.scheduleHide()}
             onfocus={(event) => openCard(message.author, event.currentTarget)}
             onblur={() => profileCard.scheduleHide()}
-            onclick={(event) => openCard(message.author, event.currentTarget)}
+            onclick={() => openViewer(message.author)}
           >
             {initial(message.author)}
           </button>
@@ -543,6 +553,7 @@
                 onmouseleave={() => profileCard.scheduleHide()}
                 onfocus={(event) => openCard(message.author, event.currentTarget)}
                 onblur={() => profileCard.scheduleHide()}
+                onclick={() => openViewer(message.author)}
               >
                 {authorName(message)}
               </button>

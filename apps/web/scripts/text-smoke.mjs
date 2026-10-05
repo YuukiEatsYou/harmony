@@ -19,6 +19,8 @@ import {
   parseVersionFile,
   resolveChannelSettings,
   rewriteChannelMentions,
+  socialLink,
+  validSocialValue,
 } from '@harmony/shared';
 import {
   POLL_LIMITS,
@@ -1412,6 +1414,19 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('an older version is not newer', !isNewerVersion('1.23.9', '1.24.0'));
   check('a missing part pads with zeros', !isNewerVersion('1.24', '1.24.0') && isNewerVersion('1.24.1', '1.24'));
   check('a non-numeric part counts as zero, not a false update', !isNewerVersion('1.24.x', '1.24.0'));
+}
+
+// --- Profile social links ---
+{
+  check('a handle becomes a fixed-base link', socialLink('github', 'octocat') === 'https://github.com/octocat');
+  check('a youtube handle uses the @ base', socialLink('youtube', 'somechannel') === 'https://youtube.com/@somechannel');
+  check('a website is used as given', socialLink('website', 'https://example.com/me') === 'https://example.com/me');
+  check('a non-http website is refused', socialLink('website', 'javascript:alert(1)') === null);
+  check('an empty value is no link', socialLink('github', '') === null && socialLink('github', undefined) === null);
+  check(
+    'a handle with a slash or space is refused',
+    !validSocialValue('github', 'a/b') && !validSocialValue('github', 'a b'),
+  );
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);

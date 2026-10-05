@@ -93,3 +93,11 @@ class ProfileCardState {
 }
 
 export const profileCard = new ProfileCardState();
+
+/**
+ * Whether this device has a real pointer. The small hover card is a desktop
+ * affordance: on touch it never opens, and a tap opens the full viewer instead.
+ */
+export function hoverCapable(): boolean {
+  return window.matchMedia('(hover: hover)').matches;
+}

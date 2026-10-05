@@ -3668,6 +3668,80 @@ try {
     ).status === 404,
   );
 
+  // --- Profile customization ---
+  const profileUserId = avatarUser.user.id;
+  const freshProfile = await req(`/users/${profileUserId}/profile`, { token: ownerToken });
+  check(
+    'a fresh profile is empty',
+    freshProfile.status === 200 &&
+      freshProfile.json?.bio === '' &&
+      freshProfile.json?.status === '' &&
+      freshProfile.json?.accentColor === null &&
+      freshProfile.json?.bannerHash === null &&
+      JSON.stringify(freshProfile.json?.socialLinks) === '{}',
+    JSON.stringify(freshProfile.json),
+  );
+
+  const savedProfile = await req('/users/@me', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: {
+      bio: '  hello there  ',
+      status: 'building',
+      accentColor: 0xff8800,
+      socialLinks: { github: 'octocat', website: 'https://example.com/me', twitter: 'javascript:alert(1)' },
+    },
+  });
+  check('the owner saves a profile', savedProfile.status === 200);
+  const readProfile = await req(`/users/${profileUserId}/profile`, { token: ownerToken });
+  check(
+    'the profile reads back trimmed, with only valid links kept',
+    readProfile.json?.bio === 'hello there' &&
+      readProfile.json?.status === 'building' &&
+      readProfile.json?.accentColor === 0xff8800 &&
+      readProfile.json?.socialLinks?.github === 'octocat' &&
+      readProfile.json?.socialLinks?.website === 'https://example.com/me' &&
+      readProfile.json?.socialLinks?.twitter === undefined,
+    JSON.stringify(readProfile.json),
+  );
+
+  const bannerPng = await sharp({
+    create: { width: 900, height: 300, channels: 3, background: { r: 10, g: 20, b: 200 } },
+  })
+    .png()
+    .toBuffer();
+  const bannerForm = new FormData();
+  bannerForm.append('file', new Blob([bannerPng], { type: 'image/png' }), 'banner.png');
+  const bannerRes = await fetch(`${BASE}/users/@me/banner`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${ownerToken}` },
+    body: bannerForm,
+  });
+  const bannerHash = (await req(`/users/${profileUserId}/profile`, { token: ownerToken })).json?.bannerHash;
+  check('a banner uploads', bannerRes.status === 200 && typeof bannerHash === 'string', `status ${bannerRes.status}`);
+
+  const bannerServed = await fetch(`${BASE}/users/${profileUserId}/banner`, {
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  check(
+    'the banner is served as webp, and fetchable by hash without a session',
+    bannerServed.status === 200 &&
+      bannerServed.headers.get('content-type') === 'image/webp' &&
+      (await fetch(`${BASE}/users/${profileUserId}/banner?v=${bannerHash}`)).status === 200,
+  );
+
+  // A banner is a referenced blob too, so pruning must not sweep it away.
+  const bannerBlobPath = join(dataDir, 'uploads', bannerHash.slice(0, 2), bannerHash);
+  check('banner blob exists before pruning', existsSync(bannerBlobPath));
+  await req('/retention/run', { method: 'POST', token: ownerToken });
+  check('banner blob survives pruning', existsSync(bannerBlobPath));
+
+  check(
+    'the banner can be removed',
+    (await req('/users/@me/banner', { method: 'DELETE', token: ownerToken })).status === 200 &&
+      (await req(`/users/${profileUserId}/profile`, { token: ownerToken })).json?.bannerHash === null,
+  );
+
   // --- Instance icon ---
   const iconPng = await sharp({
     create: { width: 40, height: 40, channels: 4, background: { r: 88, g: 101, b: 242, alpha: 1 } },
@@ -7668,7 +7742,10 @@ try {
     const versionFile = (version) => `export const HARMONY_VERSION = '${version}';\n`;
     const respond = (body, ok = true, status = 200) => Promise.resolve({ ok, status, text: async () => body });
     const notices = [];
-    let answer = respond(versionFile('1.26.0'));
+    // Relative to the running version, so bumping Harmony does not break this.
+    const newer = '99.0.0';
+    const newest = '99.0.1';
+    let answer = respond(versionFile(newer));
     const checker = createUpdateService({
       settings: updateSettings,
       sourceUrl: 'https://example.test/constants.ts',
@@ -7680,10 +7757,10 @@ try {
     const first = await checker.check();
     check(
       'update: a newer version on the source is offered',
-      first.enabled && first.latest === '1.26.0' && first.available && first.checkedAt === '2025-01-01T00:00:00.000Z',
+      first.enabled && first.latest === newer && first.available && first.checkedAt === '2025-01-01T00:00:00.000Z',
       JSON.stringify(first),
     );
-    check('update: the newer release is announced once', notices.join() === '1.26.0');
+    check('update: the newer release is announced once', notices.join() === newer);
 
     await checker.check();
     check('update: the same release is not announced twice', notices.length === 1);
@@ -7695,16 +7772,16 @@ try {
       !upToDate.available && upToDate.latest === HARMONY_VERSION && upToDate.error === null,
     );
 
-    answer = respond(versionFile('1.27.0'));
+    answer = respond(versionFile(newest));
     await checker.check();
-    check('update: a second new release is announced', notices.join() === '1.26.0,1.27.0');
+    check('update: a second new release is announced', notices.join() === `${newer},${newest}`);
 
     // A failed check keeps the last known answer and records why.
     answer = respond('nope', false, 500);
     const failed = await checker.check();
     check(
       'update: a failed check keeps the last answer and records the error',
-      failed.latest === '1.27.0' && failed.available && failed.error === 'the source answered 500',
+      failed.latest === newest && failed.available && failed.error === 'the source answered 500',
       JSON.stringify(failed),
     );
 

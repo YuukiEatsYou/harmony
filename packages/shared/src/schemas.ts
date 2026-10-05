@@ -4,6 +4,7 @@ import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
 import { MAX_MUTE_SECONDS, NOTIFICATION_LEVELS } from './channel-settings.ts';
 import { GIF_STORAGE_MODES, type GifStorageMode } from './gif-hosts.ts';
+import { BIO_MAX, SOCIAL_VALUE_MAX, STATUS_MAX } from './profile.ts';
 import { HEX_COLOR_PATTERN } from './theme.ts';
 
 export const usernameSchema = z
@@ -426,13 +427,25 @@ export const updateProfileSchema = z
     notifyMajor: z.boolean().optional(),
     /** Whether any other message plays the quieter sound. */
     notifyMinor: z.boolean().optional(),
+    /** A short "about me", plain text. */
+    bio: z.string().trim().max(BIO_MAX).optional(),
+    /** A one-line custom status, plain text. */
+    status: z.string().trim().max(STATUS_MAX).optional(),
+    /** A chosen profile accent, or null to fall back to the picture's own color. */
+    accentColor: z.number().int().min(0).max(0xffffff).nullable().optional(),
+    /** Social links, validated against the known platforms in the service. */
+    socialLinks: z.record(z.string(), z.string().trim().max(SOCIAL_VALUE_MAX)).optional(),
   })
   .refine(
     (value) =>
       value.displayName !== undefined ||
       value.showTyping !== undefined ||
       value.notifyMajor !== undefined ||
-      value.notifyMinor !== undefined,
+      value.notifyMinor !== undefined ||
+      value.bio !== undefined ||
+      value.status !== undefined ||
+      value.accentColor !== undefined ||
+      value.socialLinks !== undefined,
     { message: 'Nothing to update.' },
   );
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;

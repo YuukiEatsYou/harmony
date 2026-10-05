@@ -957,4 +957,25 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 35,
+    name: 'profile_customization',
+    up(db) {
+      /*
+       * What a member sets about themselves: bio and status text, a chosen accent
+       * color (null falls back to avatar_color), the color averaged from their
+       * picture (kept so a profile renders without re-measuring the image every
+       * time), a banner image hash, and social links as a JSON object keyed by
+       * platform. The avatar and banner hashes are content-addressed blobs.
+       */
+      db.exec(`
+        ALTER TABLE users ADD COLUMN bio TEXT;
+        ALTER TABLE users ADD COLUMN status TEXT;
+        ALTER TABLE users ADD COLUMN accent_color INTEGER;
+        ALTER TABLE users ADD COLUMN avatar_color INTEGER;
+        ALTER TABLE users ADD COLUMN banner_hash TEXT;
+        ALTER TABLE users ADD COLUMN social_links TEXT;
+      `);
+    },
+  },
 ];

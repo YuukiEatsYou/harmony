@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { User, UserBadge } from '@harmony/shared';
+import type { SocialLinks, User, UserBadge, UserProfile } from '@harmony/shared';
 import { hasPassword, NO_PASSWORD } from '../auth/passwords.ts';
 import { getHighestRoleColor, getUserBadge } from './roles.ts';
 
@@ -17,6 +17,12 @@ export interface UserRow {
   show_typing: number;
   notify_major: number;
   notify_minor: number;
+  bio: string | null;
+  status: string | null;
+  accent_color: number | null;
+  avatar_color: number | null;
+  banner_hash: string | null;
+  social_links: string | null;
 }
 
 export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge | null): User {
@@ -42,6 +48,29 @@ export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge 
 /** A user DTO with their display color and badge resolved from their roles. */
 export function presentUser(sqlite: DatabaseSync, row: UserRow): User {
   return toUser(row, getHighestRoleColor(sqlite, row.id), getUserBadge(sqlite, row.id, row.is_owner === 1));
+}
+
+/** The stored social links, or an empty map when there are none or they are unreadable. */
+function parseSocialLinks(raw: string | null): SocialLinks {
+  if (!raw) return {};
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === 'object' ? (value as SocialLinks) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The profile fields a member sets about themselves, as the profile routes return them. */
+export function presentUserProfile(row: UserRow): UserProfile {
+  return {
+    bio: row.bio ?? '',
+    status: row.status ?? '',
+    accentColor: row.accent_color,
+    avatarColor: row.avatar_color,
+    bannerHash: row.banner_hash,
+    socialLinks: parseSocialLinks(row.social_links),
+  };
 }
 
 /** Counts real accounts; Discord stand-ins do not make an instance "started". */
@@ -281,9 +310,15 @@ export function updateUserProfile(
   patch: {
     displayName?: string | null;
     avatarHash?: string | null;
+    avatarColor?: number | null;
     showTyping?: boolean;
     notifyMajor?: boolean;
     notifyMinor?: boolean;
+    bio?: string | null;
+    status?: string | null;
+    accentColor?: number | null;
+    bannerHash?: string | null;
+    socialLinks?: SocialLinks;
   },
 ): void {
   const sets: string[] = [];
@@ -296,6 +331,10 @@ export function updateUserProfile(
     sets.push('avatar_hash = ?');
     values.push(patch.avatarHash);
   }
+  if (patch.avatarColor !== undefined) {
+    sets.push('avatar_color = ?');
+    values.push(patch.avatarColor);
+  }
   if (patch.showTyping !== undefined) {
     sets.push('show_typing = ?');
     values.push(patch.showTyping ? 1 : 0);
@@ -307,6 +346,27 @@ export function updateUserProfile(
   if (patch.notifyMinor !== undefined) {
     sets.push('notify_minor = ?');
     values.push(patch.notifyMinor ? 1 : 0);
+  }
+  if (patch.bio !== undefined) {
+    sets.push('bio = ?');
+    values.push(patch.bio);
+  }
+  if (patch.status !== undefined) {
+    sets.push('status = ?');
+    values.push(patch.status);
+  }
+  if (patch.accentColor !== undefined) {
+    sets.push('accent_color = ?');
+    values.push(patch.accentColor);
+  }
+  if (patch.bannerHash !== undefined) {
+    sets.push('banner_hash = ?');
+    values.push(patch.bannerHash);
+  }
+  if (patch.socialLinks !== undefined) {
+    const links = Object.keys(patch.socialLinks).length > 0 ? JSON.stringify(patch.socialLinks) : null;
+    sets.push('social_links = ?');
+    values.push(links);
   }
   if (sets.length === 0) return;
 

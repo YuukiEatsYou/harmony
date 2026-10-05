@@ -1,8 +1,19 @@
 <script lang="ts">
-  import { ALLOWED_IMAGE_TYPES, LIMITS, type MeResponse } from '@harmony/shared';
+  import {
+    ALLOWED_IMAGE_TYPES,
+    BIO_MAX,
+    LIMITS,
+    SOCIAL_PLATFORMS,
+    SOCIAL_PLATFORM_KEYS,
+    SOCIAL_VALUE_MAX,
+    STATUS_MAX,
+    type MeResponse,
+    type UserProfile,
+  } from '@harmony/shared';
   import { ApiError, api } from '../lib/api';
-  import { avatarUrl, initial } from '../lib/avatar';
+  import { avatarUrl, bannerUrl, initial } from '../lib/avatar';
   import { meta } from '../lib/meta.svelte';
+  import { accentGradient, hexColor, profile as profiles } from '../lib/profile.svelte';
   import { session } from '../lib/session.svelte';
   import { ui } from '../lib/ui.svelte';
   import Icon from './Icon.svelte';
@@ -35,14 +46,127 @@
 
   const picture = $derived(avatarUrl(session.user));
 
-  type Tab = 'profile' | 'notifications' | 'password';
+  type Tab = 'profile' | 'customize' | 'notifications' | 'password';
   let tab = $state<Tab>('profile');
 
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: 'profile', label: 'Profile' },
+    { id: 'customize', label: 'Customize' },
     { id: 'notifications', label: 'Notifications' },
     { id: 'password', label: 'Password' },
   ];
+
+  /** Suggested profile colors, shown as swatches beside the picker. */
+  const PRESET_ACCENTS = [0xe0575f, 0xe0a63a, 0x4caf7d, 0x57b0e0, 0x8b7bd8, 0xe07ab0, 0x9aa4b2];
+
+  /** The viewer's own fetched profile: bio, status, colors and links. */
+  let custom = $state<UserProfile | null>(null);
+  let bio = $state('');
+  let status = $state('');
+  let accentColor = $state<number | null>(null);
+  let socials = $state<Record<string, string>>({});
+  let customizing = $state(false);
+  let customError = $state<string | null>(null);
+  let customMessage = $state<string | null>(null);
+  let bannerInput = $state<HTMLInputElement | null>(null);
+  let bannerBusy = $state(false);
+
+  /** Banner artwork when there is one, else the accent gradient it falls back to. */
+  const bannerPreview = $derived.by(() => {
+    if (!session.user) return 'var(--h-accent-gradient)';
+    const url = bannerUrl(session.user.id, custom?.bannerHash ?? null);
+    return url
+      ? `url(${url})`
+      : (accentGradient(accentColor ?? custom?.avatarColor ?? session.user.roleColor) ?? 'var(--h-accent-gradient)');
+  });
+
+  /** The chosen (or picture's) color as a gradient, used to tint a banner image. */
+  const accentCss = $derived(accentGradient(accentColor ?? custom?.avatarColor ?? session.user?.roleColor ?? null));
+
+  async function loadCustom(): Promise<void> {
+    if (!session.user) return;
+    const loaded = await profiles.load(session.user.id);
+    if (!loaded) return;
+    custom = loaded;
+    bio = loaded.bio;
+    status = loaded.status;
+    accentColor = loaded.accentColor;
+    socials = { ...loaded.socialLinks };
+  }
+
+  /** Switching to Customize loads the profile the first time it is opened. */
+  function selectTab(next: Tab): void {
+    tab = next;
+    if (next === 'customize' && custom === null) void loadCustom();
+  }
+
+  async function saveCustom(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    customizing = true;
+    customError = null;
+    customMessage = null;
+    try {
+      const links: Record<string, string> = {};
+      for (const key of SOCIAL_PLATFORM_KEYS) {
+        const value = socials[key]?.trim();
+        if (value) links[key] = value;
+      }
+      apply(
+        await api<MeResponse>('/users/@me', {
+          method: 'PATCH',
+          body: JSON.stringify({ bio, status, accentColor, socialLinks: links }),
+        }),
+      );
+      await loadCustom();
+      customMessage = 'Profile saved.';
+    } catch (cause) {
+      customError = cause instanceof ApiError ? cause.message : String(cause);
+    } finally {
+      customizing = false;
+    }
+  }
+
+  async function uploadBanner(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+
+    bannerBusy = true;
+    customError = null;
+    customMessage = null;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      apply(await api<MeResponse>('/users/@me/banner', { method: 'PUT', body: form }));
+      await loadCustom();
+      customMessage = 'Banner updated.';
+    } catch (cause) {
+      customError = cause instanceof ApiError ? cause.message : String(cause);
+    } finally {
+      bannerBusy = false;
+    }
+  }
+
+  async function removeBanner(): Promise<void> {
+    bannerBusy = true;
+    customError = null;
+    customMessage = null;
+    try {
+      apply(await api<MeResponse>('/users/@me/banner', { method: 'DELETE' }));
+      await loadCustom();
+      customMessage = 'Banner removed.';
+    } catch (cause) {
+      customError = cause instanceof ApiError ? cause.message : String(cause);
+    } finally {
+      bannerBusy = false;
+    }
+  }
+
+  /** A `#rrggbb` from the color input as a packed integer. */
+  function parseHexColor(hex: string): number {
+    return Number.parseInt(hex.slice(1), 16);
+  }
 
   function apply(data: MeResponse): void {
     session.user = data.user;
@@ -183,7 +307,7 @@
     <nav class="admin-nav">
       <h2>Your account</h2>
       {#each TABS as entry (entry.id)}
-        <button class="admin-tab" class:active={tab === entry.id} type="button" onclick={() => (tab = entry.id)}>
+        <button class="admin-tab" class:active={tab === entry.id} type="button" onclick={() => selectTab(entry.id)}>
           {entry.label}
         </button>
       {/each}
@@ -275,6 +399,84 @@
           {#if discordError}<p class="form-error">{discordError}</p>{/if}
           {#if discordMessage}<p class="ok-text">{discordMessage}</p>{/if}
         </div>
+      {:else if tab === 'customize'}
+        <h3>Customize your profile</h3>
+
+        <form onsubmit={saveCustom}>
+          <p class="custom-label">Banner</p>
+          <div class="custom-banner" style={`background-image: ${bannerPreview}`}>
+            {#if custom?.bannerHash && accentCss}
+              <span class="custom-banner-tint" style={`background-image: ${accentCss}`}></span>
+            {/if}
+            <div class="editor-actions">
+              <button type="button" onclick={() => bannerInput?.click()} disabled={bannerBusy}>Change banner</button>
+              {#if custom?.bannerHash}
+                <button type="button" class="danger" onclick={removeBanner} disabled={bannerBusy}>Remove</button>
+              {/if}
+            </div>
+          </div>
+          <input
+            class="file-input"
+            type="file"
+            accept={acceptAttribute}
+            bind:this={bannerInput}
+            onchange={uploadBanner}
+          />
+
+          <p class="custom-label">Profile color</p>
+          <div class="custom-accent">
+            <input
+              type="color"
+              aria-label="Profile color"
+              value={hexColor(accentColor) ?? hexColor(custom?.avatarColor) ?? '#8b7bd8'}
+              oninput={(event) => (accentColor = parseHexColor((event.currentTarget as HTMLInputElement).value))}
+            />
+            <button type="button" class="ghost" onclick={() => (accentColor = null)}>Use my picture's color</button>
+            <div class="custom-presets">
+              {#each PRESET_ACCENTS as preset (preset)}
+                <button
+                  type="button"
+                  class="custom-preset"
+                  aria-label={`Use color ${hexColor(preset)}`}
+                  style={`background: ${hexColor(preset)}`}
+                  onclick={() => (accentColor = preset)}
+                ></button>
+              {/each}
+            </div>
+          </div>
+          <p class="muted">Colors your banner and profile. Leaving it as your picture's color is the default.</p>
+
+          <label>
+            Custom status
+            <input bind:value={status} maxlength={STATUS_MAX} placeholder="What are you up to?" />
+          </label>
+
+          <label>
+            About me
+            <textarea bind:value={bio} maxlength={BIO_MAX} rows="3" placeholder="A few words about you"></textarea>
+          </label>
+
+          <fieldset class="custom-links">
+            <legend>Links</legend>
+            {#each SOCIAL_PLATFORM_KEYS as key (key)}
+              <label>
+                {SOCIAL_PLATFORMS[key].label}
+                <input
+                  bind:value={socials[key]}
+                  maxlength={SOCIAL_VALUE_MAX}
+                  placeholder={SOCIAL_PLATFORMS[key].placeholder}
+                />
+              </label>
+            {/each}
+          </fieldset>
+
+          {#if customError}<p class="form-error">{customError}</p>{/if}
+          {#if customMessage}<p class="ok-text">{customMessage}</p>{/if}
+
+          <div class="editor-actions">
+            <button type="submit" disabled={customizing}>Save</button>
+          </div>
+        </form>
       {:else if tab === 'notifications'}
         <h3>Notifications</h3>
 

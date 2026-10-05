@@ -3,7 +3,6 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { members } from '../lib/members.svelte';
-  import { profileCard } from '../lib/profile-card.svelte';
   import { rankSwitcher, type SwitcherResult } from '../lib/quick-switch';
   import { shortcuts, trapFocus } from '../lib/shortcuts.svelte';
   import { ui } from '../lib/ui.svelte';
@@ -48,10 +47,8 @@
       void chat.selectChannel(row.id);
       ui.closeDrawers();
     } else {
-      // The card wants something on screen to stand beside. The row is about to
-      // go, but only its position is kept, so the card opens where it was.
-      const anchor = document.getElementById(optionId(row));
-      if (anchor) profileCard.show(row.member, anchor, true);
+      // A member opens their full profile, the same as clicking a name anywhere else.
+      ui.openProfileViewer(row.member);
     }
     void shortcuts.close();
   }

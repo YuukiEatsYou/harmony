@@ -1821,7 +1821,11 @@ such sticker, `404 sticker_missing` when its image is gone from storage.
   "displayName": "Alice the Great",
   "showTyping": true,
   "notifyMajor": true,
-  "notifyMinor": false
+  "notifyMinor": false,
+  "bio": "Hi, I build things.",
+  "status": "shipping v1.26",
+  "accentColor": 16743424,
+  "socialLinks": { "github": "octocat", "website": "https://example.com" }
 }
 ```
 
@@ -1830,6 +1834,14 @@ or `""` clears it. `showTyping` turns typing indicators off entirely for the use
 nor see them. `notifyMajor` and `notifyMinor` cover the client's two notification sounds, both on by
 default: the first for a message that mentions the user, by reply or by name, and the second for
 other messages in the channel being read.
+
+The remaining fields are the member's profile customization, shown in the profile viewer. `bio` (up to
+256 characters) and `status` (up to 128) are plain text. `accentColor` is a packed RGB integer, or
+`null` to fall back to the color averaged from the member's picture. `socialLinks` maps a platform to a
+value: for `twitter`, `github`, `twitch`, `youtube` and `steam` the value is a bare handle joined to a
+fixed base URL, and for `website` it is a full `http(s)` address. A value that is not valid for its
+platform, and any key that is not a known platform, is dropped rather than stored. Read the result back
+from `GET /api/v1/users/:id/profile`.
 
 These are **in-app sounds only**. Harmony sends nothing to a device: there is no push, no service
 worker involvement and no permission prompt, and a sound can only play while a client of some kind is
@@ -1870,6 +1882,41 @@ If `v` matches the user's current `avatarHash` the request is allowed anonymousl
 normal `ViewChannels` check applies. This exists so Discord's servers can fetch avatars for
 mirrored messages; the hash is already public in every avatar URL. Returns `404 avatar_not_found`
 when the user has no picture.
+
+#### `PUT /api/v1/users/@me/banner` — auth
+
+`multipart/form-data` with a single `file` field (an image), cropped server-side to a 600×240 WebP.
+Banners are kept apart from avatars because they are rarely needed; a request that does not want one
+skips it. Returns `MeResponse`.
+
+#### `DELETE /api/v1/users/@me/banner` — auth
+
+Clears your banner and returns `MeResponse`.
+
+#### `GET /api/v1/users/:id/banner`
+
+Serves a user's banner as WebP, with the same `ViewChannels` requirement and `?v=<bannerHash>`
+capability rule as the avatar route. Returns `404 banner_not_found` when the user has no banner.
+
+#### `GET /api/v1/users/:id/profile` — `ViewChannels`
+
+```json
+{
+  "bio": "Hi, I build things.",
+  "status": "shipping v1.26",
+  "accentColor": 16743424,
+  "avatarColor": 16743424,
+  "bannerHash": "9f2c…",
+  "socialLinks": { "github": "octocat", "website": "https://example.com" }
+}
+```
+
+The profile fields a member set about themselves. They are fetched on their own rather than carried on
+the lean `User` object, which rides along on every message and roster entry and so stays small.
+`accentColor` is the member's chosen color, `avatarColor` is the one averaged from their picture (both
+packed RGB, either nullable); a client leads with the accent when there is one and the picture's color
+otherwise. `bannerHash` is the banner's content hash, served through the route above. `socialLinks`
+is only ever the platforms that were stored.
 
 ### Channel notification settings
 

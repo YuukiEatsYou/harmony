@@ -2,7 +2,7 @@
   import type { MemberRosterEntry, Role } from '@harmony/shared';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
-  import { profileCard } from '../lib/profile-card.svelte';
+  import { profileCard, hoverCapable } from '../lib/profile-card.svelte';
   import { roster } from '../lib/roster.svelte';
   import { ui } from '../lib/ui.svelte';
   import Icon from './Icon.svelte';
@@ -104,11 +104,11 @@
             type="button"
             class="roster-member profile-trigger"
             class:offline={!entry.online}
-            onmouseenter={(event) => profileCard.scheduleShow(entry.user, event.currentTarget)}
+            onmouseenter={(event) => { if (hoverCapable()) profileCard.scheduleShow(entry.user, event.currentTarget); }}
             onmouseleave={() => profileCard.scheduleHide()}
-            onfocus={(event) => profileCard.show(entry.user, event.currentTarget)}
+            onfocus={(event) => { if (hoverCapable()) profileCard.show(entry.user, event.currentTarget); }}
             onblur={() => profileCard.scheduleHide()}
-            onclick={(event) => profileCard.show(entry.user, event.currentTarget, true)}
+            onclick={() => { profileCard.hide(); ui.openProfileViewer(entry.user); }}
           >
             {#if avatarUrl(entry.user)}
               <img class="avatar small" src={avatarUrl(entry.user)} alt="" loading="lazy" />

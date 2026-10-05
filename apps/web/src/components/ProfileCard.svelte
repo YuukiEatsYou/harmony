@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { avatarUrl, initial } from '../lib/avatar';
+  import { avatarUrl, bannerUrl, initial } from '../lib/avatar';
   import { profileCard } from '../lib/profile-card.svelte';
+  import { accentGradient, profile, profileAccent } from '../lib/profile.svelte';
   import { roster } from '../lib/roster.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
@@ -11,15 +12,24 @@
   let top = $state(0);
 
   const user = $derived(profileCard.user);
+  /** The full profile, so the card can show the banner and the member's color. */
+  const cardProfile = $derived(user ? profile.get(user.id) : null);
+  const cardBanner = $derived(user ? bannerUrl(user.id, cardProfile?.bannerHash ?? null) : null);
   const roleIds = $derived(
     user ? (roster.members.find((entry) => entry.user.id === user.id)?.roleIds ?? []) : [],
   );
   const roles = $derived(
     roster.roles.filter((role) => roleIds.includes(role.id)).sort((a, b) => b.position - a.position),
   );
-  const banner = $derived(
-    user?.roleColor == null ? 'var(--h-accent)' : `#${user.roleColor.toString(16).padStart(6, '0')}`,
+  const bannerStyle = $derived(
+    cardBanner
+      ? `background-image: url(${cardBanner}); background-size: cover; background-position: center;`
+      : `background: ${accentGradient(profileAccent(cardProfile, user?.roleColor ?? null)) ?? 'var(--h-accent-gradient)'};`,
   );
+
+  $effect(() => {
+    if (user) void profile.load(user.id);
+  });
 
   function colorHex(value: number | null): string {
     return value == null ? 'var(--h-text-muted)' : `#${value.toString(16).padStart(6, '0')}`;
@@ -93,7 +103,7 @@
     onmouseenter={() => profileCard.cancelHide()}
     onmouseleave={() => profileCard.scheduleHide()}
   >
-    <div class="profile-card-banner" style={`background: ${banner}`}></div>
+    <div class="profile-card-banner" style={bannerStyle}></div>
 
     <div class="profile-card-body">
       <div class="profile-card-avatar-wrap">

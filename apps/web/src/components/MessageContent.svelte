@@ -3,8 +3,9 @@
   import { chat } from '../lib/chat.svelte';
   import { isJumbo } from '../lib/jumbo-emoji';
   import { inlineSegmentsOf, type InlineSegment, type ListBlock, type MessageBlock } from '../lib/message-text';
-  import { profileCard } from '../lib/profile-card.svelte';
+  import { profileCard, hoverCapable } from '../lib/profile-card.svelte';
   import { formatTimestamp, formatTimestampTitle } from '../lib/timestamp';
+  import { ui } from '../lib/ui.svelte';
   import CodeBlock from './CodeBlock.svelte';
 
   /** The parsed text of one message, drawn as Discord would draw it. */
@@ -14,7 +15,13 @@
   const jumbo = $derived(allowJumbo && isJumbo(blocks));
 
   function openCard(user: User, element: HTMLElement): void {
-    profileCard.show(user, element);
+    if (hoverCapable()) profileCard.show(user, element);
+  }
+
+  /** Opens the full profile viewer: the click action on a mentioned member. */
+  function openViewer(user: User): void {
+    profileCard.hide();
+    ui.openProfileViewer(user);
   }
 
   /**
@@ -62,10 +69,11 @@
           type="button"
           class="mention profile-trigger"
           title={`@${segment.user.username}`}
-          onmouseenter={(event) => profileCard.scheduleShow(segment.user, event.currentTarget)}
+          onmouseenter={(event) => { if (hoverCapable()) profileCard.scheduleShow(segment.user, event.currentTarget); }}
           onmouseleave={() => profileCard.scheduleHide()}
           onfocus={(event) => openCard(segment.user, event.currentTarget)}
           onblur={() => profileCard.scheduleHide()}
+          onclick={() => openViewer(segment.user)}
         >
           @{segment.user.displayName ?? segment.user.username}
         </button>

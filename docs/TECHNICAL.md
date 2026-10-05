@@ -124,6 +124,34 @@ The one thing deliberately **not** derived is the status colors (ok, warning,
 error): they are semantic, and a green or a red should not shift because an admin
 picked a different accent. Shape, shadow, motion and type are fixed too.
 
+## Profiles
+
+A member can set a banner, a color, a custom status, a short bio and a handful of
+social links. All of it lives on `users` as columns the lean `User` type does not
+carry: `bio`, `status`, `accent_color`, `avatar_color`, `banner_hash` and
+`social_links` (a JSON map). It is served separately by
+`GET /api/v1/users/:id/profile` rather than added to `User`, which rides along on
+every message and roster entry and would otherwise grow for data only a viewer
+needs.
+
+The profile color defaults to the picture: on upload the avatar is re-encoded, and
+the average color of its visible pixels is stored in `avatar_color` (the same
+measurement the instance icon uses, skipping transparent pixels so a logo on
+nothing does not read as black). A member may override it with `accent_color`, or
+clear that to fall back to the picture again.
+
+Social links are stored as the bare value and only ever become a link through a
+fixed base URL per platform, so a handle can never point somewhere else; the
+website field is the one place a full address is accepted, and only as `http(s)`.
+Opening it shows a leave-the-instance confirmation first. Banners are
+content-addressed blobs like avatars and are listed in `listReferencedHashes`, so
+retention never prunes one.
+
+The client has two surfaces. A small hover card, on a pointer device only, is a
+quick peek. Clicking a name, avatar or mention opens the full profile viewer: a
+fixed overlay rather than a cursor popover, so it stays put while it is read. On
+touch there is no hover card at all, and a tap opens the viewer.
+
 ## Search
 
 Message search is a case-insensitive substring match (`LIKE`) over the text, rather than a full-text

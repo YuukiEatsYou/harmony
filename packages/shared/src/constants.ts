@@ -7,7 +7,7 @@ export const HARMONY_NAME = 'Harmony';
  * the major number is the owner's to raise. Kept here rather than in a
  * package.json so the client, the server and the bridge all read one value.
  */
-export const HARMONY_VERSION = '1.25.2';
+export const HARMONY_VERSION = '1.26.0';
 
 /** Where the project lives, linked from the About panel. */
 export const HARMONY_REPO_URL = 'https://github.com/YuukiEatsYou/harmony';
@@ -101,3 +101,10 @@ export const DEFAULT_MAX_ICON_BYTES = 2 * 1024 * 1024;
 
 /** Server icons are normalized to this square size. */
 export const ICON_SIZE = 256;
+
+/** Profile banners are normalized to this wide size. */
+export const BANNER_WIDTH = 600;
+export const BANNER_HEIGHT = 240;
+
+/** Maximum size of an uploaded profile banner, in bytes (4 MiB). */
+export const DEFAULT_MAX_BANNER_BYTES = 4 * 1024 * 1024;
