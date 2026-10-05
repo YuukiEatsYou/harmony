@@ -27,12 +27,16 @@
       <p class="muted">Update checks are switched off on this instance.</p>
     {:else}
       <p class="update-status">
-        {#if update.available && update.latest}
+        {#if update.latest === null}
+          <span class="muted">No check has run yet.</span>
+        {:else if update.available}
           <strong class="update-available">Version {update.latest} is available.</strong>
-        {:else if update.latest}
+        {:else if update.latest === update.running}
           <span class="ok-text">Up to date with {update.latest}.</span>
         {:else}
-          <span class="muted">No check has run yet.</span>
+          <span class="muted">
+            This build is ahead of the update branch, which is on {update.latest}.
+          </span>
         {/if}
       </p>
 
