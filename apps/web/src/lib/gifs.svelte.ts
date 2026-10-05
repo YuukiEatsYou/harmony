@@ -2,9 +2,7 @@ import type {
   Attachment,
   GifFavorite,
   GifFavoriteListResponse,
-  GifItem,
   GifLinkResponse,
-  GifListResponse,
   GifSearchResponse,
   GifSearchResult,
   ServerGifItem,
@@ -19,7 +17,6 @@ import { api } from './api';
  */
 class GifState {
   favorites = $state<GifFavorite[]>([]);
-  local = $state<GifItem[]>([]);
   remote = $state<GifSearchResult[]>([]);
   /** The Server tab: curated gifs first, then the auto-collected ones. */
   server = $state<ServerGifItem[]>([]);
@@ -50,20 +47,6 @@ class GifState {
       this.favorites = (await api<GifFavoriteListResponse>('/gifs/favorites')).favorites;
     } catch {
       // Not signed in or offline — leave the list empty.
-    }
-  }
-
-  async searchLocal(query: string): Promise<void> {
-    const search = ++this.#search;
-    try {
-      const params = new URLSearchParams();
-      if (query.trim().length > 0) params.set('q', query.trim());
-      const suffix = params.size > 0 ? `?${params.toString()}` : '';
-      const body = await api<GifListResponse>(`/gifs/local${suffix}`);
-      if (search !== this.#search) return;
-      this.local = body.gifs;
-    } catch {
-      // Leave whatever was there.
     }
   }
 
@@ -119,9 +102,6 @@ class GifState {
       body: JSON.stringify(ref),
     });
     this.favorites = [favorite, ...this.favorites.filter((entry) => entry.id !== favorite.id)];
-    this.local = this.local.map((item) =>
-      item.hash === favorite.hash ? { ...item, favoriteId: favorite.id } : item,
-    );
     this.server = this.server.map((item) =>
       item.hash === favorite.hash ? { ...item, favoriteId: favorite.id } : item,
     );
@@ -130,7 +110,6 @@ class GifState {
   async forget(favoriteId: string): Promise<void> {
     await api(`/gifs/favorites/${favoriteId}`, { method: 'DELETE' });
     this.favorites = this.favorites.filter((entry) => entry.id !== favoriteId);
-    this.local = this.local.map((item) => (item.favoriteId === favoriteId ? { ...item, favoriteId: null } : item));
     this.server = this.server.map((item) => (item.favoriteId === favoriteId ? { ...item, favoriteId: null } : item));
   }
 
@@ -150,8 +129,4 @@ export const gifs = new GifState();
 /** Where the picker loads each kind of gif from. */
 export function favoriteUrl(favorite: GifFavorite): string {
   return `/api/v1/gifs/favorites/${favorite.id}/image`;
-}
-
-export function localUrl(item: GifItem): string {
-  return `/api/v1/attachments/${item.id}`;
 }

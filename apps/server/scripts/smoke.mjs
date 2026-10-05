@@ -1674,6 +1674,10 @@ try {
     const H7 = 'https://media.giphy.com/media/h7/giphy.gif';
     sources.record(H7, 'image/gif');
     world.set(H7, { contentType: 'image/png', data: gifA });
+    // H6 failed the size limit above; make it eligible again so the run is
+    // deterministic. Otherwise whether it is retried depends on the archive
+    // calls landing in different milliseconds, which they need not.
+    age(H6);
     const notGif = await sources.archive(5);
     check('archive: something that is not a gif is not kept', notGif.copied === 1 && rowOf(H7)?.hash === null);
 

@@ -18,6 +18,7 @@ import {
   findGifSource,
   gifSourceStats,
   isGifBlobHeldElsewhere,
+  listDeadGifSources,
   listGifSourcesToArchive,
   listGifSourcesWithCopy,
   markGifSourceDead,
@@ -66,7 +67,10 @@ export interface GifSourceService {
   /** Absolute path of a copy's bytes. */
   filePathFor(hash: string): string;
   stats(): GifSourceStats;
-  /** Copies up to `limit` recorded addresses that have no copy: one bounded batch. */
+  /**
+   * Copies up to `limit` recorded addresses that have no copy, including ones
+   * previously given up on: one bounded batch, also the admin's retry.
+   */
   archive(limit: number): Promise<GifArchiveResponse>;
   /**
    * Releases the copies of gifs that are still linked and that nothing else
@@ -202,6 +206,9 @@ export function createGifSourceService(
         // Addresses tried in this run are stamped "now" and so are not "more" work.
         const startedAt = new Date().toISOString();
         const batch = listGifSourcesToArchive(sqlite, limit, startedAt);
+        // The archive is the one explicit retry, so fill any room left in the
+        // batch with addresses that were given up on and can be tried again.
+        if (batch.length < limit) batch.push(...listDeadGifSources(sqlite, limit - batch.length, startedAt));
         let copied = 0;
         let failed = 0;
         let markedDead = 0;

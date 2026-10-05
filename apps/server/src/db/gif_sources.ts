@@ -134,6 +134,21 @@ export function countGifSourcesToArchive(sqlite: DatabaseSync, retryBefore: stri
   return row.n;
 }
 
+const DEAD_SQL = `hash IS NULL AND status = 'dead'
+  AND (content_type IS NULL OR content_type NOT LIKE 'video/%')
+  AND (last_checked_at IS NULL OR last_checked_at < ?)`;
+
+/**
+ * Addresses that were given up on after repeated failures. The archive is the
+ * admin's explicit "try again", so it is allowed to reach them; an ordinary
+ * on-demand fetch is not, so a broken address is not hammered on every view.
+ */
+export function listDeadGifSources(sqlite: DatabaseSync, limit: number, retryBefore: string): GifSourceRow[] {
+  return sqlite
+    .prepare(`SELECT * FROM gif_sources WHERE ${DEAD_SQL} ORDER BY last_checked_at ASC LIMIT ?`)
+    .all(retryBefore, limit) as unknown as GifSourceRow[];
+}
+
 export function gifSourceStats(sqlite: DatabaseSync): GifSourceStats {
   const row = sqlite
     .prepare(
@@ -193,9 +208,12 @@ function tableExists(sqlite: DatabaseSync, name: string): boolean {
 
 /**
  * Whether something other than a gif source's own pairing keeps this blob: a
- * message attachment, a member's favorite, or a curated server gif. This is the
- * single place the question is answered for "free copies" and emergency
- * pruning, so a new holder of gif blobs is added here and nowhere else.
+ * message attachment, a custom emoji, a sticker, a member's favorite, an avatar,
+ * the instance icon, or a curated server gif. This is the single place the
+ * question is answered for "free copies" and emergency pruning, so a new holder
+ * of gif blobs is added here and nowhere else — and it must stay in step with
+ * `listReferencedHashes`, which the age sweep uses, bar the gif source pairing
+ * itself (a `held = 1` pairing is not "elsewhere").
  *
  * `server_gifs` is created by a separate migration; the table is consulted only
  * when it exists.
@@ -203,7 +221,27 @@ function tableExists(sqlite: DatabaseSync, name: string): boolean {
 export function isGifBlobHeldElsewhere(sqlite: DatabaseSync, hash: string): boolean {
   const held = (sql: string): boolean => sqlite.prepare(sql).get(hash) !== undefined;
   if (held('SELECT 1 FROM attachments WHERE hash = ? LIMIT 1')) return true;
+  if (held('SELECT 1 FROM emojis WHERE hash = ? LIMIT 1')) return true;
+  if (held('SELECT 1 FROM stickers WHERE hash = ? LIMIT 1')) return true;
   if (held('SELECT 1 FROM gif_favorites WHERE hash = ? LIMIT 1')) return true;
-  if (tableExists(sqlite, 'server_gifs') && held('SELECT 1 FROM server_gifs WHERE hash = ? LIMIT 1')) return true;
+  if (held('SELECT 1 FROM users WHERE avatar_hash = ? LIMIT 1')) return true;
+  if (
+    tableExists(sqlite, 'server_gifs') &&
+    held("SELECT 1 FROM server_gifs WHERE hash = ? AND kind = 'curated' LIMIT 1")
+  ) {
+    return true;
+  }
+  // The instance icon is a blob too, but its hash lives in the settings table
+  // rather than a column (the key matches KEY_ICON_HASH in the settings service).
+  const icon = sqlite.prepare("SELECT value FROM server_settings WHERE key = 'instance_icon_hash'").get() as
+    | { value: string }
+    | undefined;
+  if (icon) {
+    try {
+      if (JSON.parse(icon.value) === hash) return true;
+    } catch {
+      // A malformed stored value simply contributes no reference.
+    }
+  }
   return false;
 }

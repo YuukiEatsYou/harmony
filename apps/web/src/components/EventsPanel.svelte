@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { EVENT_LIMITS, groupEvents, interestedLabel, type ServerEvent, type User } from '@harmony/shared';
   import { ApiError } from '../lib/api';
   import { chat } from '../lib/chat.svelte';
@@ -14,10 +14,14 @@
     type EventDraft,
   } from '../lib/event-form';
   import { events } from '../lib/events.svelte';
+  import { trapFocus } from '../lib/shortcuts.svelte';
   import { formatTimestamp } from '../lib/timestamp';
   import EventTimeField from './EventTimeField.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
+
+  // The panel is opened from the header button; remember it so closing puts focus back.
+  const restoreTo = document.activeElement as HTMLElement | null;
 
   let error = $state<string | null>(null);
   /** The event with a request in flight, so its buttons cannot be pressed twice. */
@@ -69,6 +73,20 @@
   function closeForm(): void {
     formFor = null;
     formProblem = null;
+  }
+
+  /** Closes the whole panel, returning focus to whatever opened it. */
+  function close(): void {
+    const target = restoreTo;
+    onclose();
+    void tick().then(() => target?.focus());
+  }
+
+  function onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      close();
+    }
   }
 
   async function submit(): Promise<void> {
@@ -224,8 +242,15 @@
   {/if}
 {/snippet}
 
-<div class="admin-overlay">
-  <div class="admin inbox-panel saved-panel events-panel">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="admin-overlay" onkeydown={onKeydown}>
+  <div
+    class="admin inbox-panel saved-panel events-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Events"
+    use:trapFocus
+  >
     <div class="admin-body">
       <div class="search-head">
         <h3>Events</h3>
@@ -233,13 +258,14 @@
           {#if events.canCreate && formFor === null}
             <button type="button" onclick={startForm}>New event</button>
           {/if}
-          <button type="button" onclick={onclose}>Close</button>
+          <button type="button" data-autofocus onclick={close}>Close</button>
         </div>
       </div>
 
       {#if error}<p class="form-error">{error}</p>{/if}
 
       {#if formFor !== null}
+        {#key formFor}
         <form
           class="event-form"
           onsubmit={(submitEvent) => {
@@ -313,6 +339,7 @@
             <button type="button" class="ghost" onclick={closeForm}>Discard</button>
           </div>
         </form>
+        {/key}
       {/if}
 
       {#if !events.loaded}
