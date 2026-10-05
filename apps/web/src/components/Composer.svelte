@@ -942,7 +942,6 @@
             onpointerdown={(event) => event.preventDefault()}
             onmousedown={(event) => event.preventDefault()}
             onclick={() => acceptSuggestion(suggestion)}
-            onmouseenter={() => (highlight = index)}
           >
             {#if suggestion.imageUrl}
               <img class="autocomplete-image" src={suggestion.imageUrl} alt="" />
