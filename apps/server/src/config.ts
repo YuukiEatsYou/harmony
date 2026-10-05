@@ -39,6 +39,13 @@ export interface Config {
   scheduledMinLeadMs: number;
   /** `Content-Security-Policy` sent to browsers, or null to leave the header off. */
   csp: string | null;
+  /**
+   * The shell command that applies an update, run from the checkout when the owner
+   * presses the button, or null when the button is switched off. It is per
+   * deployment, like the systemd unit, which is why it is an env var rather than a
+   * setting a normal hoster could break from the panel.
+   */
+  updateCommand: string | null;
 }
 
 // Load `.env` if present, without pulling in a dotenv dependency.
@@ -77,6 +84,12 @@ function readCsp(value: string | undefined): string | null {
   return trimmed.length === 0 || /^(off|none)$/i.test(trimmed) ? null : trimmed;
 }
 
+/** An absent or blank command leaves the Update tab's apply button switched off. */
+function readCommand(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export function loadConfig(): Config {
   const dataDir = process.env.HARMONY_DATA_DIR
     ? resolve(process.cwd(), process.env.HARMONY_DATA_DIR)
@@ -103,5 +116,6 @@ export function loadConfig(): Config {
     scheduledTickMs: Math.max(100, readNumber(process.env.HARMONY_SCHEDULED_TICK_MS, 10_000)),
     scheduledMinLeadMs: Math.max(0, readNumber(process.env.HARMONY_SCHEDULED_MIN_LEAD_MS, SCHEDULED_MIN_LEAD_MS)),
     csp: readCsp(process.env.HARMONY_CSP),
+    updateCommand: readCommand(process.env.HARMONY_UPDATE_COMMAND),
   };
 }

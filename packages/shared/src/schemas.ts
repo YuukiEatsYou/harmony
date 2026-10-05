@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIMITS, MAX_ICON_PADDING, MAX_UPLOAD_CEILING_BYTES } from './constants.ts';
+import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES } from './constants.ts';
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
 import { MAX_MUTE_SECONDS, NOTIFICATION_LEVELS } from './channel-settings.ts';
@@ -245,11 +245,30 @@ export const updateSettingsSchema = z.object({
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
-/** The owner's switch for the daily update check. */
-export const updateAutoCheckSchema = z.object({
-  autoCheck: z.boolean(),
+/**
+ * The owner's switches on the Update tab. Both fields are optional so one can be
+ * changed on its own, but a patch that carries neither is refused.
+ */
+export const updatePatchSchema = z
+  .object({
+    /** The once-a-day automatic check. */
+    autoCheck: z.boolean().optional(),
+    /** How many pre-update snapshots to keep on disk. */
+    backupRetention: z.number().int().min(1).max(MAX_UPDATE_BACKUP_RETENTION).optional(),
+  })
+  .refine((value) => value.autoCheck !== undefined || value.backupRetention !== undefined, {
+    message: 'No update setting given',
+  });
+export type UpdatePatchInput = z.infer<typeof updatePatchSchema>;
+
+/**
+ * The apply request. `backup` says whether to take a database snapshot first;
+ * the body is required, which also keeps a cross-site form from reaching it.
+ */
+export const updateApplySchema = z.object({
+  backup: z.boolean(),
 });
-export type UpdateAutoCheckInput = z.infer<typeof updateAutoCheckSchema>;
+export type UpdateApplyInput = z.infer<typeof updateApplySchema>;
 
 /** A one-step reorder, shared by roles, channels and categories. */
 export const moveSchema = z.object({

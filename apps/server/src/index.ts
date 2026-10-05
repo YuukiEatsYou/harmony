@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
@@ -35,6 +36,7 @@ import { createEventService } from './events/service.ts';
 import { GatewayHub } from './realtime/hub.ts';
 import { createPruner } from './retention/pruner.ts';
 import { createUpdateService } from './update/service.ts';
+import { createUpdateApplier } from './update/apply.ts';
 import { createBridgeService } from './bridge/service.ts';
 import { createDiscordTransport } from './bridge/discordjs.ts';
 import { createChannelImportService } from './channels/import.ts';
@@ -84,6 +86,9 @@ import { registerBackupRoutes } from './routes/backup.ts';
 import { registerGateway } from './gateway/index.ts';
 
 const config = loadConfig();
+// A per-process id. The update panel returns it so a client can tell that a restart
+// happened (and the new build is serving) rather than infer it from timing.
+const instanceId = randomUUID();
 const db = new Database(config);
 const serverLog = createServerLogService(db.sqlite);
 const hub = new GatewayHub();
@@ -175,6 +180,17 @@ const updateService = createUpdateService({
     hub.dispatch(GatewayEvent.UpdateAvailable, payload);
   },
   log: (message, detail) => app.log.info(detail ?? {}, message),
+});
+
+// The manual "Update now" path. It does nothing unless HARMONY_UPDATE_COMMAND is set;
+// a successful apply exits cleanly and lets the supervisor (systemd, pm2, Docker)
+// start the new build, since this process has no privilege to restart itself.
+const updateApplier = createUpdateApplier({
+  sqlite: db.sqlite,
+  config,
+  settings: settingsService,
+  serverLog,
+  onSuccess: () => void shutdown('update'),
 });
 
 // Set once the bridge exists, so a pasted Discord attachment link can be renewed
@@ -278,7 +294,13 @@ registerIconRoutes(app, { icon: iconService });
 registerRetentionRoutes(app, { settings: settingsService, pruner });
 registerAuditRoutes(app, { audit: auditService });
 registerServerLogRoutes(app, { serverLog });
-registerUpdateRoutes(app, { settings: settingsService, update: updateService });
+registerUpdateRoutes(app, {
+  settings: settingsService,
+  update: updateService,
+  applier: updateApplier,
+  updateCommand: config.updateCommand,
+  instanceId,
+});
 registerBackupRoutes(app, { db, config, settings: settingsService, audit: auditService, serverLog });
 registerBridgeRoutes(app, { settings: settingsService, bridge });
 registerRoleRoutes(app, { db, hub });

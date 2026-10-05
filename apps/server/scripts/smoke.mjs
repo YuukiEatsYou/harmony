@@ -8,7 +8,7 @@
 // Run with: npm run smoke --workspace @harmony/server
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gunzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
@@ -45,6 +45,7 @@ import { verifyLinkedGif } from '../src/embeds/linked-gif.ts';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createSettingsService } from '../src/settings/service.ts';
 import { createUpdateService } from '../src/update/service.ts';
+import { createUpdateApplier, listUpdateSnapshots, pruneUpdateSnapshots } from '../src/update/apply.ts';
 import { createUserService } from '../src/users/service.ts';
 import { sanitizeDetail, sanitizeLogText } from '../src/log/sanitize.ts';
 
@@ -102,6 +103,10 @@ const server = spawn('node', ['src/index.ts'], {
     HARMONY_EVENT_SWEEP_MS: '250',
     HARMONY_EVENT_REMINDER_LEAD_MS: '4000',
     HARMONY_EVENT_DEFAULT_DURATION_MS: '2000',
+    // The apply button is on, with a command that runs briefly then fails. A command
+    // that exited 0 would restart this server; this one lets the route, the snapshot
+    // and the failure handling be exercised without tearing the smoke down.
+    HARMONY_UPDATE_COMMAND: 'sleep 2; false',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -7819,7 +7824,14 @@ try {
   const updateStatus = await req('/update', { token: ownerToken });
   check(
     'the owner reads the update status',
-    updateStatus.status === 200 && updateStatus.json?.running === HARMONY_VERSION && updateStatus.json?.autoCheck === false,
+    updateStatus.status === 200 &&
+      updateStatus.json?.running === HARMONY_VERSION &&
+      updateStatus.json?.autoCheck === false &&
+      typeof updateStatus.json?.instanceId === 'string' &&
+      updateStatus.json?.command === 'sleep 2; false' &&
+      updateStatus.json?.backupRetention === 3 &&
+      updateStatus.json?.applying === false &&
+      Array.isArray(updateStatus.json?.snapshots),
     JSON.stringify(updateStatus.json),
   );
   check('a non-owner cannot read the update status (403)', (await req('/update', { token: bobToken })).status === 403);
@@ -7827,6 +7839,91 @@ try {
   check('the owner can switch the daily check on', toggled.status === 200 && toggled.json?.autoCheck === true);
   const untoggled = await req('/update', { method: 'PATCH', token: ownerToken, body: { autoCheck: false } });
   check('and off again', untoggled.status === 200 && untoggled.json?.autoCheck === false);
+
+  // The snapshot retention field, and that a patch with nothing in it is refused.
+  const retentionPatch = await req('/update', { method: 'PATCH', token: ownerToken, body: { backupRetention: 2 } });
+  check(
+    'the owner can change the snapshot retention',
+    retentionPatch.status === 200 && retentionPatch.json?.backupRetention === 2,
+  );
+  check('an empty update patch is refused (400)', (await req('/update', { method: 'PATCH', token: ownerToken, body: {} })).status === 400);
+  check(
+    'an out-of-range retention is refused (400)',
+    (await req('/update', { method: 'PATCH', token: ownerToken, body: { backupRetention: 0 } })).status === 400,
+  );
+
+  // The apply button: a non-owner cannot press it, and the backup flag is required.
+  check(
+    'a non-owner cannot apply an update (403)',
+    (await req('/update/apply', { method: 'POST', token: bobToken, body: { backup: false } })).status === 403,
+  );
+  check(
+    'an apply without the backup flag is refused (400)',
+    (await req('/update/apply', { method: 'POST', token: ownerToken, body: {} })).status === 400,
+  );
+
+  // Back up and apply: the snapshot lands on disk, the command runs, and because the
+  // smoke command exits non-zero the instance stays up and reports the failure.
+  const applied = await req('/update/apply', { method: 'POST', token: ownerToken, body: { backup: true } });
+  check('the owner can start a backed-up apply', applied.status === 200 && applied.json?.applying === true);
+  check(
+    'a second apply while one runs is refused (409)',
+    (await req('/update/apply', { method: 'POST', token: ownerToken, body: { backup: false } })).status === 409,
+  );
+  let finished = null;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    finished = (await req('/update', { token: ownerToken })).json;
+    if (finished?.applying === false) break;
+    await sleep(250);
+  }
+  check(
+    'the failed apply is reported, with its log',
+    finished?.applying === false && finished?.failed === true && finished?.log?.includes('exited') === true,
+    JSON.stringify({ applying: finished?.applying, failed: finished?.failed }),
+  );
+  check('the backup was kept', (finished?.snapshots ?? []).length >= 1 && finished.snapshots[0]?.sizeBytes > 0);
+
+  // In-process: an apply with no command is refused, and old snapshots are pruned.
+  {
+    const applyDir = mkdtempSync(join(tmpdir(), 'harmony-apply-'));
+    const applyDb = new Database({ dataDir: applyDir, dbFile: join(applyDir, 'apply.db'), uploadDir: join(applyDir, 'uploads') });
+    const applySettings = createSettingsService(applyDb.sqlite, { serverName: 'Test', requireInvite: false });
+    const applyLog = { info() {}, warn() {}, error() {} };
+    const disabled = createUpdateApplier({
+      sqlite: applyDb.sqlite,
+      config: { dataDir: applyDir, dbFile: join(applyDir, 'apply.db'), updateCommand: null },
+      settings: applySettings,
+      serverLog: applyLog,
+      onSuccess: () => {},
+    });
+    let refused = null;
+    try {
+      await disabled.apply({ backup: false });
+    } catch (error) {
+      refused = error;
+    }
+    check('an apply with no command is refused', refused?.statusCode === 409 && refused?.code === 'update_disabled');
+
+    const snapshotsDir = join(applyDir, 'update-backups');
+    mkdirSync(snapshotsDir, { recursive: true });
+    ['a.db', 'b.db', 'c.db', 'd.db'].forEach((name, index) => {
+      const path = join(snapshotsDir, name);
+      writeFileSync(path, `snapshot ${name}`);
+      // Distinct times, so newest-first order does not depend on the filesystem clock.
+      const when = new Date(2026, 0, 1 + index);
+      utimesSync(path, when, when);
+    });
+    const removed = pruneUpdateSnapshots(snapshotsDir, 2);
+    const left = listUpdateSnapshots(snapshotsDir).map((snapshot) => snapshot.filename);
+    check(
+      'pruning keeps only the newest snapshots',
+      removed === 2 && left.join(',') === 'd.db,c.db',
+      `removed ${removed}, left ${left.join(',')}`,
+    );
+
+    applyDb.close();
+    rmSync(applyDir, { recursive: true, force: true });
+  }
 
   check('logout succeeds', (await req('/auth/logout', { method: 'POST', cookie: login.cookie })).status === 200);
   check('session is dead after logout (401)', (await req('/auth/me', { cookie: login.cookie })).status === 401);

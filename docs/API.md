@@ -44,6 +44,7 @@ code wins — please open an issue.
   - [Audit log](#audit-log)
   - [Backup and export](#backup-and-export)
   - [Server log](#server-log)
+  - [Update](#update)
   - [Invites](#invites)
   - [Server settings](#server-settings)
   - [Instance icon](#instance-icon)
@@ -2349,6 +2350,75 @@ to — that a moderated administrator should not necessarily see. Anyone else ge
 Returns `204` and empties the log. The clear itself is not recorded, so afterwards the log
 really is empty. [Retention](#retention) ages entries out automatically instead, when
 `serverLogRetentionDays` is configured.
+
+### Update
+
+The update check compares the version this instance runs with the newest on its update branch, and
+the apply button runs an update the operator has configured. The whole feature is the owner's:
+every route here answers `403 owner_only` to anyone else, the same reason the
+[server log](#server-log) is owner-only.
+
+```ts
+type UpdateStatus = {
+  running: string;         // the version this instance runs
+  latest: string | null;   // the newest on the update branch, or null before a first success
+  available: boolean;      // latest is newer than running
+  checkedAt: string | null;
+  error: string | null;    // the last failure; cleared on success
+  autoCheck: boolean;      // the once-a-day check
+  enabled: boolean;        // false when the instance has no update source
+};
+
+type UpdateSnapshotInfo = {
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+};
+
+// Every route below returns the whole panel, so the tab never reads two shapes.
+type UpdatePanel = UpdateStatus & {
+  instanceId: string;               // changes on every restart, so a client can spot one
+  command: string | null;          // HARMONY_UPDATE_COMMAND, or null when the button is off
+  backupRetention: number;         // how many snapshots stay on disk
+  applying: boolean;               // an apply is running now
+  log: string;                     // the tail of the running or last apply's output
+  failed: boolean;                 // the last apply ended in failure
+  snapshots: UpdateSnapshotInfo[]; // newest first
+};
+```
+
+#### `GET /api/v1/update` — owner only
+
+Returns the cached `UpdatePanel`. It does not call out; use the check below for that.
+
+#### `POST /api/v1/update/check` — owner only, rate limited
+
+Fetches the version file now and returns the `UpdatePanel`. Rate limited to 6 requests a minute per
+owner. A failed check keeps the last known answer and records why in `error`, so a blip never reads
+as "up to date".
+
+#### `PATCH /api/v1/update` — owner only
+
+`{ "autoCheck"?: boolean, "backupRetention"?: number }`. At least one field is required (`400`
+otherwise), and `backupRetention` is `1` to `20`. Returns the `UpdatePanel`.
+
+#### `POST /api/v1/update/apply` — owner only, rate limited
+
+`{ "backup": boolean }`. With `backup: true` the server first writes a database-only snapshot
+(awaited, so the refusals below are real statuses), keeping the newest `backupRetention` of them on
+disk. It then starts the command from `HARMONY_UPDATE_COMMAND` and returns the `UpdatePanel`; the
+command runs in the background. When it exits `0`, the server exits itself so its supervisor starts
+the new build, and a poll then sees a new `instanceId` when it is back.
+
+- `400 bad_request` — no `backup` field. The JSON body is required, which also keeps a cross-site
+  form from reaching the route.
+- `409 update_disabled` — no `HARMONY_UPDATE_COMMAND` is configured.
+- `409 update_in_progress` — an apply is already running.
+- `409 disk_full` — the snapshot would not fit (only with `backup: true`).
+
+A command that exits non-zero leaves the instance running the old build; the panel reports
+`failed: true` and the output in `log`. The log is kept in memory only, so a successful apply's log
+is gone once the process restarts.
 
 ### Invites
 

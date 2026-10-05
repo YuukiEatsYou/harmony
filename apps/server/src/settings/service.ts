@@ -1,7 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  DEFAULT_UPDATE_BACKUP_RETENTION,
   HEX_COLOR_PATTERN,
   MAX_ICON_PADDING,
+  MAX_UPDATE_BACKUP_RETENTION,
   MAX_UPLOAD_CEILING_BYTES,
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
@@ -119,6 +121,9 @@ export interface SettingsService {
   /** Whether the server checks for updates once a day. Off unless the owner turns it on. */
   getUpdateCheck(): boolean;
   setUpdateCheck(enabled: boolean): void;
+  /** How many pre-update database snapshots stay on disk. */
+  getUpdateBackupRetention(): number;
+  setUpdateBackupRetention(count: number): void;
 }
 
 const KEY_SERVER_NAME = 'server_name';
@@ -153,6 +158,7 @@ const KEY_GIF_STORAGE = 'gif_storage';
 const KEY_PREVIEW_UA = 'preview_user_agent';
 const KEY_SETUP_COMPLETED = 'setup_completed';
 const KEY_UPDATE_CHECK = 'update_check_enabled';
+const KEY_UPDATE_BACKUP_RETENTION = 'update_backup_retention';
 
 function parseString(raw: string, fallback: string): string {
   try {
@@ -236,6 +242,11 @@ export type SettingsDefaults = Omit<ServerSettings, 'klipyConfigured' | 'gifStor
 /** A stored gif storage mode; anything unrecognized means the safe default, "store". */
 function parseGifStorage(raw: string | undefined): GifStorageMode {
   return parseStringOrNull(raw) === 'link' ? 'link' : 'store';
+}
+
+/** Keeps a stored snapshot retention within the bounds the request schema also enforces. */
+function clampRetention(value: number): number {
+  return Math.min(MAX_UPDATE_BACKUP_RETENTION, Math.max(1, Math.round(value)));
 }
 
 export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDefaults): SettingsService {
@@ -354,6 +365,15 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
 
     setUpdateCheck(enabled) {
       writeSetting(sqlite, KEY_UPDATE_CHECK, JSON.stringify(enabled));
+    },
+
+    getUpdateBackupRetention() {
+      const parsed = parseNumberOrNull(readAllSettings(sqlite).get(KEY_UPDATE_BACKUP_RETENTION));
+      return parsed !== null ? clampRetention(parsed) : DEFAULT_UPDATE_BACKUP_RETENTION;
+    },
+
+    setUpdateBackupRetention(count) {
+      writeSetting(sqlite, KEY_UPDATE_BACKUP_RETENTION, JSON.stringify(clampRetention(count)));
     },
 
     update(patch) {

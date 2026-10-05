@@ -7,7 +7,7 @@ export const HARMONY_NAME = 'Harmony';
  * the major number is the owner's to raise. Kept here rather than in a
  * package.json so the client, the server and the bridge all read one value.
  */
-export const HARMONY_VERSION = '1.26.0';
+export const HARMONY_VERSION = '1.27.0';
 
 /** Where the project lives, linked from the About panel. */
 export const HARMONY_REPO_URL = 'https://github.com/YuukiEatsYou/harmony';
@@ -108,3 +108,12 @@ export const BANNER_HEIGHT = 240;
 
 /** Maximum size of an uploaded profile banner, in bytes (4 MiB). */
 export const DEFAULT_MAX_BANNER_BYTES = 4 * 1024 * 1024;
+
+/**
+ * How many pre-update database snapshots are kept on disk unless the owner
+ * changes it in the Update tab. A snapshot is one compact copy of the database.
+ */
+export const DEFAULT_UPDATE_BACKUP_RETENTION = 3;
+
+/** The most pre-update snapshots an owner may choose to keep, to bound disk use. */
+export const MAX_UPDATE_BACKUP_RETENTION = 20;

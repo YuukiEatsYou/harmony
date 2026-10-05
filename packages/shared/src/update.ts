@@ -28,6 +28,41 @@ export interface UpdateStatus {
   enabled: boolean;
 }
 
+/** A pre-update database snapshot kept on disk, as the Update tab reports it. */
+export interface UpdateSnapshotInfo {
+  /** The file's name, shown in the panel. */
+  filename: string;
+  /** The file's size in bytes. */
+  sizeBytes: number;
+  /** When it was taken, as an ISO string. */
+  createdAt: string;
+}
+
+/**
+ * The Update tab's whole view: the cached check plus the state of the apply
+ * button. It extends `UpdateStatus` because the tab needs both in one read.
+ */
+export interface UpdatePanel extends UpdateStatus {
+  /**
+   * A random id minted once per process. It changes on every restart, which is how
+   * the client knows the new build is serving after an apply instead of guessing
+   * from timing.
+   */
+  instanceId: string;
+  /** The owner-configured command that applies an update, or null when unset. */
+  command: string | null;
+  /** How many pre-update snapshots to keep on disk; the newest are kept. */
+  backupRetention: number;
+  /** True while the apply command is running. */
+  applying: boolean;
+  /** The tail of the running or last apply's output, so the panel can show it. */
+  log: string;
+  /** True when the last apply ended in failure. Cleared when a new one starts. */
+  failed: boolean;
+  /** The retained pre-update snapshots, newest first. */
+  snapshots: UpdateSnapshotInfo[];
+}
+
 /** Reads the version a constants file declares, or null when it carries none. */
 export function parseVersionFile(text: string): string | null {
   const match = /HARMONY_VERSION\s*=\s*'([^']+)'/.exec(text);

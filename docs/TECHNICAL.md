@@ -987,13 +987,50 @@ fork edits that one line to point at its own copy of the file, or sets it to an
 empty string to switch the check off entirely.
 
 The server does the work (`apps/server/src/update/service.ts`) and caches the
-last result. `GET`, `POST` (a manual check) and `PATCH` (the switch) on
+last result. `GET`, `POST` (a manual check) and `PATCH` (the switches) on
 `/api/v1/update` are owner-only, like the server log. When a check finds a newer
 release it broadcasts `UPDATE_AVAILABLE` once per release, and the client turns
 that into a dismissible notice that anyone but the owner ignores. A failed check
 keeps the last known answer and records the reason, so a blip never reads as "up
-to date". The tab only prints the update commands; it does not run them, and
-nothing about the machine leaves it beyond the request itself.
+to date".
+
+### Applying an update
+
+The tab can also run the update, but only when the operator has set a command to
+run. `HARMONY_UPDATE_COMMAND` in the environment holds it, unset by default; with
+no command the tab only prints the manual steps. It is an environment variable and
+not a runtime setting, the same reasoning as the source URL but with the opposite
+conclusion: the command differs on every deployment (it names the checkout and the
+build), it is the operator's business, and a regular hoster being able to break it
+from the panel would only be their own outage.
+
+`apps/server/src/update/apply.ts` does the work, and it never runs on its own: the
+owner presses a button in `POST /api/v1/update/apply`. There are two buttons.
+**Backup and update** snapshots the database first; **Update without backup**
+skips it after a warning. The snapshot uses SQLite's online backup (`backup()`
+from `node:sqlite`, the same call the manual backup service makes), so it is one
+consistent point in time of a live database. It is a database-only copy: uploads
+are content-addressed and never rewritten, so an update cannot damage them, and
+copying them would only double the disk an update needs. The owner chooses how
+many snapshots stay on disk (`backupRetention`, three by default); the oldest are
+pruned after each snapshot, and the backup path refuses with `409 disk_full`
+rather than fill the disk.
+
+The command runs as a tracked child of this process, not a detached one, and the
+server waits for it. That is deliberate. Under systemd a detached child is still
+in the service's cgroup and would be killed when the service restarts anyway, and
+waiting is what lets a failure be told from a success before deciding to do
+anything. On a zero exit the applier calls back into the server's own shutdown and
+the process exits; it does not ask systemd to restart it, because the `harmony`
+user has no privilege to. The supervisor it already runs under does the restart —
+`Restart=always` in the documented unit, or pm2's and Docker's restart policies —
+which is also why the same command is portable across deployments. On a non-zero
+exit the process stays up, running the old build, and the panel shows the output.
+
+The important consequence for operators: the command only pulls and builds. It
+must not restart the service itself. And `git checkout` back is not a rollback — it
+does not undo a migration the new code already ran — which is why the snapshot is
+the real safety net.
 
 ## License
 

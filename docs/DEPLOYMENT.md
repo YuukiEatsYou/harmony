@@ -349,7 +349,10 @@ User=harmony
 WorkingDirectory=/opt/harmony
 ExecStart=/usr/bin/node apps/server/src/index.ts
 EnvironmentFile=/opt/harmony/.env
-Restart=on-failure
+# Restart on any exit. The admin panel's update button relies on this: after a
+# successful update the server exits and lets systemd start the new build, so
+# on-failure would leave it stopped. An explicit `systemctl stop` still stops it.
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
@@ -360,21 +363,58 @@ The user needs write access to `data/` (or `HARMONY_DATA_DIR`) and read access t
 
 ## Updating
 
+By hand, from the checkout this instance runs from, as the user the service runs
+as:
+
 ```sh
 git pull
 npm ci
 npm run build:web
-systemctl restart harmony
+sudo systemctl restart harmony
 ```
 
 There are no build steps for the server itself; Node runs the TypeScript
 directly.
 
-The owner sees an **Update** tab in the admin panel. It holds a manual *Check for
-updates* button, a switch for a once-a-day automatic check (off by default, since
-it calls out to the internet), and these same instructions. There is nothing to
-configure: a fork that wants the check to point at its own releases changes one
-constant, described in `docs/TECHNICAL.md`.
+### The update button
+
+The owner sees an **Update** tab in the admin panel. On its own it holds a manual
+*Check for updates* button, a switch for a once-a-day automatic check (off by
+default, since it calls out to the internet), and these manual instructions.
+There is nothing to configure for the check: a fork that wants it to point at its
+own releases changes one constant, described in `docs/TECHNICAL.md`.
+
+An instance can additionally offer an **Update now** button that applies the
+update for the owner. It is off unless the operator turns it on, by setting
+`HARMONY_UPDATE_COMMAND` in `.env` to the command that pulls and builds, run from
+the checkout:
+
+```
+HARMONY_UPDATE_COMMAND=git pull && npm ci && npm run build:web
+```
+
+Leave the restart out of it. After the command succeeds the server exits cleanly
+and lets its supervisor start the new build — which is why the unit above uses
+`Restart=always`. With `Restart=on-failure` a clean exit would leave the service
+stopped. An explicit `systemctl stop harmony` still stops it. The same command
+works under pm2 or Docker, whose restart policies bring the service back the same
+way, so nothing here is specific to systemd.
+
+The command runs as the user the service runs as, and it never needs `sudo`: if
+that user can run `git` and `npm` in the checkout, it can update. Nothing is
+installed outside the checkout.
+
+The owner gets two buttons. **Backup and update** first takes a database-only
+snapshot, then runs the command; **Update without backup** skips the snapshot
+after a warning. Snapshots are one compact copy of the database, kept beside it,
+and the owner chooses how many stay on disk (three by default). Uploaded files are
+not copied: they are content-addressed and never rewritten, so an update cannot
+damage them. If the command fails, the instance keeps running the old build and
+the panel shows the output.
+
+Unset `HARMONY_UPDATE_COMMAND` to take the button away again; the panel then only
+prints the manual steps. The feature is opt-in and manual by design: Harmony never
+updates itself, and the daily check only notifies.
 
 ## A note on the content security policy
 
