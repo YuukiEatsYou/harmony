@@ -3515,11 +3515,14 @@ button.roster-member:hover {
 .about {
   width: min(380px, 92vw);
   height: auto;
+  /* A centered card: the icon, name, links and button all sit on the middle line. */
+  text-align: center;
 }
 
 .about-head {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.85rem;
 }
 
@@ -3547,6 +3550,11 @@ button.roster-member:hover {
 
 .about-version {
   margin: 0 0 1rem;
+}
+
+/* The Close button follows the rest of the card and centers too. */
+.about .editor-actions {
+  justify-content: center;
 }
 
 /* ---- Admin forms & rows ---- */
