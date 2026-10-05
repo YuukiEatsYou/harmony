@@ -286,8 +286,9 @@ export function suggestFor(
         .filter((member) => matches(member.username, member.displayName))
         .sort((a, b) => Number(starts(b.username)) - Number(starts(a.username)))
         .map((member) => ({
+          // No second line: the username is what picking inserts, so the label
+          // alone keeps the row short (and readable on a phone).
           label: member.displayName?.trim() || member.username,
-          detail: member.displayName?.trim() ? `@${member.username}` : undefined,
           value: member.username,
         }));
       break;

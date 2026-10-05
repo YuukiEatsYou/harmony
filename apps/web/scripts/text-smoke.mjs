@@ -988,7 +988,7 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('a quoted partial is read without its quote', activeToken('from:"Some Na', 13)?.partial === 'Some Na');
   const people = suggestFor(token, sources);
   check('members match by username or display name', people.map((s) => s.value).join() === 'alice,malice');
-  check('a prefix match ranks first', people[0]?.value === 'alice' && people[0].label === 'Alice Liddell' && people[0].detail === '@alice');
+  check('a prefix match ranks first', people[0]?.value === 'alice' && people[0].label === 'Alice Liddell' && people[0].detail === undefined);
   check('an empty partial offers everyone', suggestFor({ key: 'from', partial: '', start: 0, end: 5 }, sources).length === 3);
   check('channels are offered by name', suggestFor({ key: 'in', partial: 'g', start: 0, end: 4 }, sources).map((s) => s.value).join() === 'general,gaming');
   check('has offers the fixed list', suggestFor({ key: 'has', partial: 'p', start: 0, end: 5 }, sources).map((s) => s.value).join() === 'pin');
