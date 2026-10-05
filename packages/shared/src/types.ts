@@ -195,7 +195,16 @@ export type AuditKind =
   | 'message_pin'
   | 'message_unpin'
   | 'backup_download'
-  | 'channel_export';
+  | 'channel_export'
+  | 'server_gif_add'
+  | 'server_gif_remove'
+  | 'server_gif_hide'
+  | 'server_gif_unhide'
+  | 'gif_archive'
+  | 'gif_free'
+  | 'event_create'
+  | 'event_edit'
+  | 'event_cancel';
 
 /**
  * The kind-specific fields of an audit entry. Every field is optional because
@@ -211,6 +220,8 @@ export type AuditKind =
  *   message text as it read when it was pinned or unpinned. The target is the
  *   message's author.
  * - `backup_download`: `filename`. `channel_export`: `channelName` and `filename`.
+ * - `server_gif_*`: `filename`, and `gifName` for a curated gif's display name.
+ * - `event_create` / `event_edit` / `event_cancel`: `eventTitle`, and `channelName` for a channel event.
  *
  * `actorName` and `targetName` are snapshots taken when the entry was written,
  * so it stays readable after a rename or a deletion.
@@ -219,12 +230,20 @@ export interface AuditDetail {
   channelName?: string;
   roleName?: string;
   filename?: string;
+  /** server_gif_add / server_gif_remove: the curated gif's display name. */
+  gifName?: string;
+  /** event_*: the event's title as it read at the time. */
+  eventTitle?: string;
   actorName?: string;
   targetName?: string;
   before?: string;
   after?: string;
   durationMinutes?: number;
   reason?: string | null;
+  /** gif_archive / gif_free: how many gifs the action copied or released. */
+  count?: number;
+  /** gif_free: how many bytes of stored copies were released. */
+  bytes?: number;
   /** member_update: the account fields that were changed, by name. */
   fields?: string[];
   /** Images that went with a deleted message, so the log can still show them. */

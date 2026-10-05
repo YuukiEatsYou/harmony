@@ -8,12 +8,14 @@
   import { firstUnreadIndex, newMessageCount, newMessagesLabel } from '../lib/unread';
   import { emojis } from '../lib/emojis.svelte';
   import { gifs } from '../lib/gifs.svelte';
+  import LinkedGif from './LinkedGif.svelte';
   import { lightbox } from '../lib/lightbox.svelte';
   import { members } from '../lib/members.svelte';
   import { meta } from '../lib/meta.svelte';
   import { profileCard } from '../lib/profile-card.svelte';
   import { session } from '../lib/session.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
+  import EditHistory from './EditHistory.svelte';
   import EmbedVideo from './EmbedVideo.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
@@ -22,6 +24,7 @@
   import RemoveEmbedsAction from './RemoveEmbedsAction.svelte';
   import PollView from './PollView.svelte';
   import SaveAction from './SaveAction.svelte';
+  import ServerGifAction from './ServerGifAction.svelte';
 
   /** Opens the profile card for an author, when there is one to show. */
   function openCard(user: User | null | undefined, element: HTMLElement): void {
@@ -169,12 +172,13 @@
   }
 
   /**
-   * Whether a linked gif is drawn: only while the instance is set to link (the
-   * page's Content-Security-Policy allows the gif hosts only then) and only for
-   * an address on the allowlist, whatever the server sent.
+   * Whether a linked gif is drawn: only for an address on the allowlist, whatever
+   * the server sent. While the instance links it is loaded from the gif host (the
+   * page's Content-Security-Policy allows those hosts only then); while it stores,
+   * from this server's own copy, which the server makes on first request.
    */
   function linkedGifShown(embed: LinkEmbed): boolean {
-    return embed.gif != null && meta.data?.gifStorage === 'link' && isGifLinkUrl(embed.url);
+    return embed.gif != null && meta.data?.gifStorage != null && isGifLinkUrl(embed.url);
   }
 
   /**
@@ -546,11 +550,11 @@
                 <MemberBadge badge={message.author.badge} />
               {/if}
               <time>{formatTime(message.createdAt)}</time>
-              {#if message.editedAt}<span class="edited">(edited)</span>{/if}
+              {#if message.editedAt}<EditHistory {message} />{/if}
               {#if message.pinnedAt}<span class="pin-marker" title="Pinned"><Icon name="pin" size={13} /></span>{/if}
             </div>
           {:else if message.editedAt}
-            <span class="edited">(edited)</span>
+            <EditHistory {message} />
           {/if}
           {#if grouped && message.pinnedAt}<span class="pin-marker grouped" title="Pinned"><Icon name="pin" size={13} /></span>{/if}
 
@@ -687,13 +691,7 @@
                   while the instance is in link mode, and only for an allowlisted host.
                 -->
                 {#if linkedGifShown(message.embed)}
-                  <a class="embed-gif" href={message.embed.url} target="_blank" rel="noreferrer noopener">
-                    {#if message.embed.gif.contentType.startsWith('video/')}
-                      <video src={message.embed.url} autoplay loop muted playsinline preload="metadata"></video>
-                    {:else}
-                      <img src={message.embed.url} alt="" loading="lazy" referrerpolicy="no-referrer" />
-                    {/if}
-                  </a>
+                  <LinkedGif url={message.embed.url} contentType={message.embed.gif.contentType} mode={meta.data?.gifStorage} />
                 {/if}
               {:else if message.embed.player}
                 <div class="embed">
@@ -751,6 +749,7 @@
           </button>
           <PinAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           <SaveAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
+          <ServerGifAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           <RemoveEmbedsAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           {#if canEdit(message)}
             <button

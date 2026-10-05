@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import { GatewayEvent, type PruneSummary, type RetentionUsage } from '@harmony/shared';
 import type { Config } from '../config.ts';
@@ -14,6 +15,12 @@ import { deleteExternalEmojisUnusedBefore } from '../db/emojis.ts';
 import { deleteStickersUnusedBefore } from '../db/stickers.ts';
 import { deleteAuditOlderThan } from '../db/audit.ts';
 import { deleteGifFavoritesUnusedBefore } from '../db/gif_favorites.ts';
+import {
+  clearGifSourcesForHash,
+  isGifBlobHeldElsewhere,
+  listGifHashesPaired,
+  listOldestGifCopies,
+} from '../db/gif_sources.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { ServerLogService } from '../log/service.ts';
 import type { SettingsService } from '../settings/service.ts';
@@ -72,8 +79,47 @@ export function createPruner(deps: PrunerDeps): Pruner {
       if (referenced.has(hash)) continue;
       bytes += blobs.delete(hash);
       count += 1;
+      // A gif source that mirrored this blob must not keep pointing at a file that
+      // is gone: cleared here, it is fetched again on demand instead of 404ing.
+      clearGifSourcesForHash(deps.sqlite, hash);
     }
     return { count, bytes };
+  }
+
+  /**
+   * Forgets the pairing of any gif source whose blob is no longer on disk because
+   * it vanished some way other than the sweep (removed by hand, restored from a
+   * backup without its files), so it is fetched again on demand.
+   */
+  function reconcileGifPairs(): void {
+    for (const hash of listGifHashesPaired(deps.sqlite)) {
+      if (!existsSync(blobs.pathFor(hash))) clearGifSourcesForHash(deps.sqlite, hash);
+    }
+  }
+
+  /**
+   * Releases stored copies of remote gifs, oldest first, until `needed` bytes are
+   * freed or none are left that something else does not also keep. A copy made
+   * for a gif source is re-fetchable from where it came from and no message
+   * depends on it, so it is the first thing to give up when space runs out,
+   * well before any attachment is evicted.
+   */
+  function releaseGifCopies(needed: number): { count: number; bytes: number } {
+    const released = new Set<string>();
+    let planned = 0;
+    for (const row of listOldestGifCopies(deps.sqlite, 5000)) {
+      if (planned >= needed) break;
+      if (row.hash === null || released.has(row.hash)) continue;
+      if (isGifBlobHeldElsewhere(deps.sqlite, row.hash)) continue;
+      released.add(row.hash);
+      planned += row.size ?? 0;
+    }
+    let bytes = 0;
+    for (const hash of released) {
+      clearGifSourcesForHash(deps.sqlite, hash);
+      bytes += blobs.delete(hash);
+    }
+    return { count: released.size, bytes };
   }
 
   function usage(): RetentionUsage {
@@ -153,6 +199,7 @@ export function createPruner(deps: PrunerDeps): Pruner {
     let swept = sweepUnreferencedBlobs();
     deletedBlobs += swept.count;
     freedBytes += swept.bytes;
+    reconcileGifPairs();
 
     // Emergency pruning: evict the oldest attachments until back under the target.
     // Attachments are the only thing it may remove, and it spares the ones held by
@@ -168,6 +215,13 @@ export function createPruner(deps: PrunerDeps): Pruner {
 
       let current = blobs.totalBytes();
       let batches = 0;
+
+      if (current > target) {
+        const released = releaseGifCopies(current - target);
+        deletedBlobs += released.count;
+        freedBytes += released.bytes;
+        current -= released.bytes;
+      }
 
       while (current > target && batches < MAX_BATCHES) {
         batches += 1;

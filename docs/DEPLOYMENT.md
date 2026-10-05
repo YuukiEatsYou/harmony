@@ -281,6 +281,13 @@ stopped. The uploaded blobs are content-addressed, so the database is the index:
 copy the two together and they stay consistent. Retention pruning removes blobs
 nothing references any more, so a backup is also a good time to let it run.
 
+Message edit history (the previous text of up to 20 edits per message) lives in the database, so it
+is part of every backup. It is removed together with its message, whether by deleting the message
+for good or by message retention pruning it; a message that is only soft-deleted keeps its history
+in the database, though nobody can read it. Editing a message therefore does not erase the old text
+from the database or from backups. It is only visible to the author and to members who can manage
+messages.
+
 ### From the admin panel
 
 The owner can also download a backup from **Admin → Backup** without shell
@@ -373,6 +380,10 @@ When an admin sets Gif storage to "Link to the hosted service", the built-in
 policy additionally allows images and media from a short fixed list of gif hosts
 (Klipy, Tenor's media hosts, Giphy's media hosts); a policy you set yourself is
 never modified, so add those hosts to its `img-src` and `media-src` if you use
-link mode with one. The other
+link mode with one. Switching between Store and Link never loses a gif: the
+server remembers each linked gif's address and copies it on demand, and Settings,
+Gifs can archive every linked gif onto the server (or free those copies again).
+Copies made that way are kept until released or until the storage limit needs
+the space; retention by age does not remove them. The other
 hardening headers (`X-Content-Type-Options`, `X-Frame-Options`,
 `Referrer-Policy`, and HSTS over HTTPS) stay on either way.

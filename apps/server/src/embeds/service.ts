@@ -10,7 +10,7 @@ import {
   type LinkEmbed,
   type Message,
 } from '@harmony/shared';
-import type { AttachmentService } from '../attachments/service.ts';
+import type { AttachmentService, StoredImage } from '../attachments/service.ts';
 import { deleteAttachment, listLinkedAttachments, type AttachmentRow } from '../db/attachments.ts';
 import { canAccessChannel, channelAccessFor } from '../access/service.ts';
 import type { AuthContext } from '../auth/service.ts';
@@ -18,6 +18,7 @@ import { findMessage, parseMessageEmbed, setMessageEmbed, setMessageEmbedsHidden
 import { HttpError } from '../http/errors.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
+import type { GifSourceService } from '../gifs/sources.ts';
 import { resolvesToPublicHost } from './guard.ts';
 import { verifyLinkedGif, type VerifyLinkedGif } from './linked-gif.ts';
 import { readCappedBody } from './media.ts';
@@ -62,6 +63,11 @@ export interface EmbedServiceDeps {
   log?: (message: string, detail?: unknown) => void;
   /** Replaces the check made before a gif is linked; for tests, which cannot reach a gif host. */
   verifyLinkedGif?: VerifyLinkedGif;
+  /**
+   * Pairs each gif address with the copy held of it. Optional so a resolver can
+   * be built without one (it then behaves as it did before the pairing existed).
+   */
+  sources?: GifSourceService;
 }
 
 /**
@@ -74,13 +80,16 @@ type Outcome =
   /** Fetched just now. */
   | { kind: 'image'; url: string; contentType: string; data: Buffer }
   /** Already here, from somebody else posting the same link. */
-  | { kind: 'copy'; url: string; from: AttachmentRow };
+  | { kind: 'copy'; url: string; from: AttachmentRow }
+  /** Already here as the copy of a recorded gif address, which no message has used yet. */
+  | { kind: 'source'; url: string; stored: StoredImage };
 
 /** How a resolution ended, for the log. */
 const OUTCOME_LABEL = {
   embed: 'resolved a link preview',
   image: 'kept a linked image',
   copy: 'reused an image already stored',
+  source: 'reused the stored copy of a recorded gif',
 } as const;
 
 /**
@@ -166,7 +175,7 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     if (outcome.kind !== 'embed') {
       const uploaderId = deps.renderMessage(messageId)?.author?.id ?? null;
       if (outcome.kind === 'image') {
-        await deps.attachments.storeLinkedImage({
+        const kept = await deps.attachments.storeLinkedImage({
           messageId,
           uploaderId,
           sourceUrl: outcome.url,
@@ -174,12 +183,28 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
           contentType: outcome.contentType,
           data: outcome.data,
         });
-      } else {
+        if (kept) deps.sources?.recordCopy(outcome.url, kept);
+      } else if (outcome.kind === 'copy') {
         deps.attachments.copyLinkedImage({
           messageId,
           uploaderId,
           sourceUrl: outcome.url,
           from: outcome.from,
+        });
+        deps.sources?.recordCopy(outcome.url, {
+          hash: outcome.from.hash,
+          contentType: outcome.from.content_type,
+          size: outcome.from.size,
+          width: outcome.from.width,
+          height: outcome.from.height,
+        });
+      } else {
+        deps.attachments.attachStoredCopy({
+          messageId,
+          uploaderId,
+          sourceUrl: outcome.url,
+          filename: filenameFor(outcome.url, outcome.stored.contentType),
+          stored: outcome.stored,
         });
       }
       log(OUTCOME_LABEL[outcome.kind], { messageId, url: outcome.url });
@@ -236,6 +261,25 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     // to the ordinary path, which stores it.
     if (deps.settings.get().gifStorage === 'link' && (await linkGif(messageId, url))) return;
 
+    // A copy held under the address (made while the instance linked, or by an
+    // archive run) is given to the message as it is: the same gif is never
+    // fetched twice, and one whose source has since died still arrives.
+    const held = deps.sources?.copyFor(url);
+    if (held && held.content_type) {
+      await applyOutcome(messageId, {
+        kind: 'source',
+        url,
+        stored: {
+          hash: held.hash,
+          contentType: held.content_type,
+          size: held.size ?? 0,
+          width: held.width,
+          height: held.height,
+        },
+      });
+      return;
+    }
+
     const userAgent = deps.settings.get().previewUserAgent ?? USER_AGENT;
     await applyOutcome(messageId, await resolveOutcome(url, userAgent));
   }
@@ -268,6 +312,9 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     });
     if (!gif) return false;
 
+    // Only the pairing is recorded, with a copy if one is already held; the bytes
+    // are copied later, on demand, if the instance ever stores instead.
+    deps.sources?.record(url, gif.contentType);
     log('linked a gif instead of storing it', { messageId, url });
     await applyOutcome(messageId, {
       kind: 'embed',

@@ -81,6 +81,18 @@ export interface AttachmentService {
     sourceUrl: string;
     from: AttachmentRow;
   }): Attachment;
+  /**
+   * Gives a message a picture whose bytes this instance already holds under a
+   * source address (a gif copied earlier, perhaps while the instance linked
+   * instead of storing). No download.
+   */
+  attachStoredCopy(input: {
+    messageId: string;
+    uploaderId: string | null;
+    sourceUrl: string;
+    filename: string;
+    stored: StoredImage;
+  }): Attachment;
   find(id: string): AttachmentRow | null;
   /** Absolute path of the on-disk blob for a content hash. */
   filePathFor(hash: string): string;
@@ -195,6 +207,24 @@ export function createAttachmentService(
         width: input.from.width,
         height: input.from.height,
         hash: input.from.hash,
+        sourceUrl: input.sourceUrl,
+      });
+      attachToMessage(sqlite, id, input.messageId);
+
+      const row = findAttachment(sqlite, id);
+      if (!row) throw new Error('Failed to give a message a picture already stored');
+      return toAttachment(row);
+    },
+
+    attachStoredCopy(input) {
+      const id = addRow({
+        uploaderId: input.uploaderId,
+        filename: input.filename,
+        contentType: input.stored.contentType,
+        size: input.stored.size,
+        width: input.stored.width,
+        height: input.stored.height,
+        hash: input.stored.hash,
         sourceUrl: input.sourceUrl,
       });
       attachToMessage(sqlite, id, input.messageId);

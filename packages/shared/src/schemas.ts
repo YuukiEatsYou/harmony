@@ -302,6 +302,43 @@ export type PickGifInput = z.infer<typeof pickGifSchema>;
 export const linkGifSchema = z.object({ url: z.string().min(1).max(2048) });
 export type LinkGifInput = z.infer<typeof linkGifSchema>;
 
+/** Gif tags: a handful of short words. */
+const serverGifTags = z.array(z.string().trim().min(1).max(30)).max(12);
+
+/** Curates a gif for the whole server: from an attachment, a member's favorite, or a hosted address (exactly one). */
+export const addServerGifSchema = z
+  .object({
+    attachmentId: z.string().min(1).optional(),
+    favoriteId: z.string().min(1).optional(),
+    url: z.string().min(1).max(2048).optional(),
+    name: z.string().trim().max(60).optional(),
+    tags: serverGifTags.optional(),
+    pinned: z.boolean().optional(),
+  })
+  .refine(
+    (value) => [value.attachmentId, value.favoriteId, value.url].filter((entry) => entry !== undefined).length === 1,
+    'Name exactly one of attachmentId, favoriteId and url.',
+  );
+export type AddServerGifInput = z.infer<typeof addServerGifSchema>;
+
+export const updateServerGifSchema = z
+  .object({
+    name: z.string().trim().max(60).optional(),
+    tags: serverGifTags.optional(),
+    pinned: z.boolean().optional(),
+    position: z.number().int().min(0).max(100000).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, 'Nothing to change.');
+export type UpdateServerGifInput = z.infer<typeof updateServerGifSchema>;
+
+/** The curated gifs in the order they should now appear. */
+export const orderServerGifsSchema = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) });
+export type OrderServerGifsInput = z.infer<typeof orderServerGifsSchema>;
+
+/** Hides an auto-collected gif, named by the attachment it was found as. */
+export const hideServerGifSchema = z.object({ attachmentId: z.string().min(1) });
+export type HideServerGifInput = z.infer<typeof hideServerGifSchema>;
+
 /** The picker's hosted tab: a search term and a page size. */
 export const gifSearchQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),

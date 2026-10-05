@@ -9,6 +9,7 @@
   import ChannelsSection from './ChannelsSection.svelte';
   import BridgeSection from './BridgeSection.svelte';
   import EmojisSection from './EmojisSection.svelte';
+  import ServerGifsSection from './ServerGifsSection.svelte';
   import InvitesSection from './InvitesSection.svelte';
   import MediaSection from './MediaSection.svelte';
   import MembersSection from './MembersSection.svelte';
@@ -51,6 +52,8 @@
         <ChannelsSection />
       {:else if active === 'emojis'}
         <EmojisSection />
+      {:else if active === 'server-gifs'}
+        <ServerGifsSection />
       {:else if active === 'media'}
         <MediaSection />
       {:else if active === 'retention'}

@@ -1138,6 +1138,9 @@ class ChatStore {
       case 'EMOJI_DELETE':
         void emojis.load();
         break;
+      case 'SERVER_GIFS_UPDATE':
+        gifs.serverChanged();
+        break;
       case 'RETENTION_APPLIED': {
         // Old messages or attachments may have been pruned from the open channel.
         // Take them out where they sit instead of reloading, which would throw

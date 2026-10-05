@@ -30,6 +30,7 @@ code wins — please open an issue.
   - [Pinned messages](#pinned-messages)
   - [Saved messages](#saved-messages)
   - [Scheduled messages](#scheduled-messages)
+  - [Events](#events)
   - [Reactions](#reactions)
   - [Attachments](#attachments)
   - [Media gallery](#media-gallery)
@@ -139,6 +140,7 @@ implicit `@everyone` role grants every member `ViewChannels`, `SendMessages`, `A
 | `Administrator` | `1 << 14` | Implies every flag above |
 | `ModerateMembers` | `1 << 15` | Putting members in a timeout |
 | `ManageMembers` | `1 << 16` | Editing members' usernames, display names, pictures and passwords |
+| `ManageEvents` | `1 << 17` | Creating, editing and canceling server events (a creator can always change their own) |
 
 Over the wire, permission bitfields are **decimal strings** (`"1"`, `"2081"`), never JSON numbers,
 because JSON cannot carry a 64-bit integer. `GET /api/v1/auth/me` returns your effective
@@ -376,18 +378,23 @@ type AuditKind =
   | 'role_add' | 'role_remove'
   | 'member_update' | 'password_reset'
   | 'message_pin' | 'message_unpin'
-  | 'backup_download' | 'channel_export';
+  | 'backup_download' | 'channel_export'
+  | 'server_gif_add' | 'server_gif_remove' | 'server_gif_hide' | 'server_gif_unhide'
+  | 'gif_archive' | 'gif_free';
 
 type AuditDetail = {
   channelName?: string;   // message and media kinds
   before?: string;        // deleted text, an edit's old text, or the text pinned or unpinned
   after?: string;         // an edit's new text
-  filename?: string;      // media_delete: the file that was removed; backup_download / channel_export: the file produced
+  filename?: string;      // media_delete: the file that was removed; backup_download / channel_export: the file produced; server_gif_*: the gif's filename
+  gifName?: string;       // server_gif_add / server_gif_remove: the curated gif's display name
   attachments?: Array<{ id: string; filename: string }>;  // images a deleted message carried
   durationMinutes?: number;
   reason?: string | null;
   roleName?: string;
   fields?: string[];       // member_update: the account fields that changed
+  count?: number;          // gif_archive / gif_free: gifs copied or released
+  bytes?: number;          // gif_free: bytes of copies released
   actorName?: string;     // snapshots, so an entry stays readable after a rename
   targetName?: string;
 };
@@ -833,6 +840,24 @@ Only the author may edit; anyone else, including administrators, gets `403 forbi
 updated `Message` (with `editedAt` set) and fires `MESSAGE_UPDATE`. The [inbox](#mentions-and-replies)
 follows the new text: someone named by the edit finds the message there, someone no longer named does
 not, and a reply stays a reply. Naming someone by editing does not make the channel unread for them.
+
+#### `GET /api/v1/messages/:id/edits` — auth (author or `ManageMessages`)
+
+The earlier versions of an edited message, newest first:
+
+```json
+{ "edits": [ { "id": "...", "content": "text before the edit", "editedAt": "2026-10-04T10:00:00.000Z",
+               "editor": { "id": "...", "username": "bob" }, "source": "harmony" } ] }
+```
+
+`editedAt` is when the edit replaced that text, `editor` is who made it (`null` once the account is
+deleted) and `source` is `harmony` or `discord`. The current text is the message itself and is not
+repeated. At most 20 versions are kept per message; the oldest are dropped. Only the author and members
+with `ManageMessages` (administrators included) may read it. For anyone else, and for a deleted or
+missing message or a channel the caller cannot see, the answer is the same `404 message_not_found`, so
+the endpoint cannot be used to probe. An edit arriving from Discord is recorded too; a Discord update
+that leaves the text unchanged (a link unfurl) is not an edit and records nothing. There is no gateway
+event: clients fetch the list when the user opens it.
 
 #### `DELETE /api/v1/messages/:id` — auth (author or `ManageMessages`)
 
@@ -1283,6 +1308,96 @@ Sends it now and returns the posted `Message`. The same checks as an ordinary se
 is returned as the error and the entry stays as it was. `404` if it was already sent or cancelled
 (concurrent calls deliver it exactly once).
 
+### Events
+
+Server events with an "Interested" RSVP, a simplified take on Discord's scheduled events. An event
+has a title, a description, a start (and optionally an end) and a place: either a **channel** of the
+server or a short free **text** such as a link or an address. There is no recurrence, and events are
+not mirrored to Discord's own scheduled events.
+
+```ts
+type ServerEvent = {
+  id: string;
+  title: string;                       // 1-100 characters
+  description: string;                 // up to 1000
+  locationKind: 'channel' | 'external';
+  channelId: string | null;            // for a channel event
+  locationText: string;                // for an external one, up to 100
+  startsAt: number;                    // epoch milliseconds
+  endsAt: number | null;
+  creator: User | null;                // null once that account is gone
+  status: 'scheduled' | 'active' | 'ended' | 'canceled';
+  createdAt: string;
+  updatedAt: string;
+  announcedMessageId: string | null;   // the announcement message, if one was posted
+  interestedCount: number;
+  interested: boolean;                 // the caller's own RSVP
+};
+```
+
+**Who sees what.** An event in a channel is visible only to members who can open that channel; an
+external event is visible to every member. This governs every surface: the list, one event, the RSVP,
+the counts, the names and the gateway. An event the caller cannot see is `404 event_not_found`, never
+`403`, so ids cannot be probed. A channel's events are deleted with the channel.
+
+**Permissions.** Creating needs `ManageEvents` (bit 17, `1 << 17`). Editing or canceling needs it too,
+except that the creator can always edit or cancel their own event. The migration gave `ManageEvents`
+to every existing role that already held `ManageServer`; administrators and the owner have it
+implicitly. Create, edit and cancel are audit-logged (`event_create`, `event_edit`, `event_cancel`).
+
+**Rules.** At most 50 events can be `scheduled` or `active` at once (`409 too_many_events`). A new
+event must start in the future and no more than a year ahead; an end must come after the start and
+within 30 days of it (`400 invalid_event_time`). The start of an event that has begun is fixed
+(`409 event_started`), though its text and end can still change; an `ended` or `canceled` event can
+no longer be edited, joined or canceled (`409 event_closed`).
+
+**Lifecycle.** A sweep (every 15 s; `HARMONY_EVENT_SWEEP_MS`) moves `scheduled` to `active` at the
+start time and `active` to `ended` at the end time, or **4 hours after the start** when no end was
+given (`HARMONY_EVENT_DEFAULT_DURATION_MS`). After downtime it catches up at the next start. About 15
+minutes before the start (`HARMONY_EVENT_REMINDER_LEAD_MS`) it sends `EVENT_REMINDER` to the sessions of
+each member who is interested, once per event; a stamp in the database keeps it from repeating across
+restarts, and moving the start re-arms it. A member who is offline at that moment is not reminded:
+nothing is stored for them.
+
+#### `GET /api/v1/events` — `ViewChannels`
+
+`{ "events": [ServerEvent] }`: every `scheduled` and `active` event the caller can see (soonest
+first), plus the events that `ended` or were `canceled` within the last 7 days, at most 20.
+
+#### `GET /api/v1/events/:id` — `ViewChannels`
+
+One `ServerEvent`.
+
+#### `POST /api/v1/events` — `ManageEvents`
+
+Body `{ title, description?, locationKind, channelId?, locationText?, startsAt, endsAt?,
+announceChannelId? }`. A channel event needs a `channelId` the caller can see; an external one needs a
+`locationText`. With `announceChannelId` the server also posts an ordinary message **as the caller**
+in that channel (they need to see it and hold `SendMessages`), containing the title and a
+`<t:UNIX:F> (<t:UNIX:R>)` pair so each reader sees their own zone; its id comes back as
+`announcedMessageId`. If posting fails the event is still created. Returns the event. Rate limited.
+
+#### `PATCH /api/v1/events/:id` — `ManageEvents` or the creator
+
+Any of `title`, `description`, `locationKind`, `channelId`, `locationText`, `startsAt`, `endsAt`
+(`null` clears the end), at least one. Returns the event.
+
+#### `POST /api/v1/events/:id/cancel` — `ManageEvents` or the creator
+
+Marks the event `canceled`. Canceling one already canceled changes nothing. Returns the event.
+
+#### `PUT /api/v1/events/:id/interested` and `DELETE /api/v1/events/:id/interested` — `ViewChannels`
+
+Marks or withdraws the caller's interest. Both are idempotent and return the event with the new
+count. Interest can only be added to a `scheduled` or `active` event (`409 event_closed`); it can
+always be withdrawn. Both are rate limited.
+
+#### `GET /api/v1/events/:id/interested` — `ViewChannels`
+
+`{ "total": number, "users": [User] }`: the names behind the count (up to 100, earliest first), left
+to members who can see the event. Someone who can no longer see a channel event is counted in `total`
+but not named.
+
 ### Reactions
 
 An emoji is either a unicode character (send it verbatim, e.g. `"👍"`) or a custom emoji shortcode
@@ -1389,7 +1504,8 @@ downloaded to save one — the bytes are already stored, and a saved gif shares 
 attachment of the same picture.
 
 **This server** lists what the instance already holds, one entry per picture however many times it
-was sent, and only from channels the caller may see.
+was sent, and only from channels the caller may see. The client now shows it as the **Server** tab,
+which puts the administrators' curated gifs first (see [Server gifs](#server-gifs)).
 
 **Klipy** appears only when the instance has a key for it, and is answered entirely by the server so
 that key never reaches a browser. A gif saved or picked from there is downloaded and kept first, so
@@ -1485,6 +1601,80 @@ Forgets one of the caller's own saved gifs. `204` on success; `404` for anybody 
 Serves the saved gif's bytes. Only the owner may fetch it, and it is cached immutably by hash, like
 `/attachments/:id`.
 
+#### Server gifs
+
+The picker's **Server** tab (it replaces the old `This server` tab) is the community's own shelf:
+the administrators' **curated** gifs first, pinned ones on top and the rest in their set order, then
+the **auto-collected** gifs (the same list `GET /gifs/local` builds) minus any an administrator
+**hid**. Curating needs `ManageEmojis`, the permission that already governs custom emoji; reading
+needs only `ViewChannels`. Every change is audit-logged (`server_gif_add`, `server_gif_remove`,
+`server_gif_hide`, `server_gif_unhide`) and fires `SERVER_GIFS_UPDATE` so open pickers refresh.
+
+A curated gif is always a **stored copy** held by content hash, so it survives the message it was
+found in, a dead link, and every retention rule (image, video, message and the emergency storage
+limit): the pruner counts curated rows as references to their bytes. A hidden gif is only a note on a
+hash; it keeps nothing alive, and the auto list simply skips it. One row exists per picture (unique
+on the hash): hiding a gif that is curated answers `409 server_gif_curated`, and curating a hidden
+one promotes the row. At most 500 gifs can be curated (`409 server_gif_limit`).
+
+`GET /gifs/local` is deliberately unchanged and still returns hidden gifs; the Server tab
+(`GET /gifs/server`) is what honours the curation.
+
+##### `GET /api/v1/gifs/server` — `ViewChannels`
+
+Query: `q` (optional; matches a curated gif's name, tags and filename, and an auto gif's filename or
+source link) and `limit` (default 50, max 100, applied to the auto-collected part: every matching
+curated gif is always returned). Returns `{ "gifs": [ServerGifItem] }` where an item is
+`{ id, source: "curated" | "auto", hash, name, tags, filename, contentType, width, height, pinned,
+favoriteId }`. Load a curated tile from `GET /gifs/server/:id/image` and an auto tile from
+`/attachments/:id`. Auto gifs honour channel visibility exactly as `/gifs/local` does, so a gif in a
+[locked channel](#channel-locking) never reaches a member who cannot see that channel.
+
+##### `GET /api/v1/gifs/server/manage` — `ManageEmojis`
+
+The admin view: `{ "curated": [ServerGif], "hidden": [ServerGif], "auto": [GifItem] }`. `curated` is in
+display order (pinned first, then `position`); `auto` excludes hidden and curated pictures and is
+limited to what the caller can see.
+
+##### `POST /api/v1/gifs/server` — `ManageEmojis`
+
+Body: exactly one of `{ "attachmentId" }` (a gif the caller can see, or their own pending upload),
+`{ "favoriteId" }` (the caller's own favorite) or `{ "url" }` (a hosted-service address, fetched and
+stored through the same SSRF-guarded path as favorites; only the configured service's addresses are
+accepted, `400 invalid_gif_url` otherwise), plus optional `name` (up to 60), `tags` (up to 12 words)
+and `pinned`. Returns the `ServerGif`. `409 server_gif_exists` when the picture is already curated,
+`400 not_a_gif` for anything that is not a gif, `404 gif_not_found` for an attachment the caller
+cannot see. A new gif goes to the end of the list. To upload a new gif, `POST /attachments` it first
+and pass the returned id.
+
+##### `PATCH /api/v1/gifs/server/:id` — `ManageEmojis`
+
+Body: any of `name`, `tags`, `pinned`, `position`. Returns the `ServerGif`; `404` for an unknown or
+hidden row.
+
+##### `POST /api/v1/gifs/server/order` — `ManageEmojis`
+
+Body `{ "ids": [string] }`: the curated ids in their new order. Ids not listed follow in their old
+order. `204`.
+
+##### `POST /api/v1/gifs/server/hide` — `ManageEmojis`
+
+Body `{ "attachmentId" }`: removes that picture from the auto-collected list for everyone. Returns the
+`hidden` `ServerGif`. The caller must be able to see the attachment (`404` otherwise).
+
+##### `DELETE /api/v1/gifs/server/:id` — `ManageEmojis`
+
+Deletes a curated gif (its bytes go at the next retention sweep unless something else holds them) or
+un-hides a hidden one. `204`, or `404`.
+
+##### `POST /api/v1/gifs/server/:id/pick` — `AttachFiles`
+
+Like `POST /gifs/pick` for a curated gif: returns a pending `Attachment` to send with a message.
+
+##### `GET /api/v1/gifs/server/:id/image` — `ViewChannels`
+
+The bytes of a curated or hidden row, cached immutably by hash.
+
 #### `POST /api/v1/gifs/pick` — `AttachFiles`
 
 Takes a gif out of the picker and into the message being written. Body is one of
@@ -1515,7 +1705,8 @@ check: allowlisted host, resolves to a public address, **no redirects followed**
 instance's image or video limit (by `Content-Length`, or by reading up to the limit when none is
 declared). Failing any of that, the gif is stored by the ordinary path instead. A copy this instance
 already holds is reused rather than linked past. A client draws `embed.url` directly (`<img>` or a
-muted looping `<video>`) only while `gifStorage` is `"link"` and the address is on the allowlist;
+muted looping `<video>`) while `gifStorage` is `"link"` and the address is on the allowlist, and
+from `GET /api/v1/gifs/copy?url=` (below) while it is `"store"` or when the remote fails to load;
 `width` and `height` are `null` because gif services do not tell the server.
 
 While the mode is on, the built-in `Content-Security-Policy` opens `img-src` and `media-src` to those
@@ -1530,6 +1721,38 @@ Body `{ "url": string }`. Checks a hosted gif's address as above and returns
 allowlist, `415 invalid_gif` when the host did not serve a gif of a sensible size. Nothing is stored.
 Saved (favorite) gifs, the This server tab and `POST /api/v1/gifs/pick` are unchanged: they are
 stored bytes. Saving a hosted gif to favorites still keeps a copy.
+
+#### `GET /api/v1/gifs/copy?url=` — `ViewChannels`
+
+The copy this server holds of a linked gif, by the address the message links to (percent-encode it,
+query string included). Answers with the gif bytes, or `404 gif_not_found`. The address must be on the
+gif-host allowlist and already recorded in `gif_sources` (migration 31). While `gifStorage` is
+`"store"` a recorded address with no copy yet is fetched once through the SSRF-guarded downloader,
+within the upload size limit; after three failed fetches it is marked dead and the route answers 404.
+While `"link"` it serves only a copy that already exists and never fetches.
+
+#### `GET /api/v1/gifs/sources` — `ManageServer`
+
+```json
+{ "total": 12, "linked": 4, "archived": 7, "dead": 1, "archivedBytes": 1048576 }
+```
+
+`linked` counts recorded addresses with no copy that are not dead, `archived` those with a copy,
+`dead` those given up on.
+
+#### `POST /api/v1/gifs/sources/archive` — `ManageServer`
+
+Copies up to 20 recorded gifs that have no copy, from allowlisted hosts only, within the upload size
+limit. Returns `{ "attempted", "copied", "failed", "markedDead", "more", "stats" }`; call again while
+`more` is true. `409 archive_running` if another run is in progress, `429` past 30 calls a minute.
+Audit kind `gif_archive` (detail `count`).
+
+#### `POST /api/v1/gifs/sources/free` — `ManageServer`
+
+Releases the copies made for gif sources whose gifs are still linked and that nothing else keeps (no
+attachment, favorite or curated server gif). Returns `{ "released", "freedBytes", "stats" }`; the
+addresses stay recorded. `409 gif_free_needs_link` while `gifStorage` is `"store"`. Audit kind
+`gif_free` (detail `count`, `bytes`).
 
 ### Custom emoji
 
@@ -1938,7 +2161,7 @@ The audit log records what was done, by whom and to whom. An entry is logged whe
 either side of it; an image is **deleted from the media gallery**, naming the file; a member is
 **timed out** or the timeout is lifted; a member is **kicked**; a member is **banned** or unbanned;
 a member's **roles change**; a member's **account is edited**, naming the fields that changed; a
-member's **password is reset**; a message is **pinned** or **unpinned**, with its text and its
+member's **password is reset**; an **event** is created, edited or canceled; a message is **pinned** or **unpinned**, with its text and its
 author as the target; the owner **downloads a backup**; and a channel is **exported**.
 
 Entries are append-only and are never edited. Names and the channel are captured when the action
@@ -2428,9 +2651,12 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `MEMBER_UPDATE` | `{ userId }` |
 | `EMOJI_CREATE` | `Emoji` |
 | `EMOJI_DELETE` | `{ id }` |
+| `SERVER_GIFS_UPDATE` | `{}`, to every connected member whenever the server gif list changes; refetch `GET /gifs/server` |
 | `RETENTION_APPLIED` | `PruneSummary` |
 | `SAVED_MESSAGE_UPDATE` | `{ messageId, channelId, saved: SavedMessage \| null }`, to the saver's own sessions only |
 | `SCHEDULED_MESSAGE_UPDATE` | `{ id, scheduled: ScheduledMessage \| null, reason }`, reason one of created, updated, failed, sent, cancelled; to the owner's own sessions only |
+| `EVENT_UPDATE` | `{ event: ServerEvent, reason, rsvpUserId, rsvpInterested }`, reason one of created, updated, started, ended, canceled, rsvp; a channel event to members who can see the channel, an external one to everyone. `event.interested` is always false here: for `rsvp`, `rsvpUserId` says whose interest changed and what it became |
+| `EVENT_REMINDER` | `{ event: ServerEvent }`, shortly before an event starts, to the sessions of members who are interested in it only |
 | `CHANNEL_SETTINGS_UPDATE` | `ChannelNotificationSettings`, sent only to the member it belongs to |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,

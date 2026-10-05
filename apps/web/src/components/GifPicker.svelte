@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { Attachment, GifFavorite, GifItem, GifSearchResult } from '@harmony/shared';
+  import type { Attachment, GifFavorite, GifSearchResult, ServerGifItem } from '@harmony/shared';
   import { ApiError } from '../lib/api';
-  import { favoriteUrl, gifs, localUrl } from '../lib/gifs.svelte';
+  import { favoriteUrl, gifs } from '../lib/gifs.svelte';
+  import { serverGifUrl } from '../lib/server-gifs';
   import { meta } from '../lib/meta.svelte';
   import Icon from './Icon.svelte';
 
@@ -18,7 +19,7 @@
   /** How long typing settles before a search is asked for. */
   const SEARCH_DEBOUNCE_MS = 250;
 
-  type Tab = 'favorites' | 'local' | 'klipy';
+  type Tab = 'favorites' | 'server' | 'klipy';
   /** The gifs somebody kept come first, the way they do in Discord. */
   let tab = $state<Tab>('favorites');
   let query = $state('');
@@ -34,7 +35,8 @@
     url: string;
     label: string;
     favoriteId: string | null;
-    ref: { attachmentId: string } | { favoriteId: string } | { url: string };
+    pinned?: boolean;
+    ref: { attachmentId: string } | { favoriteId: string } | { url: string } | { serverGifId: string };
   }
 
   function favoriteTile(favorite: GifFavorite): Tile {
@@ -47,13 +49,15 @@
     };
   }
 
-  function localTile(item: GifItem): Tile {
+  /** A curated gif is sent from the server's stored copy; an auto-collected one is just an attachment. */
+  function serverTile(item: ServerGifItem): Tile {
     return {
-      key: `l-${item.id}`,
-      url: localUrl(item),
-      label: item.filename,
+      key: `s-${item.source}-${item.id}`,
+      url: serverGifUrl(item),
+      label: item.name || item.filename,
       favoriteId: item.favoriteId,
-      ref: { attachmentId: item.id },
+      pinned: item.pinned,
+      ref: item.source === 'curated' ? { serverGifId: item.id } : { attachmentId: item.id },
     };
   }
 
@@ -77,8 +81,8 @@
   const tiles = $derived(
     tab === 'favorites'
       ? gifs.favorites.map(favoriteTile)
-      : tab === 'local'
-        ? gifs.local.map(localTile)
+      : tab === 'server'
+        ? gifs.server.map(serverTile)
         : gifs.remote.map(hostedTile),
   );
   const searching = $derived(query.trim().length > 0);
@@ -87,7 +91,7 @@
       ? searching
         ? 'No saved gif matches that.'
         : 'Nothing saved yet. Press the heart on a gif to keep it.'
-      : tab === 'local'
+      : tab === 'server'
         ? searching
           ? 'No gif here matches that.'
           : 'Nothing here yet. Gifs posted in channels you can see turn up here.'
@@ -107,7 +111,7 @@
     const settled = query;
     const active = tab;
     const timer = setTimeout(() => {
-      if (active === 'local') void gifs.searchLocal(settled);
+      if (active === 'server') void gifs.searchServer(settled);
       else if (active === 'klipy') void gifs.searchRemote(settled);
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
@@ -122,6 +126,8 @@
       // stored here and still go in as attachments.
       if ('url' in tile.ref && onlink && meta.data?.gifStorage === 'link') {
         onlink(await gifs.link(tile.ref.url));
+      } else if ('serverGifId' in tile.ref) {
+        onpick(await gifs.pickServer(tile.ref.serverGifId));
       } else {
         onpick(await gifs.pick(tile.ref));
       }
@@ -138,6 +144,9 @@
     try {
       if (tile.favoriteId !== null) await gifs.forget(tile.favoriteId);
       else if ('attachmentId' in tile.ref) await gifs.save({ attachmentId: tile.ref.attachmentId });
+      // A curated gif has no attachment of its own; picking it makes a pending one,
+      // which is all a favorite needs to be taken from.
+      else if ('serverGifId' in tile.ref) await gifs.save({ attachmentId: (await gifs.pickServer(tile.ref.serverGifId)).id });
       else if ('url' in tile.ref) await gifs.save({ url: tile.ref.url });
     } catch (cause) {
       error = cause instanceof ApiError ? cause.message : String(cause);
@@ -170,11 +179,11 @@
       <button
         type="button"
         class="emoji-tab"
-        class:active={tab === 'local'}
-        aria-pressed={tab === 'local'}
-        onclick={() => (tab = 'local')}
+        class:active={tab === 'server'}
+        aria-pressed={tab === 'server'}
+        onclick={() => (tab = 'server')}
       >
-        This server
+        Server
       </button>
       {#if hosted}
         <button
@@ -200,11 +209,11 @@
     {:else}
       <div class="gif-grid">
         {#each tiles as tile (tile.key)}
-          <div class="gif-tile">
+          <div class="gif-tile" class:pinned={tile.pinned}>
             <button
               type="button"
               class="gif-send"
-              title="Send this gif"
+              title={tile.label ? `Send ${tile.label}` : 'Send this gif'}
               disabled={busy === tile.key}
               onclick={() => pick(tile)}
             >

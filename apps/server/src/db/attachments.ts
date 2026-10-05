@@ -116,6 +116,8 @@ export function listReferencedHashes(sqlite: DatabaseSync): Set<string> {
        UNION SELECT hash FROM emojis
        UNION SELECT hash FROM stickers
        UNION SELECT hash FROM gif_favorites
+       UNION SELECT hash FROM server_gifs WHERE kind = 'curated'
+       UNION SELECT hash FROM gif_sources WHERE held = 1 AND hash IS NOT NULL
        UNION SELECT avatar_hash FROM users WHERE avatar_hash IS NOT NULL`,
     )
     .all() as unknown as Array<{ hash: string }>;

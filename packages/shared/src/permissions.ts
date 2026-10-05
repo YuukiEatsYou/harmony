@@ -27,6 +27,8 @@ export const Permission = {
   ModerateMembers: 1n << 15n,
   /** Edit another member's account: username, display name, picture and password. */
   ManageMembers: 1n << 16n,
+  /** Create, edit and cancel server events (a creator can always edit their own). */
+  ManageEvents: 1n << 17n,
 } as const;
 
 export type PermissionName = keyof typeof Permission;

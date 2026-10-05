@@ -6,6 +6,7 @@ import {
   messageHistoryQuerySchema,
   reactionQuerySchema,
   reactionSchema,
+  type MessageEditListResponse,
   type MessageListResponse,
 } from '@harmony/shared';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
@@ -37,6 +38,14 @@ export function registerMessageRoutes(app: FastifyInstance, deps: MessageRouteDe
     const { id } = request.params as { id: string };
     const input = parseBody(editMessageSchema, request.body);
     return deps.service.edit(auth, id, input.content);
+  });
+
+  /** Earlier versions of an edited message; author and Manage Messages only. */
+  app.get('/api/v1/messages/:id/edits', async (request) => {
+    const auth = requireAuth(request);
+    const { id } = request.params as { id: string };
+    const body: MessageEditListResponse = { edits: deps.service.editHistory(auth, id) };
+    return body;
   });
 
   app.delete('/api/v1/messages/:id', async (request, reply) => {

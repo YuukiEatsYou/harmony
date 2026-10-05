@@ -1411,6 +1411,13 @@ img.avatar {
   line-height: 0;
 }
 
+/* What a linked gif falls back to when no source could be loaded: the address itself. */
+.embed-gif-link {
+  display: block;
+  margin: 0.4rem 0 0;
+  overflow-wrap: anywhere;
+}
+
 .embed-gif img,
 .embed-gif video {
   display: block;
@@ -2614,6 +2621,82 @@ button.roster-member:hover {
   .gif-tile .gif-heart {
     opacity: 1;
   }
+}
+
+/* Server gifs: the admin grid of curated, collected and hidden gifs. */
+.sg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.6rem;
+  margin: 0.6rem 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.sg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-deep);
+  border: 1px solid var(--h-border);
+  min-width: 0;
+}
+
+.sg-card.pinned {
+  border-color: var(--h-accent);
+}
+
+.sg-card.sg-hidden img {
+  opacity: 0.55;
+}
+
+.sg-card img {
+  display: block;
+  width: 100%;
+  height: 7rem;
+  object-fit: contain;
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg);
+}
+
+.sg-card input {
+  width: 100%;
+  min-width: 0;
+}
+
+.sg-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.sg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.sg-actions button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.gif-tile.pinned .gif-send::after {
+  content: '';
+  position: absolute;
+  left: 0.3rem;
+  top: 0.3rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--h-accent);
+}
+
+.gif-tile.pinned .gif-send {
+  position: relative;
 }
 
 /* ============================================================
@@ -5131,4 +5214,143 @@ select:focus {
 
 .schedule-picker .timestamp-form > button[type='submit'] {
   align-self: flex-end;
+}
+
+/* ---- Events ---- */
+
+.chat-header .events-open {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  background: none;
+  color: var(--h-text-muted);
+  line-height: 1;
+  border-radius: var(--h-radius-sm);
+  transition: background var(--h-duration) var(--h-ease),
+              color var(--h-duration) var(--h-ease);
+}
+
+.chat-header .events-open:hover {
+  background: var(--h-hover);
+  color: var(--h-text);
+  box-shadow: none;
+}
+
+/* Something is happening right now: a dot in the success color, like a presence dot. */
+.chat-header .events-open.has-live::after {
+  content: '';
+  position: absolute;
+  top: 0.2rem;
+  right: 0.3rem;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-ok);
+}
+
+.events-panel .events-head-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.events-panel .event-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.5rem 0 1rem;
+  padding: 0.8rem;
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-deep);
+}
+
+.events-panel .event-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.events-panel .event-form textarea {
+  resize: vertical;
+  font: inherit;
+}
+
+.events-panel .event-kind {
+  display: flex;
+  gap: 1rem;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.events-panel .event-kind label {
+  flex-direction: row;
+  align-items: center;
+}
+
+.events-panel .event-hint,
+.events-panel .event-place,
+.events-panel .event-when {
+  margin: 0.25rem 0 0;
+  font-size: 0.82rem;
+}
+
+.events-panel .event-when {
+  font-weight: 600;
+}
+
+.events-panel .event-description {
+  margin: 0.4rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 10rem;
+  overflow: auto;
+}
+
+.events-panel .event-entry.live {
+  box-shadow: inset 3px 0 0 var(--h-ok);
+}
+
+.events-panel .event-entry.over {
+  opacity: 0.7;
+}
+
+.events-panel .event-status {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--h-radius-full);
+  background: var(--h-hover);
+  color: var(--h-text-muted);
+}
+
+.events-panel .event-status-active {
+  background: var(--h-ok);
+  color: #fff;
+}
+
+.events-panel .event-status-canceled {
+  color: var(--h-error);
+}
+
+.events-panel .event-interest.on {
+  background: var(--h-accent);
+  color: var(--h-bg);
+}
+
+.events-panel .event-who {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+.events-panel .event-time-field {
+  margin: 0;
+}
+
+.events-panel .event-clear {
+  align-self: flex-start;
 }

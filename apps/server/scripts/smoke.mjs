@@ -7,7 +7,7 @@
 //
 // Run with: npm run smoke --workspace @harmony/server
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gunzipSync } from 'node:zlib';
@@ -21,6 +21,7 @@ import { Permission, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, rel
 import { isPrivateAddress, parseEmbedMetadata } from '../src/embeds/metadata.ts';
 import { isDiscordAttachment, isGifPage, isGiphyPage, tweetStatusId, youtubeVideoId } from '../src/embeds/providers.ts';
 import { isKlipyAddress, klipySearchUrl, normalizeKlipySearch } from '../src/gifs/klipy.ts';
+import { createServerGifService } from '../src/gifs/server-gifs.ts';
 import { parseMessageEmbed } from '../src/db/messages.ts';
 import { Database } from '../src/db/index.ts';
 import { insertGhostUser, insertUser, mergeUsers } from '../src/db/users.ts';
@@ -32,6 +33,14 @@ import { insertChannel } from '../src/db/channels.ts';
 import { insertMessage } from '../src/db/messages.ts';
 import { listLinkedAttachments } from '../src/db/attachments.ts';
 import { createEmbedService } from '../src/embeds/service.ts';
+import { createGifService } from '../src/gifs/service.ts';
+import { createGifSourceService } from '../src/gifs/sources.ts';
+import { normalizeGifSourceUrl } from '../src/gifs/source-url.ts';
+import { fetchPublicImage } from '../src/embeds/media.ts';
+import { createPruner } from '../src/retention/pruner.ts';
+import { createBlobStore } from '../src/storage/blobs.ts';
+import { migrations } from '../src/db/migrations.ts';
+import { upsertGifFavorite } from '../src/db/gif_favorites.ts';
 import { verifyLinkedGif } from '../src/embeds/linked-gif.ts';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createSettingsService } from '../src/settings/service.ts';
@@ -88,6 +97,10 @@ const server = spawn('node', ['src/index.ts'], {
     HARMONY_SCHEDULED_MIN_LEAD_MS: '1500',
     // Lets the poll sweep notice an expired poll within a moment.
     HARMONY_POLL_SWEEP_MS: '300',
+    // Server events: sweep often, remind 4s before the start, and end an event with no end time after 2s.
+    HARMONY_EVENT_SWEEP_MS: '250',
+    HARMONY_EVENT_REMINDER_LEAD_MS: '4000',
+    HARMONY_EVENT_DEFAULT_DURATION_MS: '2000',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -1494,6 +1507,278 @@ try {
     rmSync(pictureDir, { recursive: true, force: true });
   }
 
+  // --- Gif sources: a remote gif address paired with the copy held here ---
+  // In process, with a fake network, for the same reason as the section above.
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'harmony-gifsrc-'));
+    const config = { uploadDir: join(dir, 'uploads') };
+    const db = new Database({ dataDir: dir, dbFile: join(dir, 'gifsrc.db'), uploadDir: config.uploadDir });
+    const sql = db.sqlite;
+    const settings = createSettingsService(sql, { serverName: 'Test', requireInvite: false });
+    settings.update({ embedsEnabled: true });
+    const attachments = createAttachmentService(sql, config, settings);
+    const blobStore = createBlobStore(config);
+    insertUser(sql, { id: 'u1', username: 'owner', passwordHash: 'x', isOwner: true });
+    insertChannel(sql, {
+      id: 'c1', name: 'general', topic: null, categoryId: null, type: 'text', position: 0,
+      createdAt: new Date().toISOString(), discordChannelId: null,
+    });
+    const addMessage = (id, content) =>
+      insertMessage(sql, { id, channelId: 'c1', authorId: 'u1', content, createdAt: new Date().toISOString() });
+    const makeGif = (red) =>
+      sharp({ create: { width: 8, height: 8, channels: 3, background: { r: red, g: 40, b: 90 } } }).gif().toBuffer();
+    const gifA = await makeGif(200);
+    const gifH = await Promise.all([1, 2, 3, 4, 5].map((n) => makeGif(20 + n * 40)));
+    const gifC = await makeGif(120);
+    const gifD = await makeGif(250);
+    // Noise does not compress, so this one is safely over the smallest size limit a server accepts (1 KiB).
+    const gifBig = await sharp(randomBytes(150 * 150 * 3), { raw: { width: 150, height: 150, channels: 3 } }).gif().toBuffer();
+    const sha = (data) => createHash('sha256').update(data).digest('hex');
+
+    // The fake network: whatever is in `world` is served, everything else fails.
+    const world = new Map();
+    const fetched = [];
+    const fetchImage = async (url) => {
+      fetched.push(url);
+      return world.get(url) ?? null;
+    };
+    const fetchedCount = (url) => fetched.filter((entry) => entry === url).length;
+    const sources = createGifSourceService(sql, config, { attachments, fetchImage });
+    const rowCount = () => sql.prepare('SELECT COUNT(*) AS n FROM gif_sources').get().n;
+    const rowOf = (url) => sql.prepare('SELECT * FROM gif_sources WHERE url = ?').get(url);
+    const blobCount = () => blobStore.listHashes().length;
+    const auth = { user: { id: 'u1' }, permissions: 0n };
+    const alive = async () => ({ contentType: 'image/gif', width: null, height: null });
+    const gifs = createGifService(sql, config, { attachments, settings, sources, fetchImage, verifyLinkedGif: alive });
+    const hubStub = { dispatch: () => {} };
+    const mkEmbeds = (verify) =>
+      createEmbedService({
+        sqlite: sql, settings, hub: hubStub, attachments, sources,
+        renderMessage: (id) => ({ id, channelId: 'c1', author: { id: 'u1' }, attachments: [] }),
+        verifyLinkedGif: verify,
+      });
+    const embeds = mkEmbeds(alive);
+    const embedOf = (id) => parseMessageEmbed(sql.prepare('SELECT embed FROM messages WHERE id = ?').get(id)?.embed ?? null);
+
+    const G1 = 'https://media.giphy.com/media/aaa/giphy.gif';
+    const G2 = 'https://media.giphy.com/media/bbb/giphy.gif';
+    world.set(G1, { contentType: 'image/gif', data: gifA });
+
+    // The normalization rule.
+    check('gif url: case, default port and fragment collapse to one form',
+      normalizeGifSourceUrl('HTTPS://Media.Giphy.COM:443/media/aaa/giphy.gif#top') === G1);
+    check('gif url: the query string is kept as given',
+      normalizeGifSourceUrl('https://media.tenor.com/x/a.gif?size=big&v=2') === 'https://media.tenor.com/x/a.gif?size=big&v=2' &&
+        normalizeGifSourceUrl('https://media.tenor.com/x/a.gif?v=1') !== normalizeGifSourceUrl('https://media.tenor.com/x/a.gif?v=2'));
+    check('gif url: http, credentials and junk are not recorded',
+      normalizeGifSourceUrl('http://media.giphy.com/a.gif') === null &&
+        normalizeGifSourceUrl('https://u:p@media.giphy.com/a.gif') === null &&
+        normalizeGifSourceUrl('not a url') === null &&
+        normalizeGifSourceUrl(`https://media.giphy.com/${'a'.repeat(2100)}.gif`) === null);
+
+    // Link mode only records the pairing.
+    settings.update({ gifStorage: 'link' });
+    await gifs.link(auth, G1);
+    await gifs.link(auth, 'https://MEDIA.giphy.com/media/aaa/giphy.gif#again');
+    check('the same address twice, spelled two ways, is one row', rowCount() === 1);
+    check('link mode records the address without a copy and fetches nothing',
+      rowOf(G1)?.hash === null && fetched.length === 0 && blobCount() === 0);
+    check('only gif hosts are recorded; a private or foreign address is not',
+      sources.record('https://127.0.0.1/x.gif') === null && sources.record('https://example.com/x.gif') === null &&
+        sources.record('http://media.giphy.com/x.gif') === null && rowCount() === 1);
+
+    addMessage('gm1', G1);
+    embeds.resolve('gm1', G1);
+    await sleep(150);
+    check('a linked message carries the gif embed and still has one row', embedOf('gm1')?.gif?.contentType === 'image/gif' && rowCount() === 1);
+    check('stats: one linked, none archived, none dead',
+      JSON.stringify(sources.stats()) === JSON.stringify({ total: 1, linked: 1, archived: 0, dead: 0, archivedBytes: 0 }));
+
+    // Store mode copies on demand, once, however many ask at once.
+    settings.update({ gifStorage: 'store' });
+    const asks = await Promise.all([1, 2, 3, 4, 5].map(() => sources.ensureCopy(G1)));
+    check('on demand: five concurrent asks make one fetch and one blob',
+      fetchedCount(G1) === 1 && blobCount() === 1 && asks.every((entry) => entry?.hash === sha(gifA)));
+    check('the copy is held by the pairing itself', rowOf(G1)?.held === 1 && rowOf(G1)?.size === gifA.length);
+    await sources.ensureCopy(G1);
+    check('and never fetched again', fetchedCount(G1) === 1);
+    check('the linked message is untouched by the copy', embedOf('gm1')?.gif != null);
+
+    // Switching modes back and forth loses nothing.
+    settings.update({ gifStorage: 'link' });
+    check('store to link: the copy is kept and still found', sources.copyFor(G1)?.hash === sha(gifA) && blobCount() === 1 && rowCount() === 1);
+    await gifs.link(auth, G1);
+    check('linking the same gif again neither refetches nor drops the copy', fetchedCount(G1) === 1 && rowOf(G1)?.hash === sha(gifA));
+    settings.update({ gifStorage: 'store' });
+    check('link to store: served from the same copy, no second fetch, no second blob',
+      (await sources.ensureCopy(G1))?.hash === sha(gifA) && fetchedCount(G1) === 1 && blobCount() === 1);
+
+    // A dead source is marked dead and the message keeps its link.
+    settings.update({ gifStorage: 'link' });
+    await gifs.link(auth, G2);
+    addMessage('gm2', G2);
+    embeds.resolve('gm2', G2);
+    await sleep(150);
+    settings.update({ gifStorage: 'store' });
+    const age = (url) => sql.prepare("UPDATE gif_sources SET last_checked_at = '2000-01-01T00:00:00.000Z' WHERE url = ?").run(url);
+    check('a failed fetch yields no copy', (await sources.ensureCopy(G2)) === null && rowOf(G2)?.fail_count === 1);
+    await sources.ensureCopy(G2);
+    check('a retry straight away is not made', fetchedCount(G2) === 1);
+    age(G2);
+    await sources.ensureCopy(G2);
+    age(G2);
+    await sources.ensureCopy(G2);
+    check('three failures in a row mark it dead', rowOf(G2)?.status === 'dead' && fetchedCount(G2) === 3);
+    age(G2);
+    await sources.ensureCopy(G2);
+    check('a dead source is not fetched any more', fetchedCount(G2) === 3);
+    check('the message keeps showing its link', embedOf('gm2')?.gif != null && embedOf('gm2')?.url === G2);
+    check('stats count it as dead and not linked', sources.stats().dead === 1 && sources.stats().linked === 0);
+    settings.update({ gifStorage: 'link' });
+    await gifs.link(auth, G2);
+    check('seen alive again, it is revived', rowOf(G2)?.status === 'ok' && rowOf(G2)?.fail_count === 0);
+
+    // The archive job is bounded, and only ever fetches what it is allowed to.
+    const H = [1, 2, 3, 4, 5].map((n) => `https://media.giphy.com/media/h${n}/giphy.gif`);
+    for (const [n, url] of H.entries()) {
+      world.set(url, { contentType: 'image/gif', data: gifH[n] });
+      sources.record(url, 'image/gif');
+    }
+    world.set(G2, { contentType: 'image/gif', data: gifC });
+    // 5 + G2 (revived) are waiting; the batch is bounded to what the caller asks.
+    const first = await sources.archive(2);
+    check('archive: a batch is bounded and reports progress',
+      first.attempted === 2 && first.copied === 2 && first.more === true && first.stats.archived >= 3, JSON.stringify(first));
+    const second = await sources.archive(3);
+    const third = await sources.archive(10);
+    check('archive: repeated calls finish the job', second.attempted === 3 && third.more === false && sources.stats().linked === 0, JSON.stringify([second, third]));
+    check('archive: one blob per distinct picture', blobCount() === 7);
+    check('archive: nothing is left to do afterwards', (await sources.archive(10)).attempted === 0);
+    sql.prepare('INSERT INTO gif_sources (url, first_seen_at, last_seen_at) VALUES (?, ?, ?)')
+      .run('https://intranet.example/p.gif', new Date().toISOString(), new Date().toISOString());
+    const guarded = await sources.archive(10);
+    check('archive: an address off the allowlist is never fetched, and is given up on',
+      guarded.attempted === 1 && guarded.copied === 0 && guarded.markedDead === 1 && guarded.more === false &&
+        !fetched.includes('https://intranet.example/p.gif') && (await sources.ensureCopy('https://intranet.example/p.gif')) === null);
+    check('archive: the real downloader refuses private addresses',
+      (await fetchPublicImage('http://127.0.0.1:9/a.gif', 'smoke')) === null &&
+        (await fetchPublicImage('https://localhost/a.gif', 'smoke')) === null);
+    const H6 = 'https://media.giphy.com/media/h6/giphy.gif';
+    sources.record(H6, 'image/gif');
+    world.set(H6, { contentType: 'image/gif', data: gifBig });
+    const normalLimit = settings.get().maxImageBytes;
+    settings.update({ maxImageBytes: 1024 });
+    const tooBig = await sources.archive(5);
+    settings.update({ maxImageBytes: normalLimit });
+    check('archive: the upload size limit is respected', tooBig.copied === 0 && tooBig.failed === 1 && rowOf(H6)?.hash === null);
+    const H7 = 'https://media.giphy.com/media/h7/giphy.gif';
+    sources.record(H7, 'image/gif');
+    world.set(H7, { contentType: 'image/png', data: gifA });
+    const notGif = await sources.archive(5);
+    check('archive: something that is not a gif is not kept', notGif.copied === 1 && rowOf(H7)?.hash === null);
+
+    // Using a copy for a new message costs no fetch.
+    settings.update({ gifStorage: 'store' });
+    const before = fetched.length;
+    addMessage('gm3', H[0]);
+    embeds.resolve('gm3', H[0]);
+    await sleep(150);
+    const gm3 = listLinkedAttachments(sql, 'gm3');
+    check('store mode: a message with an archived address gets the copy, with no fetch',
+      gm3.length === 1 && gm3[0].hash === sha(gifH[0]) && gm3[0].source_url === H[0] && fetched.length === before && embedOf('gm3') === null);
+    settings.update({ gifStorage: 'link' });
+    addMessage('gm4', H[1]);
+    mkEmbeds(async () => null).resolve('gm4', H[1]);
+    await sleep(150);
+    check('link mode with a dead remote: the message falls back to the copy held here',
+      listLinkedAttachments(sql, 'gm4').length === 1 && fetched.length === before && embedOf('gm4') === null);
+    addMessage('gm5', H[2]);
+    embeds.resolve('gm5', H[2]);
+    await sleep(150);
+    check('link mode with a live remote: still linked, copy kept, nothing deleted',
+      embedOf('gm5')?.gif != null && sources.copyFor(H[2]) !== null && listLinkedAttachments(sql, 'gm5').length === 0);
+
+    // Picking a hosted gif twice is one fetch and one blob.
+    const K = 'https://static.klipy.com/ii/k1/k.gif';
+    world.set(K, { contentType: 'image/gif', data: gifD });
+    const blobsBefore = blobCount();
+    settings.update({ gifStorage: 'store' });
+    const pickA = await gifs.pick(auth, { url: K });
+    const pickB = await gifs.pick(auth, { url: K });
+    await gifs.addFavorite(auth, { url: K });
+    check('pick: the same hosted gif twice is one fetch, and the second pick shares the bytes',
+      fetchedCount(K) === 1 && pickA.hash === pickB.hash && pickA.id !== pickB.id);
+    check('pick: it is one row and one new blob, for the gif itself', rowOf(K)?.hash === pickA.hash && blobCount() === blobsBefore + 1);
+
+    // Freeing copies keeps whatever else holds them.
+    settings.update({ gifStorage: 'link' });
+    upsertGifFavorite(sql, {
+      userId: 'u1', hash: rowOf(H[3]).hash, filename: 'a.gif', contentType: 'image/gif',
+      size: rowOf(H[3]).size, width: 8, height: 8, sourceUrl: null,
+    });
+    const held = sql.prepare('SELECT COUNT(*) AS n FROM gif_sources WHERE held = 1 AND hash IS NOT NULL').get().n;
+    const freeStats = sources.free();
+    check('free: releases copies nothing else keeps and reports it', freeStats.released > 0 && freeStats.released < held, JSON.stringify([freeStats, held]));
+    check('free: a favorited gif keeps its copy', rowOf(H[3])?.hash === sha(gifH[3]) && existsSync(blobStore.pathFor(sha(gifH[3]))));
+    check('free: a gif on a message attachment keeps its copy',
+      rowOf(H[0])?.hash === sha(gifH[0]) && existsSync(blobStore.pathFor(sha(gifH[0]))));
+    check('free: the addresses stay recorded', rowOf(H[4]) !== undefined && rowOf(H[4])?.hash === null);
+    check('free: the freed bytes are gone from disk', existsSync(blobStore.pathFor(sha(gifA))) === false && freeStats.freedBytes > 0);
+    check('free: a released gif is fetched again on demand', (await sources.ensureCopy(G1))?.hash === sha(gifA) && fetchedCount(G1) === 2);
+
+    // Retention: the pruner and the pairing agree about what is still here.
+    const pruner = createPruner({ sqlite: sql, config, settings, hub: hubStub, log: () => {} });
+    pruner.runNow();
+    check('prune: a copy made for a gif source is not swept', existsSync(blobStore.pathFor(sha(gifA))) && rowOf(G1)?.hash === sha(gifA));
+    sql.prepare('DELETE FROM gif_favorites WHERE hash = ?').run(pickA.hash);
+    sql.prepare('DELETE FROM attachments WHERE hash = ?').run(pickA.hash);
+    pruner.runNow();
+    check('prune: a blob only mirrored by a pairing goes with its holder, and the pairing is cleared',
+      !existsSync(blobStore.pathFor(pickA.hash)) && rowOf(K)?.hash === null);
+    check('prune: that gif is fetched again on demand rather than missing', (await sources.ensureCopy(K))?.hash === sha(gifD) && fetchedCount(K) === 2);
+    blobStore.delete(sha(gifA));
+    pruner.runNow();
+    check('prune: a copy whose file vanished is forgotten, not served as missing', rowOf(G1)?.hash === null);
+    check('prune: and is fetched again', (await sources.ensureCopy(G1))?.hash === sha(gifA) && existsSync(blobStore.pathFor(sha(gifA))));
+
+    // Emergency pruning gives up copies before it touches attachments.
+    const attachmentsBefore = sql.prepare('SELECT COUNT(*) AS n FROM attachments').get().n;
+    const messagesBefore = sql.prepare('SELECT COUNT(*) AS n FROM messages').get().n;
+    const total = blobStore.totalBytes();
+    const heldBeforeEmergency = sql.prepare('SELECT COUNT(*) AS n FROM gif_sources WHERE held = 1 AND hash IS NOT NULL').get().n;
+    settings.updateRetention({ storageLimitBytes: total - 1, storageTargetBytes: total - gifA.length });
+    pruner.runNow();
+    settings.updateRetention({ storageLimitBytes: null, storageTargetBytes: null });
+    check('emergency prune: gif copies are released first, and that is enough',
+      sql.prepare('SELECT COUNT(*) AS n FROM gif_sources WHERE held = 1 AND hash IS NOT NULL').get().n < heldBeforeEmergency &&
+        blobStore.totalBytes() <= total - gifA.length &&
+        sql.prepare('SELECT COUNT(*) AS n FROM attachments').get().n === attachmentsBefore);
+    check('emergency prune: no message is deleted', sql.prepare('SELECT COUNT(*) AS n FROM messages').get().n === messagesBefore);
+
+    // The one-off backfill from what already pairs an address with bytes.
+    const old = new DatabaseSync(':memory:');
+    const cols = 'hash TEXT, content_type TEXT, size INTEGER, width INTEGER, height INTEGER, source_url TEXT, created_at TEXT';
+    old.exec(`CREATE TABLE attachments (id TEXT, ${cols}); CREATE TABLE gif_favorites (id TEXT, ${cols});`);
+    const put = old.prepare('INSERT INTO attachments (id, hash, content_type, size, width, height, source_url, created_at) VALUES (?, ?, ?, 10, 2, 2, ?, ?)');
+    put.run('a1', 'h1', 'image/gif', 'HTTPS://Media.Giphy.com/x.gif#frag', '2024-01-01T00:00:00.000Z');
+    put.run('a2', 'h2', 'image/gif', 'https://media.giphy.com/x.gif', '2024-02-01T00:00:00.000Z');
+    put.run('a3', 'h3', 'image/png', 'https://media.giphy.com/png.png', '2024-01-01T00:00:00.000Z');
+    put.run('a4', 'h4', 'image/gif', 'https://example.com/other.gif', '2024-01-01T00:00:00.000Z');
+    put.run('a5', 'h5', 'image/gif', null, '2024-01-01T00:00:00.000Z');
+    old.prepare('INSERT INTO gif_favorites (id, hash, content_type, size, width, height, source_url, created_at) VALUES (?, ?, ?, 10, 2, 2, ?, ?)')
+      .run('f1', 'h6', 'image/gif', 'https://static.klipy.com/ii/z.gif', '2024-03-01T00:00:00.000Z');
+    migrations.find((migration) => migration.version === 31).up(old);
+    const filled = old.prepare('SELECT url, hash, held FROM gif_sources ORDER BY url').all();
+    check('backfill: pairs gif addresses with their bytes, normalized, one row each, not held',
+      filled.length === 2 && filled[0].url === 'https://media.giphy.com/x.gif' && filled[0].hash === 'h1' &&
+        filled[1].url === 'https://static.klipy.com/ii/z.gif' && filled.every((row) => row.held === 0),
+      JSON.stringify(filled));
+    old.close();
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+
   // --- Presence ---
   await sleep(200);
   const rosterRes = await req('/members/roster', { token: ownerToken });
@@ -1800,6 +2085,84 @@ try {
   });
   check('registration opens when requireInvite is false', openReg.status === 200, `status ${openReg.status}`);
   await req('/settings', { method: 'PATCH', token: ownerToken, body: { requireInvite: true } });
+
+  // Edit history: the previous text is kept per edit; only the author and
+  // Manage Messages read it, and everyone else gets the same 404 as for a missing id.
+  {
+    const carolToken = openReg.json?.token;
+    const carolId = openReg.json?.user?.id;
+    const histChannel = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'edit-history' } })).json;
+    const histMsg = (
+      await req(`/channels/${histChannel.id}/messages`, { method: 'POST', token: bobToken, body: { content: 'v0' } })
+    ).json;
+    const edits = (id, token) => req(`/messages/${id}/edits`, { token });
+    check('an unedited message has an empty history', (await edits(histMsg.id, bobToken)).json?.edits?.length === 0);
+    await req(`/messages/${histMsg.id}`, { method: 'PATCH', token: bobToken, body: { content: 'v1' } });
+    await req(`/messages/${histMsg.id}`, { method: 'PATCH', token: bobToken, body: { content: 'v2' } });
+    const hist = await edits(histMsg.id, bobToken);
+    check(
+      'the author reads previous versions, newest first',
+      hist.status === 200 &&
+        hist.json?.edits?.map((e) => e.content).join(',') === 'v1,v0' &&
+        hist.json.edits[0].editor?.username === 'bob' &&
+        hist.json.edits[0].source === 'harmony',
+      JSON.stringify(hist.json),
+    );
+    check(
+      'the current text is not part of the history',
+      !hist.json?.edits?.some((e) => e.content === 'v2'),
+    );
+    const missing = await edits('no-such-message', carolToken);
+    const other = await edits(histMsg.id, carolToken);
+    check(
+      'another member gets the same 404 as for a missing message',
+      other.status === 404 && missing.status === 404 && JSON.stringify(other.json) === JSON.stringify(missing.json),
+      `${other.status} ${JSON.stringify(other.json)} vs ${JSON.stringify(missing.json)}`,
+    );
+    check('an unauthenticated request is refused', (await req(`/messages/${histMsg.id}/edits`)).status === 401);
+
+    const modRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'HistoryMod' } });
+    await req(`/roles/${modRole.json.id}`, {
+      method: 'PATCH',
+      token: ownerToken,
+      body: { permissions: String(1n << 2n) },
+    });
+    await req(`/members/${carolId}/roles/${modRole.json.id}`, { method: 'PUT', token: ownerToken });
+    check('a Manage Messages member reads the history', (await edits(histMsg.id, carolToken)).json?.edits?.length === 2);
+    check('an administrator reads the history', (await edits(histMsg.id, ownerToken)).json?.edits?.length === 2);
+
+    for (let i = 3; i <= 30; i += 1) {
+      await req(`/messages/${histMsg.id}`, { method: 'PATCH', token: bobToken, body: { content: `v${i}` } });
+    }
+    const capped = (await edits(histMsg.id, bobToken)).json?.edits ?? [];
+    check('history keeps at most 20 versions', capped.length === 20, `${capped.length}`);
+    check('the oldest versions are dropped first', capped[0].content === 'v29' && capped.at(-1).content === 'v10');
+
+    // A channel locked behind a role hides the history from a Manage Messages member too.
+    const lockRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'HistoryLock' } });
+    const lockChannel = (
+      await req('/channels', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: 'edit-history-locked', requiredRoleId: lockRole.json.id },
+      })
+    ).json;
+    const lockMsg = (
+      await req(`/channels/${lockChannel.id}/messages`, { method: 'POST', token: ownerToken, body: { content: 'a' } })
+    ).json;
+    await req(`/messages/${lockMsg.id}`, { method: 'PATCH', token: ownerToken, body: { content: 'b' } });
+    check('a locked channel hides the history (404)', (await edits(lockMsg.id, carolToken)).status === 404);
+    check('and the owner still reads it', (await edits(lockMsg.id, ownerToken)).json?.edits?.length === 1);
+
+    // A deleted message exposes nothing.
+    await req(`/messages/${histMsg.id}`, { method: 'DELETE', token: bobToken });
+    check('a deleted message has no readable history (404)', (await edits(histMsg.id, bobToken)).status === 404);
+
+    await req(`/roles/${modRole.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req(`/roles/${lockRole.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${histChannel.id}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${lockChannel.id}`, { method: 'DELETE', token: ownerToken });
+  }
 
   const rolesRes = await req('/roles', { token: ownerToken });
   const everyoneRole = rolesRes.json?.roles?.find((role) => role.isDefault);
@@ -2726,6 +3089,377 @@ try {
     (await req('/gifs/favorites', { token: ownerToken })).json?.favorites?.length === 0,
   );
   await req('/retention', { method: 'PATCH', token: ownerToken, body: { favoriteRetentionDays: null } });
+
+  // --- Server gifs: the administrators' curated list on the picker's Server tab ---
+  {
+    const bobMe = await req('/auth/me', { token: bobToken });
+    const bobUserId = bobMe.json.user.id;
+    const solid = (r, g, b, w, h) =>
+      sharp({ create: { width: w, height: h, channels: 4, background: { r, g, b, alpha: 1 } } }).png().toBuffer();
+    // As elsewhere in this file, a "gif" is a picture whose declared type is gif.
+    const uploadGif = async (token, bytes, filename) => {
+      const form = new FormData();
+      form.append('file', new Blob([bytes], { type: 'image/gif' }), filename);
+      return (
+        await fetch(`${BASE}/attachments`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form })
+      ).json();
+    };
+    const blobOf = (hash) => join(dataDir, 'uploads', hash.slice(0, 2), hash);
+    const serverList = async (token, q = '') =>
+      (await req(`/gifs/server${q ? `?q=${encodeURIComponent(q)}` : ''}`, { token })).json?.gifs ?? [];
+
+    // Three gifs posted to a channel everybody sees, so they appear in the auto list.
+    const autoA = await uploadGif(ownerToken, await solid(11, 22, 33, 14, 9), 'auto-alpha.gif');
+    const autoB = await uploadGif(ownerToken, await solid(44, 55, 66, 15, 9), 'auto-bravo.gif');
+    const autoC = await uploadGif(ownerToken, await solid(77, 88, 99, 16, 9), 'auto-charlie.gif');
+    const sgMessage = await req(`/channels/${colorChannel.id}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content: 'server gif candidates', attachmentIds: [autoA.id, autoB.id, autoC.id] },
+    });
+    check('server gifs: the candidate gifs were posted', sgMessage.status === 200, `status ${sgMessage.status}`);
+
+    // Permissions: reading is for anyone with the picker, changing is ManageEmojis.
+    check('server gifs: a member reads the Server tab', (await req('/gifs/server', { token: bobToken })).status === 200);
+    check('server gifs: the Server tab needs a session (401)', (await req('/gifs/server')).status === 401);
+    check(
+      'server gifs: a member cannot curate (403)',
+      (await req('/gifs/server', { method: 'POST', token: bobToken, body: { attachmentId: autoA.id } })).status === 403,
+    );
+    check('server gifs: a member cannot open the admin view (403)', (await req('/gifs/server/manage', { token: bobToken })).status === 403);
+    check(
+      'server gifs: a member cannot hide an auto gif (403)',
+      (await req('/gifs/server/hide', { method: 'POST', token: bobToken, body: { attachmentId: autoA.id } })).status === 403,
+    );
+
+    // Before any curation the tab is the auto list.
+    const before = await serverList(bobToken);
+    check(
+      'server gifs: with nothing curated the tab is the auto-collected list',
+      before.length >= 3 && before.every((gif) => gif.source === 'auto') && before.some((gif) => gif.hash === autoA.hash),
+    );
+
+    // Curate bravo and alpha (in that order), pin charlie.
+    const addB = await req('/gifs/server', {
+      method: 'POST',
+      token: ownerToken,
+      body: { attachmentId: autoB.id, name: 'Bravo Wave', tags: ['Hello', 'wave', 'hello'] },
+    });
+    check(
+      'server gifs: an administrator curates a gif from an attachment',
+      addB.status === 200 && addB.json?.kind === 'curated' && addB.json?.hash === autoB.hash && addB.json?.name === 'Bravo Wave',
+      JSON.stringify(addB.json),
+    );
+    check('server gifs: tags are lower-cased and de-duplicated', JSON.stringify(addB.json?.tags) === JSON.stringify(['hello', 'wave']));
+    const addA = await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: autoA.id } });
+    check('server gifs: a missing name falls back to the filename', addA.json?.name === 'auto-alpha');
+    check(
+      'server gifs: the same picture cannot be curated twice (409)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: autoB.id } })).status === 409,
+    );
+    check(
+      'server gifs: naming two references is refused (400)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: autoC.id, url: 'https://static.klipy.com/x.gif' } })).status === 400,
+    );
+    const plainForm = new FormData();
+    plainForm.append('file', new Blob([await solid(5, 6, 7, 12, 12)], { type: 'image/png' }), 'still.png');
+    const stillAttachment = await (
+      await fetch(`${BASE}/attachments`, { method: 'POST', headers: { authorization: `Bearer ${ownerToken}` }, body: plainForm })
+    ).json();
+    check(
+      'server gifs: a plain picture cannot be curated (400)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: stillAttachment.id } })).status === 400,
+    );
+    check(
+      'server gifs: an unknown attachment is a 404',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: 'nope' } })).status === 404,
+    );
+
+    // Ordering: curated first (position order), pinned above the rest, auto afterwards.
+    let tab = await serverList(bobToken);
+    const sources = tab.map((gif) => gif.source);
+    check(
+      'server gifs: curated gifs come first, then the auto ones',
+      sources.indexOf('auto') === 2 && sources.slice(0, 2).every((source) => source === 'curated'),
+      sources.join(','),
+    );
+    check('server gifs: curated gifs keep the order they were added in', tab[0]?.hash === autoB.hash && tab[1]?.hash === autoA.hash);
+    check(
+      'server gifs: a curated gif is not repeated in the auto part',
+      tab.filter((gif) => gif.hash === autoB.hash).length === 1,
+    );
+
+    const pinA = await req(`/gifs/server/${addA.json.id}`, { method: 'PATCH', token: ownerToken, body: { pinned: true } });
+    check('server gifs: a gif can be pinned', pinA.status === 200 && pinA.json?.pinned === true);
+    tab = await serverList(bobToken);
+    check('server gifs: a pinned gif jumps ahead of the others', tab[0]?.hash === autoA.hash && tab[0]?.pinned === true);
+
+    const reordered = await req('/gifs/server/order', { method: 'POST', token: ownerToken, body: { ids: [addB.json.id, addA.json.id] } });
+    check('server gifs: the order can be set (204)', reordered.status === 204);
+    tab = await serverList(bobToken);
+    check('server gifs: pinned still outranks position after a reorder', tab[0]?.hash === autoA.hash);
+    await req(`/gifs/server/${addA.json.id}`, { method: 'PATCH', token: ownerToken, body: { pinned: false } });
+    tab = await serverList(bobToken);
+    check('server gifs: unpinned, the explicit order stands', tab[0]?.hash === autoB.hash && tab[1]?.hash === autoA.hash);
+    check(
+      'server gifs: a rename and new tags are saved',
+      (await req(`/gifs/server/${addA.json.id}`, { method: 'PATCH', token: ownerToken, body: { name: 'Alpha Cat', tags: ['feline'] } })).json?.name === 'Alpha Cat',
+    );
+    check(
+      'server gifs: an empty change is refused (400)',
+      (await req(`/gifs/server/${addA.json.id}`, { method: 'PATCH', token: ownerToken, body: {} })).status === 400,
+    );
+    check(
+      'server gifs: a member cannot edit one (403)',
+      (await req(`/gifs/server/${addA.json.id}`, { method: 'PATCH', token: bobToken, body: { name: 'x' } })).status === 403,
+    );
+
+    // Search matches the name, the tags and the filename.
+    check('server gifs: search finds a gif by its name', (await serverList(bobToken, 'alpha cat')).some((gif) => gif.hash === autoA.hash));
+    check('server gifs: search finds a gif by its tag', (await serverList(bobToken, 'feline'))[0]?.hash === autoA.hash);
+    check('server gifs: search finds a gif by its filename', (await serverList(bobToken, 'bravo')).some((gif) => gif.hash === autoB.hash));
+    check(
+      'server gifs: a search with no match is empty',
+      (await serverList(bobToken, 'zzzz-nothing')).length === 0,
+    );
+
+    // Hiding: gone from the auto list for everybody, restorable.
+    check(
+      'server gifs: an administrator hides an auto gif',
+      (await req('/gifs/server/hide', { method: 'POST', token: ownerToken, body: { attachmentId: autoC.id } })).json?.kind === 'hidden',
+    );
+    check('server gifs: a hidden gif is gone from a member\'s tab', (await serverList(bobToken)).every((gif) => gif.hash !== autoC.hash));
+    check('server gifs: and from the administrator\'s own tab', (await serverList(ownerToken)).every((gif) => gif.hash !== autoC.hash));
+    const manage = await req('/gifs/server/manage', { token: ownerToken });
+    const hiddenRow = manage.json?.hidden?.find((gif) => gif.hash === autoC.hash);
+    check('server gifs: the admin view lists the hidden gif', hiddenRow !== undefined);
+    check(
+      'server gifs: and the curated ones in order, with no auto duplicates',
+      manage.json?.curated?.length === 2 && manage.json?.auto?.every((gif) => gif.hash !== autoC.hash && gif.hash !== autoA.hash),
+    );
+    check(
+      'server gifs: hiding a curated gif is refused (409)',
+      (await req('/gifs/server/hide', { method: 'POST', token: ownerToken, body: { attachmentId: autoA.id } })).status === 409,
+    );
+    check(
+      'server gifs: a hidden gif cannot be sent from the Server tab (404)',
+      (await req(`/gifs/server/${hiddenRow.id}/pick`, { method: 'POST', token: ownerToken })).status === 404,
+    );
+    check(
+      'server gifs: a hidden gif is still in the raw local list (unchanged endpoint)',
+      (await req('/gifs/local', { token: ownerToken })).json?.gifs?.some((gif) => gif.hash === autoC.hash) === true,
+    );
+
+    // A gif in a locked channel stays invisible to non-members in every list, hidden or not.
+    const lockRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Server Gif Lock' } });
+    const lockedGifChannel = await req('/channels', {
+      method: 'POST',
+      token: ownerToken,
+      body: { name: 'server-gif-lock', requiredRoleId: lockRole.json.id },
+    });
+    const lockedGif = await uploadGif(ownerToken, await solid(201, 202, 203, 18, 9), 'locked-away.gif');
+    await req(`/channels/${lockedGifChannel.json.id}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content: 'secret gif', attachmentIds: [lockedGif.id] },
+    });
+    check('server gifs: a locked channel\'s gif is not on a member\'s tab', (await serverList(bobToken)).every((gif) => gif.hash !== lockedGif.hash));
+    check('server gifs: an administrator sees it', (await serverList(ownerToken)).some((gif) => gif.hash === lockedGif.hash));
+    // Curating it is the administrator's deliberate act, which is what publishes it.
+    // Hiding or curating by a member who cannot see the attachment is refused outright.
+    const reader = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Gif Curators', permissions: String(1n << 8n) } });
+    await req(`/members/${bobUserId}/roles/${reader.json.id}`, { method: 'PUT', token: ownerToken });
+    check(
+      'server gifs: a curator cannot hide a gif they cannot see (404)',
+      (await req('/gifs/server/hide', { method: 'POST', token: bobToken, body: { attachmentId: lockedGif.id } })).status === 404,
+    );
+    check(
+      'server gifs: a curator cannot curate a gif they cannot see (404)',
+      (await req('/gifs/server', { method: 'POST', token: bobToken, body: { attachmentId: lockedGif.id } })).status === 404,
+    );
+    check(
+      'server gifs: a curator (ManageEmojis) can open the admin view',
+      (await req('/gifs/server/manage', { token: bobToken })).json?.auto?.every((gif) => gif.hash !== lockedGif.hash) === true,
+    );
+    await req(`/members/${bobUserId}/roles/${reader.json.id}`, { method: 'DELETE', token: ownerToken });
+    check('server gifs: losing the role loses the access (403)', (await req('/gifs/server/manage', { token: bobToken })).status === 403);
+
+    // The image route and picking.
+    const imageOf = (id, token) => fetch(`${BASE}/gifs/server/${id}/image`, { headers: { authorization: `Bearer ${token}` } });
+    const curatedImage = await imageOf(addB.json.id, bobToken);
+    check(
+      'server gifs: a curated gif is served to any member',
+      curatedImage.status === 200 && curatedImage.headers.get('content-type') === 'image/gif',
+    );
+    const picked = await req(`/gifs/server/${addB.json.id}/pick`, { method: 'POST', token: bobToken });
+    check('server gifs: a member can pick one into a message', picked.status === 200 && picked.json?.hash === autoB.hash, `status ${picked.status}`);
+    check(
+      'server gifs: and send it',
+      (await req(`/channels/${colorChannel.id}/messages`, { method: 'POST', token: bobToken, body: { content: '', attachmentIds: [picked.json.id] } })).status === 200,
+    );
+
+    // The gateway tells open pickers to refresh.
+    const sgSocket = await openGateway({ token: bobToken });
+    const sgBefore = sgSocket.events.length;
+    const addCForEvent = await req('/gifs/server', { method: 'POST', token: ownerToken, body: { attachmentId: autoC.id, name: 'Charlie' } });
+    await sleep(300);
+    check(
+      'server gifs: a change reaches connected members as SERVER_GIFS_UPDATE',
+      sgSocket.events.slice(sgBefore).some((frame) => frame.t === 'SERVER_GIFS_UPDATE'),
+    );
+    check('server gifs: curating a hidden gif promotes it', addCForEvent.json?.id === hiddenRow.id && addCForEvent.json?.kind === 'curated');
+    sgSocket.ws.close();
+
+    // Retention: a curated gif's blob outlives its message, the image rule, and the emergency limit.
+    await req(`/messages/${sgMessage.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: 0 } });
+    await req('/retention/run', { method: 'POST', token: ownerToken });
+    check('server gifs: a curated gif survives the image rule', existsSync(blobOf(autoB.hash)) && existsSync(blobOf(autoA.hash)));
+    await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: null, storageLimitBytes: 1, storageTargetBytes: 0 } });
+    await req('/retention/run', { method: 'POST', token: ownerToken });
+    check('server gifs: and the emergency storage limit', existsSync(blobOf(autoB.hash)) && existsSync(blobOf(autoA.hash)));
+    await req('/retention', { method: 'PATCH', token: ownerToken, body: { storageLimitBytes: null, storageTargetBytes: null } });
+    check(
+      'server gifs: a curated gif is still served after retention',
+      (await imageOf(addA.json.id, bobToken)).status === 200 && (await serverList(bobToken)).some((gif) => gif.hash === autoA.hash),
+    );
+
+    // A hidden-only gif holds nothing: once its message is gone its bytes go.
+    const hideOnly = await uploadGif(ownerToken, await solid(130, 131, 132, 13, 9), 'hide-only.gif');
+    const hideOnlyMessage = await req(`/channels/${colorChannel.id}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content: 'to be hidden', attachmentIds: [hideOnly.id] },
+    });
+    await req('/gifs/server/hide', { method: 'POST', token: ownerToken, body: { attachmentId: hideOnly.id } });
+    await req(`/messages/${hideOnlyMessage.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: 0 } });
+    await req('/retention/run', { method: 'POST', token: ownerToken });
+    await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: null } });
+    check('server gifs: hiding does not keep a gif\'s bytes alive', !existsSync(blobOf(hideOnly.hash)));
+    check('server gifs: while the curated ones are still on disk', existsSync(blobOf(autoB.hash)));
+
+    // Removing: the row goes, then the next sweep takes the bytes (nothing else holds them).
+    check('server gifs: a member cannot remove one (403)', (await req(`/gifs/server/${addB.json.id}`, { method: 'DELETE', token: bobToken })).status === 403);
+    check('server gifs: an administrator removes one (204)', (await req(`/gifs/server/${addB.json.id}`, { method: 'DELETE', token: ownerToken })).status === 204);
+    check('server gifs: removing an unknown one is a 404', (await req(`/gifs/server/${addB.json.id}`, { method: 'DELETE', token: ownerToken })).status === 404);
+    check('server gifs: a removed gif is no longer served (404)', (await imageOf(addB.json.id, bobToken)).status === 404);
+    check('server gifs: and is off the tab', (await serverList(bobToken)).every((gif) => gif.hash !== autoB.hash));
+    await req('/retention/run', { method: 'POST', token: ownerToken });
+    check('server gifs: its bytes are swept once nothing holds them', !existsSync(blobOf(autoB.hash)));
+    check('server gifs: the other curated gifs keep theirs', existsSync(blobOf(autoA.hash)));
+
+    // Restoring a hidden gif that still has a message: it returns to the auto list.
+    const restoreGif = await uploadGif(ownerToken, await solid(150, 151, 152, 13, 11), 'restore-me.gif');
+    await req(`/channels/${colorChannel.id}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content: 'restore me', attachmentIds: [restoreGif.id] },
+    });
+    const hiddenRestore = await req('/gifs/server/hide', { method: 'POST', token: ownerToken, body: { attachmentId: restoreGif.id } });
+    check('server gifs: the gif is hidden', (await serverList(bobToken)).every((gif) => gif.hash !== restoreGif.hash));
+    check('server gifs: un-hiding is a delete of the hidden row (204)', (await req(`/gifs/server/${hiddenRestore.json.id}`, { method: 'DELETE', token: ownerToken })).status === 204);
+    check('server gifs: and it is back in the auto list', (await serverList(bobToken)).some((gif) => gif.hash === restoreGif.hash && gif.source === 'auto'));
+
+    // The audit log records adds, removals, hides and restores.
+    const auditKinds = (await req('/audit?limit=100', { token: ownerToken })).json?.entries?.map((entry) => entry.kind) ?? [];
+    for (const kind of ['server_gif_add', 'server_gif_remove', 'server_gif_hide', 'server_gif_unhide']) {
+      check(`server gifs: the audit log records ${kind}`, auditKinds.includes(kind));
+    }
+    const removeEntry = (await req('/audit?limit=100', { token: ownerToken })).json?.entries?.find((entry) => entry.kind === 'server_gif_remove');
+    check('server gifs: a removal names the gif', removeEntry?.detail?.gifName === 'Bravo Wave' && removeEntry?.actor !== null);
+
+    // Adding from a member's favorite.
+    const favSource = await uploadGif(ownerToken, await solid(170, 171, 172, 10, 10), 'from-fav.gif');
+    await req(`/channels/${colorChannel.id}/messages`, { method: 'POST', token: ownerToken, body: { content: 'fav', attachmentIds: [favSource.id] } });
+    const fav = await req('/gifs/favorites', { method: 'POST', token: ownerToken, body: { attachmentId: favSource.id } });
+    const fromFav = await req('/gifs/server', { method: 'POST', token: ownerToken, body: { favoriteId: fav.json.id } });
+    check('server gifs: a favorite can be curated', fromFav.status === 200 && fromFav.json?.hash === favSource.hash);
+    check(
+      'server gifs: only your own favorite (404)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { favoriteId: 'not-mine' } })).status === 404,
+    );
+    // The real service refuses a non-Klipy address before any fetch is made.
+    check(
+      'server gifs: an address outside the hosted service is refused (400)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { url: 'http://127.0.0.1:1/x.gif' } })).status === 400,
+    );
+    check(
+      'server gifs: a lookalike host is refused (400)',
+      (await req('/gifs/server', { method: 'POST', token: ownerToken, body: { url: 'https://klipy.com.evil.test/x.gif' } })).status === 400,
+    );
+  }
+
+  // The same service in process, with a fake network, for the hosted-address path.
+  {
+    const sgDir = mkdtempSync(join(tmpdir(), 'harmony-servergifs-'));
+    const sgDb = new Database({ dataDir: sgDir, dbFile: join(sgDir, 'sg.db'), uploadDir: join(sgDir, 'uploads') });
+    const sgSettings = createSettingsService(sgDb.sqlite, { serverName: 'Test', requireInvite: false });
+    const sgAttachments = createAttachmentService(sgDb.sqlite, { uploadDir: join(sgDir, 'uploads') }, sgSettings);
+    insertUser(sgDb.sqlite, { id: 'u1', username: 'owner', passwordHash: 'x', isOwner: true });
+
+    const sgAudit = [];
+    const sgEvents = [];
+    const fetched = [];
+    const gifBytes = await sharp({ create: { width: 21, height: 13, channels: 4, background: { r: 3, g: 99, b: 200, alpha: 1 } } })
+      .png()
+      .toBuffer();
+    let response = { data: gifBytes, contentType: 'image/gif' };
+    const service = createServerGifService(sgDb.sqlite, {
+      attachments: sgAttachments,
+      gifs: { listLocal: () => [] },
+      audit: { serverGif: (kind, actorId, filename, gifName) => sgAudit.push({ kind, actorId, filename, gifName }) },
+      hub: { dispatch: (event) => sgEvents.push(event) },
+      fetchImage: async (url) => {
+        fetched.push(url);
+        return response;
+      },
+    });
+    const auth = { user: { id: 'u1' }, permissions: 0n, sessionId: 's', token: 't' };
+    const rejection = async (input) => {
+      try {
+        await service.add(auth, input);
+        return 0;
+      } catch (error) {
+        return error.statusCode ?? -1;
+      }
+    };
+
+    check('server gifs (fake network): an address outside the service is refused before any fetch', (await rejection({ url: 'https://example.com/a.gif' })) === 400 && fetched.length === 0);
+    check('server gifs (fake network): a look-alike host is refused before any fetch', (await rejection({ url: 'https://klipy.com.evil.test/a.gif' })) === 400 && fetched.length === 0);
+    check('server gifs (fake network): an unusable address is refused', (await rejection({ url: 'not a url' })) === 400);
+
+    response = null;
+    check('server gifs (fake network): a failed fetch is a 415', (await rejection({ url: 'https://static.klipy.com/ii/a/b/cat.gif' })) === 415);
+    response = { data: gifBytes, contentType: 'image/png' };
+    check('server gifs (fake network): a non-gif answer is a 415', (await rejection({ url: 'https://static.klipy.com/ii/a/b/cat.gif' })) === 415);
+    response = { data: Buffer.from('not an image at all'), contentType: 'image/gif' };
+    check('server gifs (fake network): bytes that are not an image are refused', (await rejection({ url: 'https://static.klipy.com/ii/a/b/cat.gif' })) === 413);
+
+    response = { data: gifBytes, contentType: 'image/gif' };
+    const added = await service.add(auth, { url: 'https://static.klipy.com/ii/a/b/cat%20dance.gif', tags: ['Dance'] });
+    check(
+      'server gifs (fake network): a hosted gif is fetched and stored as curated',
+      added.kind === 'curated' && added.filename === 'cat dance.gif' && added.width === 21 && added.height === 13 && fetched.length >= 1,
+      JSON.stringify(added),
+    );
+    check(
+      'server gifs (fake network): the copy is on disk, so link rot cannot touch it',
+      existsSync(join(sgDir, 'uploads', added.hash.slice(0, 2), added.hash)),
+    );
+    check('server gifs (fake network): it was audited and announced', sgAudit.some((entry) => entry.kind === 'server_gif_add' && entry.filename === 'cat dance.gif') && sgEvents.includes('SERVER_GIFS_UPDATE'));
+    check('server gifs (fake network): fetching the same gif again is a conflict', (await rejection({ url: 'https://static.klipy.com/ii/a/b/cat%20dance.gif' })) === 409);
+    check('server gifs (fake network): the listing shows it with its tags', service.list(auth, { limit: 10 }).some((gif) => gif.hash === added.hash && gif.tags.includes('dance')));
+
+    // The reference counting: the bytes belong to the curated row alone.
+    const { listReferencedHashes } = await import('../src/db/attachments.ts');
+    check('server gifs (fake network): a curated hash counts as referenced', listReferencedHashes(sgDb.sqlite).has(added.hash));
+    service.remove(auth, added.id);
+    check('server gifs (fake network): a removed one no longer does', !listReferencedHashes(sgDb.sqlite).has(added.hash));
+
+    sgDb.close();
+    rmSync(sgDir, { recursive: true, force: true });
+  }
 
   // --- Hosted gif service ---
   check('the hosted tab is off by default', (await req('/meta')).json?.klipyConfigured === false);
@@ -5609,6 +6343,457 @@ try {
   );
   pollMergeStore.close();
 
+  // --- Server events ---
+  // The member registered for the poll checks above stands in for a second ordinary member.
+  const evCarolToken = carolToken;
+  const evCarolId = carolId;
+  const evRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Event runners' } });
+  const manageEvents = String(1n << 17n);
+  await req(`/roles/${evRole.json.id}`, { method: 'PATCH', token: ownerToken, body: { permissions: manageEvents } });
+  const evVisibleRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Event insiders' } });
+  const evSecret = (
+    await req('/channels', {
+      method: 'POST',
+      token: ownerToken,
+      body: { name: 'event-secret', requiredRoleId: evVisibleRole.json.id },
+    })
+  ).json;
+  const evOpen = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'event-open' } })).json;
+  const inMs = (ms) => Date.now() + ms;
+  const evBody = (overrides = {}) => ({
+    title: 'Game night',
+    description: 'Bring snacks',
+    locationKind: 'external',
+    locationText: 'The park',
+    startsAt: inMs(3_600_000),
+    endsAt: null,
+    ...overrides,
+  });
+  const makeEvent = (overrides = {}, token = ownerToken) =>
+    req('/events', { method: 'POST', token, body: evBody(overrides) });
+  const evStatus = async (overrides, token = ownerToken) => (await makeEvent(overrides, token)).status;
+  const evDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+
+  check(
+    'the ManageEvents bit is bit 17',
+    Permission.ManageEvents === 1n << 17n && manageEvents === '131072',
+  );
+  check(
+    'the migration hands ManageEvents to roles that hold ManageServer and leaves others alone',
+    (() => {
+      const probe = new DatabaseSync(':memory:');
+      probe.exec('CREATE TABLE roles (permissions TEXT NOT NULL)');
+      probe.prepare('INSERT INTO roles VALUES (?), (?), (?)').run('512', '1', '131584');
+      probe.exec(
+        `UPDATE roles SET permissions = CAST((CAST(permissions AS INTEGER) | 131072) AS TEXT)
+          WHERE (CAST(permissions AS INTEGER) & 512) != 0 AND (CAST(permissions AS INTEGER) & 131072) = 0`,
+      );
+      const rows = probe.prepare('SELECT permissions FROM roles').all().map((r) => r.permissions);
+      return rows.join() === '131584,1,131584';
+    })(),
+  );
+
+  // Who may create.
+  check('an ordinary member cannot create an event (403)', (await evStatus({}, bobToken)) === 403);
+  await req(`/members/${evCarolId}/roles/${evRole.json.id}`, { method: 'PUT', token: ownerToken });
+  check('a member with Manage Events can create one', (await evStatus({ title: 'Carol event' }, evCarolToken)) === 200);
+
+  // Validation.
+  check('an event needs a title (400)', (await evStatus({ title: '   ' })) === 400);
+  check('a title over 100 characters is refused (400)', (await evStatus({ title: 'x'.repeat(101) })) === 400);
+  check('a description over 1000 characters is refused (400)', (await evStatus({ description: 'x'.repeat(1001) })) === 400);
+  check('a location over 100 characters is refused (400)', (await evStatus({ locationText: 'x'.repeat(101) })) === 400);
+  check('an external event needs a place (400)', (await evStatus({ locationText: '' })) === 400);
+  check('a channel event needs a channel (400)', (await evStatus({ locationKind: 'channel', channelId: null })) === 400);
+  check('an unknown channel is refused (404)', (await evStatus({ locationKind: 'channel', channelId: 'nope' })) === 404);
+  check('an event cannot start in the past (400)', (await evStatus({ startsAt: inMs(-60_000) })) === 400);
+  check('an event cannot start more than a year ahead (400)', (await evStatus({ startsAt: inMs(366 * 86_400_000) })) === 400);
+  check('an event must end after it starts (400)', (await evStatus({ endsAt: inMs(3_000_000) })) === 400);
+  check(
+    'an event cannot run for more than 30 days (400)',
+    (await evStatus({ endsAt: inMs(3_600_000 + 31 * 86_400_000) })) === 400,
+  );
+  check('a non-numeric start is refused (400)', (await evStatus({ startsAt: 'soon' })) === 400);
+
+  // The timed event: watchers first, so no broadcast is missed.
+  const evBob = await openGateway({ token: bobToken });
+  const evCarolGw = await openGateway({ token: evCarolToken });
+  const evOwnerGw = await openGateway({ token: ownerToken });
+  const remindersOf = (gw, id) => gw.events.filter((f) => f.t === 'EVENT_REMINDER' && f.d?.event?.id === id);
+  const updatesOf = (gw, id, reason) =>
+    gw.events.filter((f) => f.t === 'EVENT_UPDATE' && f.d?.event?.id === id && (!reason || f.d.reason === reason));
+
+  const timedStart = inMs(9_000);
+  const timed = await makeEvent({ title: 'Timed one', startsAt: timedStart, announceChannelId: evOpen.id });
+  const timedEvent = timed.json;
+  check(
+    'creating an event returns it with its fields, scheduled, nobody interested',
+    timed.status === 200 &&
+      timedEvent.title === 'Timed one' &&
+      timedEvent.status === 'scheduled' &&
+      timedEvent.startsAt === timedStart &&
+      timedEvent.endsAt === null &&
+      timedEvent.locationKind === 'external' &&
+      timedEvent.locationText === 'The park' &&
+      timedEvent.channelId === null &&
+      timedEvent.creator?.username === 'alice' &&
+      timedEvent.interestedCount === 0 &&
+      timedEvent.interested === false,
+    JSON.stringify(timed.json),
+  );
+  await sleep(200);
+  check(
+    'a new external event reaches every connected member',
+    updatesOf(evBob, timedEvent.id, 'created').length === 1 && updatesOf(evCarolGw, timedEvent.id, 'created').length === 1,
+  );
+  const evAnnouncement = (await req(`/channels/${evOpen.id}/messages?limit=10`, { token: bobToken })).json?.messages?.find(
+    (m) => m.id === timedEvent.announcedMessageId,
+  );
+  const unixStart = Math.floor(timedStart / 1000);
+  check(
+    'the announcement is an ordinary message by the creator with a timestamp pair',
+    Boolean(evAnnouncement) &&
+      evAnnouncement.author?.username === 'alice' &&
+      evAnnouncement.content.includes('Timed one') &&
+      evAnnouncement.content.includes(`<t:${unixStart}:F>`) &&
+      evAnnouncement.content.includes(`<t:${unixStart}:R>`),
+    JSON.stringify(evAnnouncement),
+  );
+  check(
+    'announcing in a channel the creator cannot see is refused (403)',
+    (await evStatus({ announceChannelId: evSecret.id }, evCarolToken)) === 403,
+  );
+  check(
+    'announcing in an unknown channel is refused (404)',
+    (await evStatus({ announceChannelId: 'nope' })) === 404,
+  );
+
+  // RSVP: idempotent, counted, live.
+  const rsvp = (id, token, method = 'PUT') => req(`/events/${id}/interested`, { method, token });
+  const firstRsvp = await rsvp(timedEvent.id, bobToken);
+  const againRsvp = await rsvp(timedEvent.id, bobToken);
+  check(
+    'marking interest counts once however often it is repeated',
+    firstRsvp.status === 200 &&
+      firstRsvp.json.interested === true &&
+      firstRsvp.json.interestedCount === 1 &&
+      againRsvp.json.interestedCount === 1,
+  );
+  await sleep(200);
+  const rsvpUpdates = updatesOf(evCarolGw, timedEvent.id, 'rsvp');
+  check(
+    'an RSVP is broadcast once, naming whose interest changed and without baking in a viewer',
+    rsvpUpdates.length === 1 &&
+      rsvpUpdates[0].d.rsvpUserId === bobId &&
+      rsvpUpdates[0].d.rsvpInterested === true &&
+      rsvpUpdates[0].d.event.interested === false &&
+      rsvpUpdates[0].d.event.interestedCount === 1,
+  );
+  const evCarolView = (await req(`/events/${timedEvent.id}`, { token: evCarolToken })).json;
+  const evBobView = (await req(`/events/${timedEvent.id}`, { token: bobToken })).json;
+  check(
+    'the viewer\'s own interest is reported per viewer',
+    evCarolView.interested === false && evBobView.interested === true && evCarolView.interestedCount === 1,
+  );
+  const whoList = await req(`/events/${timedEvent.id}/interested`, { token: evCarolToken });
+  check(
+    'the interested list names who is interested',
+    whoList.status === 200 && whoList.json.total === 1 && whoList.json.users.map((u) => u.id).join() === bobId,
+  );
+  check('a missing event is 404', (await req('/events/none', { token: bobToken })).status === 404);
+  check('events need a session (401)', (await req('/events')).status === 401);
+
+  // Cap on open events: fill up through the database, then try one more.
+  const openNow = evDb.prepare("SELECT COUNT(*) AS n FROM events WHERE status IN ('scheduled','active')").get().n;
+  for (let i = openNow; i < 50; i++) {
+    evDb
+      .prepare(
+        `INSERT INTO events (id, title, location_kind, location_text, starts_at, status, created_at, updated_at)
+         VALUES (?, 'filler', 'external', 'x', ?, 'scheduled', ?, ?)`,
+      )
+      .run(`filler-${i}`, inMs(86_400_000), new Date().toISOString(), new Date().toISOString());
+  }
+  check('at most 50 events can be open at once (409)', (await evStatus({})) === 409);
+  evDb.prepare("DELETE FROM events WHERE id LIKE 'filler-%'").run();
+
+  // Visibility by channel.
+  const secretEvent = (
+    await makeEvent({ title: 'Secret meet', locationKind: 'channel', channelId: evSecret.id, startsAt: inMs(7_200_000) })
+  ).json;
+  const openEvent = (
+    await makeEvent({ title: 'Open meet', locationKind: 'channel', channelId: evOpen.id, startsAt: inMs(7_200_000) })
+  ).json;
+  check('a channel event records its channel', secretEvent.locationKind === 'channel' && secretEvent.channelId === evSecret.id);
+  check(
+    'a member cannot place an event in a channel they cannot see (403)',
+    (await evStatus({ locationKind: 'channel', channelId: evSecret.id }, evCarolToken)) === 403,
+  );
+  await sleep(200);
+  check(
+    'a locked channel\'s event never reaches members who cannot see the channel',
+    updatesOf(evBob, secretEvent.id).length === 0 &&
+      updatesOf(evCarolGw, secretEvent.id).length === 0 &&
+      updatesOf(evOwnerGw, secretEvent.id, 'created').length === 1 &&
+      updatesOf(evBob, openEvent.id, 'created').length === 1,
+  );
+  const listFor = async (token) => (await req('/events', { token })).json?.events ?? [];
+  const evBobList = await listFor(bobToken);
+  check(
+    'the list leaves out events in channels the member cannot see',
+    !evBobList.some((e) => e.id === secretEvent.id) &&
+      evBobList.some((e) => e.id === openEvent.id) &&
+      evBobList.some((e) => e.id === timedEvent.id),
+  );
+  check(
+    'an invisible event is not found for detail, RSVP or the interested list (404)',
+    (await req(`/events/${secretEvent.id}`, { token: bobToken })).status === 404 &&
+      (await rsvp(secretEvent.id, bobToken)).status === 404 &&
+      (await rsvp(secretEvent.id, bobToken, 'DELETE')).status === 404 &&
+      (await req(`/events/${secretEvent.id}/interested`, { token: bobToken })).status === 404,
+  );
+  check(
+    'an invisible event cannot be edited or canceled by guessing its id',
+    (await req(`/events/${secretEvent.id}`, { method: 'PATCH', token: evCarolToken, body: { title: 'x' } })).status === 404 &&
+      (await req(`/events/${secretEvent.id}/cancel`, { method: 'POST', token: evCarolToken })).status === 404,
+  );
+  await req(`/members/${bobId}/roles/${evVisibleRole.json.id}`, { method: 'PUT', token: ownerToken });
+  const bobNowSees = await rsvp(secretEvent.id, bobToken);
+  check(
+    'a member given the role sees and can RSVP to the event',
+    bobNowSees.status === 200 &&
+      bobNowSees.json.interestedCount === 1 &&
+      (await listFor(bobToken)).some((e) => e.id === secretEvent.id),
+  );
+  const secretInterest = (await req(`/events/${secretEvent.id}/interested`, { token: bobToken })).json;
+  check('the interested list of a channel event names those who can see it', secretInterest.users.map((u) => u.id).join() === bobId);
+  await req(`/members/${bobId}/roles/${evVisibleRole.json.id}`, { method: 'DELETE', token: ownerToken });
+  const secretInterestAfter = (await req(`/events/${secretEvent.id}/interested`, { token: ownerToken })).json;
+  check(
+    'a member who lost access is no longer named, though their interest is kept',
+    secretInterestAfter.total === 1 && secretInterestAfter.users.length === 0,
+  );
+
+  // Editing.
+  check(
+    'an ordinary member cannot edit someone else\'s event (403)',
+    (await req(`/events/${openEvent.id}`, { method: 'PATCH', token: bobToken, body: { title: 'Hijack' } })).status === 403,
+  );
+  check(
+    'an ordinary member cannot cancel someone else\'s event (403)',
+    (await req(`/events/${openEvent.id}/cancel`, { method: 'POST', token: bobToken })).status === 403,
+  );
+  check('an empty edit is refused (400)', (await req(`/events/${openEvent.id}`, { method: 'PATCH', token: ownerToken, body: {} })).status === 400);
+  const evEdited = await req(`/events/${openEvent.id}`, {
+    method: 'PATCH',
+    token: evCarolToken,
+    body: { title: 'Open meet (moved)', description: 'New text', startsAt: inMs(7_300_000) },
+  });
+  check(
+    'a member with Manage Events can edit any event',
+    evEdited.status === 200 && evEdited.json.title === 'Open meet (moved)' && evEdited.json.description === 'New text',
+  );
+  const carolOwn = (await makeEvent({ title: 'Carol own' }, evCarolToken)).json;
+  check(
+    'the creator can edit their own event',
+    (await req(`/events/${carolOwn.id}`, { method: 'PATCH', token: evCarolToken, body: { title: 'Carol own 2' } })).json?.title === 'Carol own 2',
+  );
+  // The creator keeps the right after the role is taken away.
+  await req(`/members/${evCarolId}/roles/${evRole.json.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'a creator without Manage Events can still edit and cancel their own event',
+    (await req(`/events/${carolOwn.id}`, { method: 'PATCH', token: evCarolToken, body: { description: 'still mine' } })).status === 200 &&
+      (await req(`/events/${carolOwn.id}/cancel`, { method: 'POST', token: evCarolToken })).json?.status === 'canceled',
+  );
+  check('but cannot create another (403)', (await evStatus({}, evCarolToken)) === 403);
+  check(
+    'moving an event to a past start is refused (400)',
+    (await req(`/events/${openEvent.id}`, { method: 'PATCH', token: ownerToken, body: { startsAt: inMs(-5000) } })).status === 400,
+  );
+  check(
+    'moving the end before the start is refused (400)',
+    (await req(`/events/${openEvent.id}`, { method: 'PATCH', token: ownerToken, body: { endsAt: inMs(1000) } })).status === 400,
+  );
+  const toExternal = await req(`/events/${openEvent.id}`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { locationKind: 'external', locationText: 'Online' },
+  });
+  check(
+    'an event can change from a channel to a place',
+    toExternal.status === 200 && toExternal.json.channelId === null && toExternal.json.locationText === 'Online',
+  );
+  check(
+    'switching to a place without saying where is refused (400)',
+    (await req(`/events/${secretEvent.id}`, { method: 'PATCH', token: ownerToken, body: { locationKind: 'external' } })).status === 400,
+  );
+
+  // Reminder, start and end by the clock.
+  check(
+    'nobody has been reminded before the lead window opens',
+    Date.now() > timedStart - 4000 || remindersOf(evBob, timedEvent.id).length === 0,
+  );
+  await sleep(Math.max(0, timedStart - 4000 - Date.now()) + 900);
+  check(
+    'the reminder goes to the interested member only',
+    remindersOf(evBob, timedEvent.id).length === 1 &&
+      remindersOf(evCarolGw, timedEvent.id).length === 0 &&
+      remindersOf(evOwnerGw, timedEvent.id).length === 0,
+    `${remindersOf(evBob, timedEvent.id).length} / ${remindersOf(evCarolGw, timedEvent.id).length} / ${remindersOf(evOwnerGw, timedEvent.id).length}`,
+  );
+  check(
+    'the reminder carries the event and is evStamped in the database',
+    remindersOf(evBob, timedEvent.id)[0]?.d?.event?.title === 'Timed one' &&
+      evDb.prepare('SELECT reminded_at FROM events WHERE id = ?').get(timedEvent.id).reminded_at !== null,
+  );
+  await sleep(900);
+  check('the reminder is not sent again on later sweeps', remindersOf(evBob, timedEvent.id).length === 1);
+  check(
+    'the event is still scheduled before its start',
+    (await req(`/events/${timedEvent.id}`, { token: bobToken })).json?.status === 'scheduled' && Date.now() < timedStart,
+  );
+  await sleep(Math.max(0, timedStart - Date.now()) + 900);
+  const startedView = (await req(`/events/${timedEvent.id}`, { token: bobToken })).json;
+  check(
+    'the event becomes active at its start and everyone is told',
+    startedView.status === 'active' && updatesOf(evCarolGw, timedEvent.id, 'started').length === 1,
+    startedView.status,
+  );
+  check(
+    'a started event keeps its text editable but its start fixed',
+    (await req(`/events/${timedEvent.id}`, { method: 'PATCH', token: ownerToken, body: { description: 'Now on' } })).json?.description === 'Now on' &&
+      (await req(`/events/${timedEvent.id}`, { method: 'PATCH', token: ownerToken, body: { startsAt: inMs(60_000) } })).status === 409,
+  );
+  check('an RSVP is still welcome while it runs', (await rsvp(timedEvent.id, evCarolToken)).json?.interestedCount === 2);
+  // No end time: ended after the default length (2s in this run).
+  await sleep(2_600);
+  const endedView = (await req(`/events/${timedEvent.id}`, { token: bobToken })).json;
+  check(
+    'with no end time the event ends after the default duration',
+    endedView.status === 'ended' && updatesOf(evBob, timedEvent.id, 'ended').length === 1,
+    endedView.status,
+  );
+  check(
+    'a finished event can no longer be changed, joined or canceled (409)',
+    (await req(`/events/${timedEvent.id}`, { method: 'PATCH', token: ownerToken, body: { title: 'late' } })).status === 409 &&
+      (await rsvp(timedEvent.id, ownerToken)).status === 409 &&
+      (await req(`/events/${timedEvent.id}/cancel`, { method: 'POST', token: ownerToken })).status === 409,
+  );
+  check(
+    'but interest can still be withdrawn from it',
+    (await rsvp(timedEvent.id, bobToken, 'DELETE')).json?.interestedCount === 1,
+  );
+  check(
+    'a finished event is listed in the past section',
+    (await listFor(bobToken)).some((e) => e.id === timedEvent.id && e.status === 'ended'),
+  );
+
+  // An explicit end time ends it on time.
+  const evEnding = (await makeEvent({ title: 'Short one', startsAt: inMs(1_200), endsAt: inMs(3_200) })).json;
+  await sleep(1_800);
+  check(
+    'an event with an end time is active between start and end',
+    (await req(`/events/${evEnding.id}`, { token: bobToken })).json?.status === 'active',
+  );
+  await sleep(1_800);
+  check('and ended after its end time', (await req(`/events/${evEnding.id}`, { token: bobToken })).json?.status === 'ended');
+
+  // A start moved later re-arms the reminder.
+  const evStamped = (await makeEvent({ title: 'Stamped', startsAt: inMs(5_500) })).json;
+  await rsvp(evStamped.id, bobToken);
+  await sleep(1_800);
+  check('a reminder fires once the start is inside the lead', remindersOf(evBob, evStamped.id).length === 1);
+  await req(`/events/${evStamped.id}`, { method: 'PATCH', token: ownerToken, body: { startsAt: inMs(60_000) } });
+  check(
+    'moving the start re-arms the reminder',
+    evDb.prepare('SELECT reminded_at FROM events WHERE id = ?').get(evStamped.id).reminded_at === null,
+  );
+
+  // Cancel.
+  const evCanceled = await req(`/events/${evStamped.id}/cancel`, { method: 'POST', token: ownerToken });
+  check('canceling marks the event canceled', evCanceled.status === 200 && evCanceled.json.status === 'canceled');
+  await sleep(200);
+  check(
+    'a cancellation is broadcast and repeating it is harmless',
+    updatesOf(evBob, evStamped.id, 'canceled').length === 1 &&
+      (await req(`/events/${evStamped.id}/cancel`, { method: 'POST', token: ownerToken })).status === 200 &&
+      (await sleep(150), updatesOf(evBob, evStamped.id, 'canceled').length === 1),
+  );
+  check('interest in a canceled event is refused (409)', (await rsvp(evStamped.id, evCarolToken)).status === 409);
+  check(
+    'a canceled event is listed with the past ones',
+    (await listFor(bobToken)).some((e) => e.id === evStamped.id && e.status === 'canceled'),
+  );
+
+  // Audit.
+  const evAudit = (await req('/audit?limit=100', { token: ownerToken })).json?.entries ?? [];
+  const evKinds = new Set(evAudit.filter((e) => e.detail?.eventTitle).map((e) => e.kind));
+  check(
+    'creating, editing and canceling events are audit-logged',
+    evKinds.has('event_create') && evKinds.has('event_edit') && evKinds.has('event_cancel'),
+    [...evKinds].join(),
+  );
+  check(
+    'an audit entry names the actor and the event',
+    evAudit.some((e) => e.kind === 'event_create' && e.detail.eventTitle === 'Timed one' && e.actor?.username === 'alice'),
+  );
+
+  // A channel's events go with the channel.
+  const goneChannel = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'event-gone' } })).json;
+  const goneEvent = (await makeEvent({ title: 'Goes away', locationKind: 'channel', channelId: goneChannel.id })).json;
+  await rsvp(goneEvent.id, bobToken);
+  await req(`/channels/${goneChannel.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'deleting a channel deletes its events and their interest',
+    (await req(`/events/${goneEvent.id}`, { token: ownerToken })).status === 404 &&
+      evDb.prepare('SELECT COUNT(*) AS n FROM event_rsvps WHERE event_id = ?').get(goneEvent.id).n === 0,
+  );
+
+  evDb.close();
+  evBob.ws.close();
+  evCarolGw.ws.close();
+  evOwnerGw.ws.close();
+
+  // Merging accounts: one interest per person, events re-owned.
+  const evMergeDir = mkdtempSync(join(tmpdir(), 'harmony-event-merge-'));
+  const evMergeStore = new Database({
+    dataDir: evMergeDir,
+    dbFile: join(evMergeDir, 'harmony.db'),
+    uploadDir: join(evMergeDir, 'uploads'),
+  });
+  const evm = evMergeStore.sqlite;
+  insertUser(evm, { id: 'e-keeper', username: 'ekeeper', passwordHash: 'x', isOwner: false });
+  insertUser(evm, { id: 'e-leaver', username: 'eleaver', passwordHash: 'x', isOwner: false });
+  const evStamp = new Date().toISOString();
+  for (const id of ['e-both', 'e-only-leaver', 'e-only-keeper']) {
+    evm.prepare(
+      `INSERT INTO events (id, title, location_kind, location_text, starts_at, creator_id, created_at, updated_at)
+       VALUES (?, ?, 'external', 'x', ?, ?, ?, ?)`,
+    ).run(id, id, Date.now() + 100_000, id === 'e-only-keeper' ? 'e-keeper' : 'e-leaver', evStamp, evStamp);
+  }
+  const rsvpRow = (event, user) =>
+    evm.prepare('INSERT INTO event_rsvps (event_id, user_id, created_at) VALUES (?, ?, ?)').run(event, user, evStamp);
+  rsvpRow('e-both', 'e-keeper');
+  rsvpRow('e-both', 'e-leaver');
+  rsvpRow('e-only-leaver', 'e-leaver');
+  let evMergeError = null;
+  try {
+    mergeUsers(evm, 'e-leaver', 'e-keeper');
+  } catch (error) {
+    evMergeError = error;
+  }
+  const mergedRsvps = evm.prepare('SELECT event_id, user_id FROM event_rsvps ORDER BY event_id').all();
+  check(
+    'merging accounts keeps one interest per person and moves the rest across',
+    evMergeError === null &&
+      mergedRsvps.map((r) => `${r.event_id}:${r.user_id}`).join() === 'e-both:e-keeper,e-only-leaver:e-keeper',
+    String(evMergeError ?? JSON.stringify(mergedRsvps)),
+  );
+  check(
+    'merging accounts re-owns the events the outgoing account created',
+    evm.prepare("SELECT COUNT(*) AS n FROM events WHERE creator_id = 'e-keeper'").get().n === 3,
+  );
+  evMergeStore.close();
+
   // --- Admin media gallery ---
   const galleryPng = await sharp({
     create: { width: 20, height: 14, channels: 3, background: { r: 12, g: 34, b: 56 } },
@@ -5997,6 +7182,51 @@ try {
   await req(`/roles/${auditorRole.json.id}`, { method: 'DELETE', token: ownerToken });
   check('the log can be cleared', (await req('/audit', { method: 'DELETE', token: ownerToken })).status === 204);
   check('the log is empty after clearing', (await req('/audit', { token: ownerToken })).json?.entries?.length === 0);
+
+  // --- Gif sources over HTTP: permissions, the guard on the copy route, the audit trail ---
+  {
+    const gifDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+    const GONE = 'https://media.giphy.com/media/harmony-smoke-nonexistent/giphy.gif';
+    check('gif sources: stats need Manage Server (403)', (await req('/gifs/sources', { token: bobToken })).status === 403);
+    check('gif sources: and a session (401)', (await req('/gifs/sources')).status === 401);
+    const stats = await req('/gifs/sources', { token: ownerToken });
+    check('gif sources: the owner reads the counts',
+      stats.status === 200 && ['total', 'linked', 'archived', 'dead', 'archivedBytes'].every((key) => typeof stats.json?.[key] === 'number'));
+    check('gif sources: archiving needs Manage Server', (await req('/gifs/sources/archive', { method: 'POST', token: bobToken })).status === 403);
+    check('gif sources: freeing needs Manage Server', (await req('/gifs/sources/free', { method: 'POST', token: bobToken })).status === 403);
+    check('gif sources: an empty archive run does nothing and is not logged',
+      (await req('/gifs/sources/archive', { method: 'POST', token: ownerToken })).json?.attempted === 0 &&
+        (await req('/audit?limit=100', { token: ownerToken })).json?.entries?.length === 0);
+
+    check('gif copy: needs a session (401)', (await req(`/gifs/copy?url=${encodeURIComponent(GONE)}`)).status === 401);
+    check('gif copy: an address never recorded is 404 and is not fetched',
+      (await req(`/gifs/copy?url=${encodeURIComponent(GONE)}`, { token: ownerToken })).status === 404);
+    check('gif copy: a private address is 404',
+      (await req(`/gifs/copy?url=${encodeURIComponent('https://127.0.0.1/a.gif')}`, { token: ownerToken })).status === 404 &&
+        (await req(`/gifs/copy?url=${encodeURIComponent('http://localhost:9/a.gif')}`, { token: ownerToken })).status === 404);
+    check('gif sources: freeing is refused while the server stores gifs',
+      (await req('/gifs/sources/free', { method: 'POST', token: ownerToken })).status === 409);
+
+    // A recorded address whose fetch fails (guarded and, here, unreachable or absent).
+    const nowIso = new Date().toISOString();
+    gifDb.prepare('INSERT INTO gif_sources (url, content_type, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)').run(GONE, 'image/gif', nowIso, nowIso);
+    const ran = await req('/gifs/sources/archive', { method: 'POST', token: ownerToken });
+    check('gif sources: an archive run reports its batch and the failure',
+      ran.status === 200 && ran.json?.attempted === 1 && ran.json?.copied === 0 && ran.json?.failed === 1 && ran.json?.more === false,
+      JSON.stringify(ran.json));
+    check('gif sources: the failure is counted against the address', gifDb.prepare('SELECT fail_count FROM gif_sources WHERE url = ?').get(GONE)?.fail_count === 1);
+
+    const flip = await req('/settings', { method: 'PATCH', token: ownerToken, body: { gifStorage: 'link' } });
+    const freed = await req('/gifs/sources/free', { method: 'POST', token: ownerToken });
+    check('gif sources: freeing works while linking', flip.status === 200 && freed.status === 200 && freed.json?.released === 0);
+    const gifAudit = (await req('/audit?limit=100', { token: ownerToken })).json?.entries ?? [];
+    check('gif sources: archive and free are audit-logged',
+      gifAudit.some((entry) => entry.kind === 'gif_archive' && entry.detail.count === 0) &&
+        gifAudit.some((entry) => entry.kind === 'gif_free' && entry.detail.count === 0));
+    await req('/settings', { method: 'PATCH', token: ownerToken, body: { gifStorage: 'store' } });
+    gifDb.close();
+    await req('/audit', { method: 'DELETE', token: ownerToken });
+  }
 
   const auditDays = await req('/retention', {
     method: 'PATCH',

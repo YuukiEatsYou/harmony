@@ -15,6 +15,7 @@
   import { ApiError, api } from '../../lib/api';
   import { meta } from '../../lib/meta.svelte';
   import { previewTheme, restoreTheme, setSavedTheme } from '../../lib/theme';
+  import GifSourcesPanel from './GifSourcesPanel.svelte';
 
   let serverName = $state('');
   let requireInvite = $state(false);
@@ -441,6 +442,7 @@
         Saving a gif to favorites always keeps a copy here. People with the page already open should reload
         after you change this.
       </p>
+      <GifSourcesPanel storedMode={meta.data?.gifStorage ?? 'store'} />
     </fieldset>
 
     {#if error}<p class="form-error">{error}</p>{/if}

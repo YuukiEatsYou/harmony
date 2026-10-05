@@ -7,6 +7,8 @@ import type {
   GifListResponse,
   GifSearchResponse,
   GifSearchResult,
+  ServerGifItem,
+  ServerGifListResponse,
 } from '@harmony/shared';
 import { api } from './api';
 
@@ -19,6 +21,13 @@ class GifState {
   favorites = $state<GifFavorite[]>([]);
   local = $state<GifItem[]>([]);
   remote = $state<GifSearchResult[]>([]);
+  /** The Server tab: curated gifs first, then the auto-collected ones. */
+  server = $state<ServerGifItem[]>([]);
+  /** Raised on SERVER_GIFS_UPDATE, so an open admin section knows to refetch. */
+  serverVersion = $state(0);
+  /** The term the Server tab was last loaded for, so an update refetches the same view. */
+  #serverQuery = '';
+  #serverLoaded = false;
   remoteLoading = $state(false);
   /** Saved gifs by content hash, so a heart anywhere can tell whether it is on. */
   byHash = $derived(new Map(this.favorites.map((favorite) => [favorite.hash, favorite])));
@@ -58,6 +67,33 @@ class GifState {
     }
   }
 
+  async searchServer(query: string): Promise<void> {
+    const search = ++this.#search;
+    this.#serverQuery = query;
+    try {
+      const params = new URLSearchParams();
+      if (query.trim().length > 0) params.set('q', query.trim());
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      const body = await api<ServerGifListResponse>(`/gifs/server${suffix}`);
+      if (search !== this.#search) return;
+      this.server = body.gifs;
+      this.#serverLoaded = true;
+    } catch {
+      // Leave whatever was there.
+    }
+  }
+
+  /** The administrators changed the server gifs: refresh what is on screen. */
+  serverChanged(): void {
+    this.serverVersion += 1;
+    if (this.#serverLoaded) void this.searchServer(this.#serverQuery);
+  }
+
+  /** Takes a curated gif into the message being written; returns the pending attachment. */
+  pickServer(id: string): Promise<Attachment> {
+    return api<Attachment>(`/gifs/server/${id}/pick`, { method: 'POST' });
+  }
+
   /** The hosted service's gifs, searched by the server so its key stays there. */
   async searchRemote(query: string): Promise<void> {
     const search = ++this.#search;
@@ -86,12 +122,16 @@ class GifState {
     this.local = this.local.map((item) =>
       item.hash === favorite.hash ? { ...item, favoriteId: favorite.id } : item,
     );
+    this.server = this.server.map((item) =>
+      item.hash === favorite.hash ? { ...item, favoriteId: favorite.id } : item,
+    );
   }
 
   async forget(favoriteId: string): Promise<void> {
     await api(`/gifs/favorites/${favoriteId}`, { method: 'DELETE' });
     this.favorites = this.favorites.filter((entry) => entry.id !== favoriteId);
     this.local = this.local.map((item) => (item.favoriteId === favoriteId ? { ...item, favoriteId: null } : item));
+    this.server = this.server.map((item) => (item.favoriteId === favoriteId ? { ...item, favoriteId: null } : item));
   }
 
   /** Has the server check a hosted gif's address for linking; returns the address to send. */

@@ -15,3 +15,4 @@ export * from './server-log.ts';
 export * from './backup.ts';
 export * from './scheduled.ts';
 export * from './polls.ts';
+export * from './events.ts';

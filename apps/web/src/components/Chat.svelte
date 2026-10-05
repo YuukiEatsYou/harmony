@@ -3,6 +3,7 @@
   import type { Message } from '@harmony/shared';
   import { chat } from '../lib/chat.svelte';
   import { dragHasFiles, mediaFilesFrom } from '../lib/files';
+  import { events } from '../lib/events.svelte';
   import { saved } from '../lib/saved.svelte';
   import { scheduled } from '../lib/scheduled.svelte';
   import { session } from '../lib/session.svelte';
@@ -10,6 +11,8 @@
   import { uploads } from '../lib/upload-queue.svelte';
   import ChannelSidebar from './ChannelSidebar.svelte';
   import Composer from './Composer.svelte';
+  import EventsButton from './EventsButton.svelte';
+  import EventsPanel from './EventsPanel.svelte';
   import Icon from './Icon.svelte';
   import KeyboardShortcuts from './KeyboardShortcuts.svelte';
   import MemberList from './MemberList.svelte';
@@ -27,6 +30,8 @@
     saved.start();
     // Scheduled messages are sent by the server; this only mirrors the queue.
     scheduled.start();
+    // Events are mirrored the same way; the server starts, ends and reminds.
+    events.start();
 
     // A phone that backgrounds the app gets no events at all: the socket dies and
     // nothing scrolls past. Coming back to the foreground is the cue to reconnect
@@ -41,6 +46,7 @@
       document.removeEventListener('visibilitychange', onVisibility);
       saved.stop();
       scheduled.stop();
+      events.stop();
       chat.stop();
     };
   });
@@ -153,6 +159,7 @@
         </button>
         <SavedButton />
         <ScheduledButton />
+        <EventsButton />
         <button
           type="button"
           class="search-open"
@@ -228,6 +235,9 @@
   {/if}
   {#if ui.scheduledOpen}
     <ScheduledPanel onclose={() => ui.closeScheduled()} />
+  {/if}
+  {#if ui.eventsOpen}
+    <EventsPanel onclose={() => ui.closeEvents()} />
   {/if}
 
   {#if ui.sidebarOpen || ui.rosterOpen}

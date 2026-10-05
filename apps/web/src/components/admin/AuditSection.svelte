@@ -25,6 +25,15 @@
     message_unpin: 'unpin',
     backup_download: 'backup',
     channel_export: 'export',
+    server_gif_add: 'server gif',
+    server_gif_remove: 'server gif',
+    server_gif_hide: 'server gif',
+    server_gif_unhide: 'server gif',
+    gif_archive: 'gifs',
+    gif_free: 'gifs',
+    event_create: 'event',
+    event_edit: 'event edit',
+    event_cancel: 'event canceled',
   };
 
   let entries = $state<AuditEntry[]>([]);
@@ -129,6 +138,24 @@
         return 'downloaded a full backup';
       case 'channel_export':
         return `exported #${entry.detail.channelName ?? 'a channel'} as ${entry.detail.filename?.endsWith('.html') ? 'HTML' : 'JSON'}`;
+      case 'server_gif_add':
+        return `added "${entry.detail.gifName ?? entry.detail.filename ?? 'a gif'}" to the server gifs`;
+      case 'server_gif_remove':
+        return `removed "${entry.detail.gifName ?? entry.detail.filename ?? 'a gif'}" from the server gifs`;
+      case 'server_gif_hide':
+        return `hid ${entry.detail.filename ?? 'a gif'} from the server gifs`;
+      case 'server_gif_unhide':
+        return `restored ${entry.detail.filename ?? 'a gif'} to the server gifs`;
+      case 'gif_archive':
+        return `copied ${entry.detail.count ?? 0} linked gif${entry.detail.count === 1 ? '' : 's'} onto this server`;
+      case 'gif_free':
+        return `released the stored copies of ${entry.detail.count ?? 0} linked gif${entry.detail.count === 1 ? '' : 's'}`;
+      case 'event_create':
+        return `created the event "${entry.detail.eventTitle ?? 'untitled'}"`;
+      case 'event_edit':
+        return `edited the event "${entry.detail.eventTitle ?? 'untitled'}"`;
+      case 'event_cancel':
+        return `canceled the event "${entry.detail.eventTitle ?? 'untitled'}"`;
     }
   }
 </script>

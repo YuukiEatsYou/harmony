@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { EVERYONE_PERMISSIONS, permissionsToString } from '@harmony/shared';
+import { EVERYONE_PERMISSIONS, isGifLinkUrl, permissionsToString } from '@harmony/shared';
+import { normalizeGifSourceUrl } from '../gifs/source-url.ts';
 
 export interface Migration {
   version: number;
@@ -736,6 +737,224 @@ export const migrations: Migration[] = [
        * preview or fetched picture does not come back with the next edit.
        */
       db.exec(`ALTER TABLE messages ADD COLUMN embeds_hidden INTEGER NOT NULL DEFAULT 0`);
+    },
+  },
+  {
+    version: 31,
+    name: 'gif_sources',
+    up(db) {
+      /*
+       * Pairs a remote gif address with the copy this server holds of it, so that
+       * switching the gif storage mode between "store" and "link" never fetches a
+       * gif twice or loses one. `url` is the normalized address (see
+       * gifs/source-url.ts). `hash` points at the content-addressed blob and is
+       * null while there is no copy: a gif only linked so far, or one whose copy
+       * was released. It is deliberately not a foreign key, since blobs are files
+       * and not rows; whoever deletes a blob clears the pairing instead.
+       * `fail_count` and `status` give up on an address after repeated failed
+       * fetches ('dead'), and `last_checked_at` spaces the retries.
+       *
+       * `held` says who keeps the blob alive. 0: the pairing merely mirrors bytes
+       * an attachment or a favorite holds, so the blob follows their retention
+       * and the pairing is cleared once it is gone. 1: the copy was made for the
+       * pairing itself (an archive run, an on-demand copy), so the retention
+       * sweep treats the blob as referenced until the copy is released.
+       */
+      db.exec(`
+        CREATE TABLE gif_sources (
+          url             TEXT PRIMARY KEY,
+          hash            TEXT,
+          content_type    TEXT,
+          size            INTEGER,
+          width           INTEGER,
+          height          INTEGER,
+          first_seen_at   TEXT NOT NULL,
+          last_seen_at    TEXT NOT NULL,
+          copied_at       TEXT,
+          held            INTEGER NOT NULL DEFAULT 0,
+          last_checked_at TEXT,
+          fail_count      INTEGER NOT NULL DEFAULT 0,
+          status          TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'dead'))
+        );
+        CREATE INDEX idx_gif_sources_hash ON gif_sources(hash) WHERE hash IS NOT NULL;
+      `);
+
+      /*
+       * One-time, idempotent backfill from what already pairs an address with
+       * bytes: gifs fetched from a link (attachments.source_url) and gifs kept
+       * from the hosted service (gif_favorites.source_url). Done in pages so a
+       * large history never sits in memory at once; INSERT OR IGNORE keeps the
+       * first pairing per address.
+       */
+      const insert = db.prepare(
+        `INSERT OR IGNORE INTO gif_sources
+           (url, hash, content_type, size, width, height, first_seen_at, last_seen_at, copied_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok')`,
+      );
+      interface Pair {
+        rowid: number;
+        source_url: string;
+        hash: string;
+        content_type: string;
+        size: number;
+        width: number | null;
+        height: number | null;
+        created_at: string;
+      }
+      for (const table of ['attachments', 'gif_favorites'] as const) {
+        let after = 0;
+        for (;;) {
+          const rows = db
+            .prepare(
+              `SELECT rowid, source_url, hash, content_type, size, width, height, created_at FROM ${table}
+               WHERE source_url IS NOT NULL AND content_type = 'image/gif' AND rowid > ?
+               ORDER BY rowid LIMIT 500`,
+            )
+            .all(after) as unknown as Pair[];
+          if (rows.length === 0) break;
+          for (const row of rows) {
+            const url = normalizeGifSourceUrl(row.source_url);
+            if (url === null || !isGifLinkUrl(url)) continue;
+            insert.run(
+              url,
+              row.hash,
+              row.content_type,
+              row.size,
+              row.width,
+              row.height,
+              row.created_at,
+              row.created_at,
+              row.created_at,
+            );
+          }
+          after = rows[rows.length - 1]?.rowid ?? after + 1;
+        }
+      }
+    },
+  },
+  {
+    version: 32,
+    name: 'server_gifs',
+    up(db) {
+      /*
+       * The administrators' say over the picker's Server tab, one row per picture
+       * (unique on the content hash, so the same bytes are never listed twice).
+       *
+       * kind 'curated' is a gif an administrator chose to keep for everyone. It is
+       * held by hash, like a favorite, so it outlives the message it was found in;
+       * the bytes are always a copy stored here, never a link, so it survives link
+       * rot. The blob is protected from retention by listReferencedHashes, which
+       * counts curated rows (and only those). position orders the curated list and
+       * pinned lifts a gif above the rest.
+       *
+       * kind 'hidden' is an administrator removing a gif from the auto-collected
+       * list (recent gif attachments). It carries the same descriptive columns so
+       * the admin can see and restore it, but it makes no claim on the bytes: if
+       * the last message holding them is pruned, the blob goes and the row is just
+       * a stale note.
+       */
+      db.exec(`
+        CREATE TABLE server_gifs (
+          id           TEXT PRIMARY KEY,
+          kind         TEXT NOT NULL CHECK (kind IN ('curated', 'hidden')),
+          hash         TEXT NOT NULL UNIQUE,
+          filename     TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          size         INTEGER NOT NULL,
+          width        INTEGER,
+          height       INTEGER,
+          name         TEXT NOT NULL DEFAULT '',
+          tags         TEXT NOT NULL DEFAULT '',
+          position     INTEGER NOT NULL DEFAULT 0,
+          pinned       INTEGER NOT NULL DEFAULT 0,
+          added_by     TEXT REFERENCES users(id) ON DELETE SET NULL,
+          created_at   TEXT NOT NULL
+        );
+        CREATE INDEX idx_server_gifs_kind ON server_gifs(kind, pinned DESC, position, created_at);
+      `);
+    },
+  },
+  {
+    version: 33,
+    name: 'server_events',
+    up(db) {
+      /*
+       * Server events with an "Interested" RSVP. Times are epoch milliseconds, which
+       * is what the clients format and what the sweep compares.
+       *
+       * A channel event is deleted with its channel (CASCADE) rather than
+       * orphaned: an orphan would have no channel left to decide who may see it,
+       * and one that was private would turn public. The creator is kept as null
+       * once their account goes, so the event outlives them.
+       *
+       * `reminded_at` is stamped when the pre-start reminder has gone out, so it
+       * fires once even across a restart; moving the start time clears it. The
+       * partial index serves the sweep and stays as small as the set of events
+       * still open.
+       */
+      db.exec(`
+        CREATE TABLE events (
+          id                   TEXT PRIMARY KEY,
+          title                TEXT NOT NULL,
+          description          TEXT NOT NULL DEFAULT '',
+          location_kind        TEXT NOT NULL CHECK (location_kind IN ('channel', 'external')),
+          channel_id           TEXT REFERENCES channels(id) ON DELETE CASCADE,
+          location_text        TEXT NOT NULL DEFAULT '',
+          starts_at            INTEGER NOT NULL,
+          ends_at              INTEGER,
+          creator_id           TEXT REFERENCES users(id) ON DELETE SET NULL,
+          status               TEXT NOT NULL DEFAULT 'scheduled'
+                                 CHECK (status IN ('scheduled', 'active', 'ended', 'canceled')),
+          created_at           TEXT NOT NULL,
+          updated_at           TEXT NOT NULL,
+          announced_message_id TEXT,
+          reminded_at          INTEGER
+        );
+        CREATE INDEX idx_events_open ON events(starts_at) WHERE status IN ('scheduled', 'active');
+        CREATE INDEX idx_events_channel ON events(channel_id);
+
+        CREATE TABLE event_rsvps (
+          event_id   TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+          user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (event_id, user_id)
+        );
+        CREATE INDEX idx_event_rsvps_user ON event_rsvps(user_id);
+      `);
+
+      /*
+       * ManageEvents is bit 17 (131072). Roles that could already run the server
+       * (ManageServer, bit 9 = 512) keep that reach by getting the new bit;
+       * administrators have every bit implicitly and the owner holds them all.
+       */
+      db.exec(`
+        UPDATE roles
+           SET permissions = CAST((CAST(permissions AS INTEGER) | 131072) AS TEXT)
+         WHERE (CAST(permissions AS INTEGER) & 512) != 0
+           AND (CAST(permissions AS INTEGER) & 131072) = 0
+      `);
+    },
+  },
+  {
+    version: 34,
+    name: 'message_edits',
+    up(db) {
+      /*
+       * The text a message had before each edit. editor_id is who made the edit
+       * (null once that account is deleted); source says whether the edit came
+       * from Harmony or from Discord. Rows go with their message via the cascade.
+       */
+      db.exec(`
+        CREATE TABLE message_edits (
+          id         TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          editor_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+          content    TEXT NOT NULL,
+          edited_at  TEXT NOT NULL,
+          source     TEXT NOT NULL DEFAULT 'harmony'
+        );
+        CREATE INDEX idx_message_edits_message ON message_edits(message_id, edited_at);
+      `);
     },
   },
 ];

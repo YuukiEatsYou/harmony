@@ -91,6 +91,23 @@ export interface MessageListResponse {
   messages: Message[];
 }
 
+/** One earlier version of an edited message. */
+export interface MessageEdit {
+  id: string;
+  /** The text before the edit. */
+  content: string;
+  /** When the edit that replaced this text happened. */
+  editedAt: string;
+  /** Who made that edit, or null when the account is gone. */
+  editor: User | null;
+  source: 'harmony' | 'discord';
+}
+
+/** Response for `GET /api/v1/messages/:id/edits`: previous versions, newest first. */
+export interface MessageEditListResponse {
+  edits: MessageEdit[];
+}
+
 /** Response for `GET /api/v1/channels/:id/pins`: the channel's pins, newest pin first. */
 export interface PinListResponse {
   messages: Message[];
@@ -426,6 +443,62 @@ export interface GifListResponse {
  * A gif offered by the hosted service the picker is configured with. Nothing is
  * stored until one is picked or saved; these are the service's own addresses.
  */
+/**
+ * A row of the server's gif list. `curated` is a gif an administrator chose to
+ * keep for everyone: its bytes are a stored copy, so it outlives the message it
+ * came from and any link rot. `hidden` is an administrator removing a gif from
+ * the auto-collected list, kept as a row so the choice survives; it holds no
+ * claim on the bytes, so retention treats it as nothing.
+ */
+export type ServerGifKind = 'curated' | 'hidden';
+
+export interface ServerGif {
+  id: string;
+  kind: ServerGifKind;
+  hash: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  width: number | null;
+  height: number | null;
+  /** A display name; the picker falls back to the filename when it is empty. */
+  name: string;
+  /** Search tags, already split and lower-cased. */
+  tags: string[];
+  position: number;
+  pinned: boolean;
+  addedBy: string | null;
+  createdAt: string;
+}
+
+/** One tile of the picker's Server tab: a curated gif or an auto-collected one. */
+export interface ServerGifItem {
+  /** Curated: the ServerGif id. Auto: the attachment id serving the bytes. */
+  id: string;
+  source: 'curated' | 'auto';
+  hash: string;
+  name: string;
+  tags: string[];
+  filename: string;
+  contentType: string;
+  width: number | null;
+  height: number | null;
+  pinned: boolean;
+  /** The caller's own saved copy of it, when they have one. */
+  favoriteId: string | null;
+}
+
+export interface ServerGifListResponse {
+  gifs: ServerGifItem[];
+}
+
+/** The admin view: curated gifs in display order, hidden ones, and the visible auto-collected rest. */
+export interface ServerGifManageResponse {
+  curated: ServerGif[];
+  hidden: ServerGif[];
+  auto: GifItem[];
+}
+
 export interface GifSearchResult {
   /** The gif itself, which is what gets fetched if this is picked or saved. */
   url: string;
@@ -440,6 +513,47 @@ export interface GifSearchResult {
 export interface GifLinkResponse {
   url: string;
   contentType: string;
+}
+
+/**
+ * How the recorded gif sources stand (`GET /api/v1/gifs/sources`). A source is a
+ * remote gif address paired with the copy this server may hold of it.
+ */
+export interface GifSourceStats {
+  /** Every address recorded. */
+  total: number;
+  /** Recorded addresses with no copy here yet (and not dead): what an archive run would fetch. */
+  linked: number;
+  /** Addresses with a copy stored here. */
+  archived: number;
+  /** Addresses given up on after repeated failed fetches. */
+  dead: number;
+  /** Bytes held by the copies. */
+  archivedBytes: number;
+}
+
+/** Response for `POST /api/v1/gifs/sources/archive`: one bounded batch. */
+export interface GifArchiveResponse {
+  /** Addresses looked at in this batch. */
+  attempted: number;
+  /** Copies made. */
+  copied: number;
+  /** Fetches that failed (the address stays recorded and is retried later). */
+  failed: number;
+  /** Addresses given up on in this batch. */
+  markedDead: number;
+  /** Whether more addresses are waiting; run it again to continue. */
+  more: boolean;
+  stats: GifSourceStats;
+}
+
+/** Response for `POST /api/v1/gifs/sources/free`. */
+export interface GifFreeResponse {
+  /** Copies released (the address stays recorded and can be copied again). */
+  released: number;
+  /** Bytes of stored files removed because nothing else refers to them any more. */
+  freedBytes: number;
+  stats: GifSourceStats;
 }
 
 export interface GifSearchResponse {

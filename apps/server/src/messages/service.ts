@@ -11,6 +11,7 @@ import {
   type MentionListResponse,
   type MentionQuery,
   type Message,
+  type MessageEdit,
   type MessageDeletePayload,
   type MessageHistoryQuery,
   type MessageListResponse,
@@ -31,6 +32,7 @@ import { markChannelRead } from '../db/channel_reads.ts';
 import { findChannel, type ChannelRow } from '../db/channels.ts';
 import { findEmoji } from '../db/emojis.ts';
 import { deleteNameMentions, insertMention, listMentions, type MentionRow } from '../db/mentions.ts';
+import { listMessageEdits, recordMessageEdit } from '../db/message_edits.ts';
 import { listSavedAmong } from '../db/saved_messages.ts';
 import { attachmentIsScheduled } from '../db/scheduled_messages.ts';
 import {
@@ -124,6 +126,12 @@ export interface MessageService {
    * the message is gone or the text is unchanged.
    */
   editBridged(messageId: string, content: string): Message | null;
+  /**
+   * The earlier versions of an edited message, newest first. Only the author and
+   * members with Manage Messages may read them; for anyone else, or a missing,
+   * deleted or locked-away message, the answer is the same 404.
+   */
+  editHistory(auth: AuthContext, messageId: string): MessageEdit[];
   /**
    * Renders one message, or null when it is gone or deleted. Without a viewer it
    * is fit for a broadcast; with one, their own reactions are marked as theirs.
@@ -751,7 +759,9 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
       }
 
       const before = row.content;
-      updateMessageContent(sqlite, messageId, content, new Date().toISOString());
+      const editedAt = new Date().toISOString();
+      recordMessageEdit(sqlite, { messageId, editorId: auth.user.id, content: before, editedAt, source: 'harmony' });
+      updateMessageContent(sqlite, messageId, content, editedAt);
       rerecordNameMentions(row, content);
       const message = render(requireMessage(messageId), auth.user.id);
       announceEdit(message);
@@ -767,11 +777,38 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
       // A poll's text is its question; Discord reports a poll message with none.
       if (findPollByMessage(sqlite, messageId)) return null;
 
-      updateMessageContent(sqlite, messageId, content, new Date().toISOString());
+      const editedAt = new Date().toISOString();
+      recordMessageEdit(sqlite, {
+        messageId,
+        editorId: row.author_id,
+        content: row.content,
+        editedAt,
+        source: 'discord',
+      });
+      updateMessageContent(sqlite, messageId, content, editedAt);
       rerecordNameMentions(row, content);
       const message = render(requireMessage(messageId), row.author_id ?? '');
       hub.dispatch(GatewayEvent.MessageUpdate, message, { channelId: message.channelId });
       return message;
+    },
+
+    editHistory(auth, messageId) {
+      const missing = new HttpError(404, 'message_not_found', 'That message does not exist.');
+      const row = findMessage(sqlite, messageId);
+      if (!row || row.deleted_at) throw missing;
+      if (!canAccessChannel(sqlite, channelAccessFor(sqlite, auth.user.id), row.channel_id)) throw missing;
+      if (!isAuthor(auth, row) && !hasPermission(auth.permissions, Permission.ManageMessages)) throw missing;
+
+      return listMessageEdits(sqlite, messageId).map((edit) => {
+        const editor = edit.editor_id ? findUserById(sqlite, edit.editor_id) : null;
+        return {
+          id: edit.id,
+          content: edit.content,
+          editedAt: edit.edited_at,
+          editor: editor ? presentUser(sqlite, editor) : null,
+          source: edit.source,
+        };
+      });
     },
 
     remove(auth, messageId) {

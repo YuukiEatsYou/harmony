@@ -6,6 +6,7 @@ export type AdminTabId =
   | 'members'
   | 'channels'
   | 'emojis'
+  | 'server-gifs'
   | 'media'
   | 'retention'
   | 'bridge'
@@ -36,6 +37,7 @@ export const ADMIN_TABS: ReadonlyArray<{
   { id: 'members', label: 'Members', permissions: MEMBER_MANAGEMENT_PERMISSIONS },
   { id: 'channels', label: 'Channels', permissions: [Permission.ManageChannels] },
   { id: 'emojis', label: 'Emojis', permissions: [Permission.ManageEmojis] },
+  { id: 'server-gifs', label: 'Server gifs', permissions: [Permission.ManageEmojis] },
   { id: 'media', label: 'Media', permissions: [Permission.ManageServer] },
   { id: 'retention', label: 'Retention', permissions: [Permission.ManageServer] },
   { id: 'bridge', label: 'Bridge', permissions: [Permission.ManageServer] },

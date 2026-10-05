@@ -543,6 +543,30 @@ message is also recorded in the permanent seen-set, like any other mirrored mess
 Discord poll for the first time records every existing voter quietly and then sends one
 `POLL_UPDATE` (`announceBridged`), so a large poll does not flood the gateway with one frame per vote.
 
+## Edit history
+
+Every edit saves the text it replaces in `message_edits` (migration 34): `message_id` (cascades),
+`editor_id` (set null when an account is deleted, re-owned by `mergeUsers`), `content`, `edited_at`
+and `source` (`harmony` or `discord`). `recordMessageEdit` in `db/message_edits.ts` inserts the row
+and trims the message to its newest 20 versions. It is called from both `edit` and `editBridged` in
+the message service, right before `updateMessageContent`; `editBridged` still returns early for
+unchanged text, polls and gone messages, so unfurl updates write nothing. Re-resolving an embed after
+an edit does not go through this path and is never recorded.
+
+`editHistory` answers `GET /messages/:id/edits`. It throws one and the same 404 for a missing or
+deleted message, a channel the caller cannot access, and a caller who is neither the author nor
+holds Manage Messages, so the endpoint cannot be used to learn anything. Soft-deleted messages keep
+their rows but are never exposed; retention and any hard delete remove them through the foreign key.
+
+The client shows `(edited)` as a button only to the author and Manage Messages holders
+(`EditHistory.svelte`); it fetches on open and renders a word diff per edit from `lib/text-diff.ts`,
+which is capped (text over 8000 characters is cut, and a differing middle too large for the
+comparison is shown as one removal and one addition) so it cannot freeze the page.
+
+Privacy trade-off: the old text of an edited message stays on the server, readable by its author
+and moderators, until the message is deleted or pruned. Someone who edits a message to remove a
+mistake or sensitive text has not erased it from the database or from backups.
+
 ## Saved messages
 
 A save is one member's bookmark, so it lives in a table keyed by member and message rather than on
@@ -579,6 +603,38 @@ checking it, describing it in the member's own zone) are in `lib/schedule-time.t
 text smoke test. The composer opens `SchedulePicker` from the chevron by Send, the + menu or
 Ctrl+Shift+Enter, and `ScheduledPanel` (header clock button, with a count badge) lists, edits, sends
 and deletes entries, failed ones included.
+
+## Events
+
+Server events live in `events` and `event_rsvps` (migration 33). Times are epoch milliseconds. A channel
+event cascades away with its channel (an orphan would have no channel left to decide who may see it);
+the creator is nulled when their account goes, and `mergeUsers` re-owns events and keeps one interest per
+person. `events/service.ts` does the work and `routes/events.ts` is the thin HTTP layer.
+
+Visibility is one rule applied everywhere: an external event is visible to all, a channel event to those
+who can open the channel (`canAccessChannel`). The list, detail, RSVP, interested names and the gateway all
+use it, and an invisible event is reported as missing. `EVENT_UPDATE` goes through `hub.dispatch` with the
+channel as its visibility for a channel event and to everybody otherwise. The broadcast carries no viewer
+perspective (`interested: false` plus, for an RSVP, whose interest changed), the same idea as reactions'
+`me`, so each client keeps its own flag.
+
+A sweep (`HARMONY_EVENT_SWEEP_MS`, default 15 s) starts events at `starts_at`, ends active ones at `ends_at`
+or after the default duration (4 h, `HARMONY_EVENT_DEFAULT_DURATION_MS`) and sends reminders. A reminder is
+due once a still-`scheduled` event is within the lead (15 min, `HARMONY_EVENT_REMINDER_LEAD_MS`) of its start
+and `reminded_at` is null; the stamp is written before the dispatch so a failure skips rather than doubles,
+and survives restarts. It is delivered with `hub.dispatchToUsers` to the interested members who can still see
+the event, as `EVENT_REMINDER`. Nothing is queued for a member who is offline. An edit that moves the start
+clears the stamp.
+
+Creating needs the `ManageEvents` bit (17). The migration adds it to roles that already had `ManageServer`
+so existing moderators keep their reach; the role editor lists permissions from the shared bitfield, so no
+UI work was needed for the bit. The creator may always edit or cancel their own event.
+
+On the client `lib/events.svelte.ts` mirrors the list, follows `EVENT_UPDATE` and shows `EVENT_REMINDER` as a
+notice (with the mention sound when enabled) the way a due saved-message reminder is. The pure parts
+(grouping into Now / Upcoming / Past, labels, the form's draft handling) are in `packages/shared/src/events.ts`
+and `lib/event-form.ts` and covered by the text smoke test. Not included: recurring events and bridging to
+Discord scheduled events.
 
 ## Notification sounds
 
@@ -732,6 +788,28 @@ Klipy every member's address. One consequence is worth knowing: the tile and the
 not the same file, because a grid of full-size gifs would be megabytes through the instance's own
 connection for every search.
 
+## Server gifs
+
+The Server tab layers an administrators' list on top of that auto-collected listing. The table
+`server_gifs` (migration 32) has one row per content hash with a `kind`: `curated` is a gif an
+administrator chose, `hidden` is an auto-collected gif an administrator removed from the list.
+Modelling the hide as a row of its own keeps one place for "what has an administrator said about this
+picture" and lets the admin restore it; a curated gif is also promoted from a hidden row in place.
+
+The point of curating is permanence, so the row owns a stored copy: even a gif added by hosted
+address is fetched and stored at that moment. That makes retention the thing to get right. The
+pruner frees a blob when no row references its hash, and `listReferencedHashes` is the single place
+that says what references one, so it counts `server_gifs` rows of kind `curated` (and not hidden
+ones, which must not keep a blob alive). This is the same class of bug as saved gifs losing their
+bytes; the smoke test curates a gif, deletes its message, runs the image rule and the emergency
+storage limit, and checks the bytes remain, and that they go once the gif is removed.
+
+`gifs/server-gifs.ts` sits beside the gif service rather than inside it, and builds its auto part by
+calling `listLocal`, reading a few extra rows to cover the hashes it then drops, so channel
+visibility is enforced in exactly one place. It dispatches `SERVER_GIFS_UPDATE` (no payload) to
+everyone after any change, and the audit service records the four `server_gif_*` kinds. Reordering is
+one transaction that renumbers positions; pinned gifs sort above position order in the query itself.
+
 ## Gif storage: store or link
 
 By default every gif is brought home: a picked Klipy result or a pasted gif address is downloaded and
@@ -759,7 +837,7 @@ admin help text also states:
   CDN link is never on it: those addresses are signed with `ex`/`is`/`hm` parameters and expire in
   about a day, so the bridge keeps downloading and storing them.
 
-How it works without a new table: a linked gif is an ordinary embed. The message text is the gif's
+How a linked gif is stored: it is an ordinary embed. The message text is the gif's
 address, and when the embed resolver sees an allowlisted address in link mode it calls
 `verifyLinkedGif` (`embeds/linked-gif.ts`) and, if that passes, stores `LinkEmbed.gif`
 (`{ contentType, width, height }`) on the message's `embed` column with the gif's address as the embed
@@ -780,12 +858,52 @@ they are stored bytes, and saving a hosted gif to favorites still keeps a copy.
 The Content-Security-Policy is built per response (`http/security.ts`): only the built-in policy is
 widened, only `img-src` and `media-src`, only while the mode is on. It is read per page load, so a
 client with the app already open needs a reload after the setting changes. A custom `HARMONY_CSP` is
-never modified. Switching back to `store` leaves existing linked embeds in the database; clients stop
-drawing them (and the browser would refuse them anyway) and the address shows as plain text.
+never modified.
 
 The bridge needs nothing: a message is text plus the embed, and a linked gif's text is just the
 address, so Discord unfurls it itself. Incoming Discord links to an allowlisted host are linked the
 same way in link mode.
+
+### Gif sources: switching modes loses nothing
+
+`gif_sources` (migration 31, `db/gif_sources.ts`, `gifs/sources.ts`) pairs a remote gif address with the
+copy this server holds of it, so flipping `gifStorage` never duplicates or loses a gif. One row per
+address: the normalized `url` (`gifs/source-url.ts`: https only, lowercase host, default port and
+fragment dropped, **path and query kept verbatim** because Klipy and Tenor can select the file by query),
+a nullable `hash` pointing at the content-addressed blob (not a foreign key; whoever deletes a blob
+clears the pairing), the type, size and dimensions, `first_seen_at`, `last_seen_at`, `copied_at`,
+`last_checked_at`, `fail_count`, `status` (`ok` or `dead`) and `held`. Only addresses on the gif-host
+allowlist are recorded. The migration backfills pairs from `attachments.source_url` and
+`gif_favorites.source_url`, in pages, once.
+
+- **Recording.** Link mode never fetches: `gifs.link`, the embed resolver's `linkGif` and the
+  `pick`/`addFavorite` paths only upsert the row (a repeat just moves `last_seen_at`; one that answers
+  again revives a dead row). Wherever bytes are stored for an address (the store path, a Klipy pick) the
+  row is pointed at them, and a copy that exists is reused: `pick` of a held Klipy address makes no
+  fetch, a store-mode message for an address with a copy gets an attachment from it
+  (`attachStoredCopy`) with no fetch, and in link mode a message whose remote no longer verifies falls
+  back to the held copy.
+- **Serving.** `GET /api/v1/gifs/copy?url=` serves a copy. In store mode a recorded address without one
+  is fetched once, through `fetchPublicImage` (the same SSRF guard as every outbound fetch), by
+  `ensureCopy`: concurrent asks share one download, four run at a time, and a failed address is left
+  alone for five minutes. Three failures in a row mark it `dead`; the client then shows the message's
+  link. In link mode the route serves only an existing copy, which the client uses when the remote
+  fails to load. Only recorded, allowlisted addresses are ever fetched, so the route is not a way to make
+  the server fetch arbitrary URLs. Clips (mp4/webm) cannot be copied and stay links.
+- **Who keeps the blob (`held`).** `held = 1` means the copy was made for the pairing itself (on demand
+  or by the archive), so the retention sweep counts it as a reference (`listReferencedHashes`). `held =
+  0` means the row only mirrors bytes an attachment or favorite holds: the blob follows their retention,
+  and the pairing is cleared when the sweep deletes it, so image retention still applies to stored gifs.
+  The pruner also forgets pairings whose file vanished (`reconcileGifPairs`), and a missing copy is then
+  simply fetched again on demand instead of answering 404. Emergency pruning (storage limit) releases
+  held copies, oldest first, before it evicts any attachment, since they can be fetched again and no
+  message depends on them.
+- **Admin.** Settings, Gifs shows the counts and two actions (`Manage Server`, audit kinds `gif_archive`
+  and `gif_free`). Archive copies a bounded batch (20) per request, concurrently capped, respecting the
+  upload size limit and the allowlist, and the client repeats it while `more` is set. Free releases held
+  copies of gifs that are still linked and that nothing else keeps; "nothing else" is answered in one
+  function, `isGifBlobHeldElsewhere` (attachments, favorites and, when the table exists, `server_gifs`),
+  which is where any future holder of gif blobs is added. It is refused while the mode is `store`.
 
 ## Server log
 

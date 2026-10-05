@@ -49,6 +49,19 @@ export interface AuditService {
   backupDownloaded(actorId: string, filename: string): void;
   /** Records a channel's history being exported to a file. */
   channelExported(actorId: string, channelId: string, filename: string): void;
+  /** Records the server gif list changing: a gif added or removed, or an auto-collected one hidden or restored. */
+  serverGif(
+    kind: 'server_gif_add' | 'server_gif_remove' | 'server_gif_hide' | 'server_gif_unhide',
+    actorId: string,
+    filename: string,
+    gifName?: string,
+  ): void;
+  /** Records an administrator copying linked gifs onto this server (one batch). */
+  gifsArchived(actorId: string, count: number): void;
+  /** Records an administrator releasing the stored copies of gifs that are still linked. */
+  gifsFreed(actorId: string, count: number, bytes: number): void;
+  /** Records an event being created, edited or canceled. */
+  eventChange(kind: 'event_create' | 'event_edit' | 'event_cancel', actorId: string, channelId: string | null, title: string): void;
   list(query: AuditQuery): AuditListResponse;
   /** Empties the log, returning how many entries were removed. */
   clear(): number;
@@ -179,6 +192,26 @@ export function createAuditService(sqlite: DatabaseSync): AuditService {
       write('channel_export', actorId, null, channelId, {
         channelName: findChannel(sqlite, channelId)?.name,
         filename,
+        actorName: userName(actorId),
+      });
+    },
+
+    serverGif(kind, actorId, filename, gifName) {
+      write(kind, actorId, null, null, { filename, gifName, actorName: userName(actorId) });
+    },
+
+    gifsArchived(actorId, count) {
+      write('gif_archive', actorId, null, null, { count, actorName: userName(actorId) });
+    },
+
+    gifsFreed(actorId, count, bytes) {
+      write('gif_free', actorId, null, null, { count, bytes, actorName: userName(actorId) });
+    },
+
+    eventChange(kind, actorId, channelId, title) {
+      write(kind, actorId, null, channelId, {
+        channelName: channelId ? findChannel(sqlite, channelId)?.name : undefined,
+        eventTitle: title,
         actorName: userName(actorId),
       });
     },

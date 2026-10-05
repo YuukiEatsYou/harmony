@@ -37,6 +37,7 @@ import { HttpError } from '../http/errors.ts';
 import type { SettingsService } from '../settings/service.ts';
 import { createBlobStore, type BlobStore } from '../storage/blobs.ts';
 import { isKlipyAddress, klipySearchUrl, normalizeKlipySearch } from './klipy.ts';
+import type { GifSourceService } from './sources.ts';
 
 export interface GifService {
   /** The gifs this member has kept, most recently used first. */
@@ -76,6 +77,10 @@ export interface GifServiceDeps {
   settings: SettingsService;
   /** Replaces the check made before a gif is linked; for tests, which cannot reach a gif host. */
   verifyLinkedGif?: VerifyLinkedGif;
+  /** Pairs each gif address with the copy held of it, so one address is fetched at most once. */
+  sources: GifSourceService;
+  /** Replaces the guarded download of a hosted gif; for tests, which cannot reach one. */
+  fetchImage?: (url: string, userAgent: string) => Promise<{ data: Buffer; contentType: string } | null>;
 }
 
 /** How many candidate rows to look at to fill a page once duplicates are dropped. */
@@ -149,7 +154,20 @@ export function createGifService(sqlite: DatabaseSync, config: Config, deps: Gif
       throw new HttpError(400, 'invalid_gif_url', 'Only gifs from the configured service can be used.');
     }
 
-    const media = await fetchPublicImage(target.toString(), KLIPY_USER_AGENT);
+    // An address this instance has already copied (while linking, or for another
+    // member) costs nothing: the pairing hands back the stored bytes.
+    const held = deps.sources.copyFor(target.toString());
+    if (held && isGifContentType(held.content_type ?? '')) {
+      return {
+        hash: held.hash,
+        contentType: held.content_type ?? 'image/gif',
+        size: held.size ?? 0,
+        width: held.width,
+        height: held.height,
+      };
+    }
+
+    const media = await (deps.fetchImage ?? fetchPublicImage)(target.toString(), KLIPY_USER_AGENT);
     if (!media) throw new HttpError(415, 'invalid_gif', 'That gif could not be fetched.');
 
     // The picker is gif-only, so a response that turns out to be something else is
@@ -162,6 +180,7 @@ export function createGifService(sqlite: DatabaseSync, config: Config, deps: Gif
     if (!stored) {
       throw new HttpError(413, 'gif_too_large', 'That gif is larger than this instance will store.');
     }
+    deps.sources.recordCopy(target.toString(), stored);
     return stored;
   }
 
@@ -207,6 +226,7 @@ export function createGifService(sqlite: DatabaseSync, config: Config, deps: Gif
         filename = attachment.filename;
         // Kept only as a note of where it came from; the bytes are what matter.
         sourceUrl = attachment.source_url;
+        if (sourceUrl !== null) deps.sources.recordCopy(sourceUrl, source);
       } else if (ref.url !== undefined) {
         source = await storeFromUrl(ref.url);
         filename = nameForUrl(ref.url);
@@ -299,6 +319,8 @@ export function createGifService(sqlite: DatabaseSync, config: Config, deps: Gif
         userAgent: KLIPY_USER_AGENT,
       });
       if (!gif) throw new HttpError(415, 'invalid_gif', 'That gif could not be checked.');
+      // Only the pairing is recorded; the bytes are copied later, on demand.
+      deps.sources.record(target.toString(), gif.contentType);
       return { url: target.toString(), contentType: gif.contentType };
     },
 

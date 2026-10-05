@@ -12,7 +12,15 @@ import sharp from 'sharp';
 import { Database } from '../src/db/index.ts';
 import { insertChannel, listChannels } from '../src/db/channels.ts';
 import { listCategories } from '../src/db/categories.ts';
-import { findUserById, findUserByDiscordId, insertUser, setUserDiscordId } from '../src/db/users.ts';
+import {
+  deleteUser,
+  findUserById,
+  findUserByDiscordId,
+  insertUser,
+  mergeUsers,
+  setUserDiscordId,
+} from '../src/db/users.ts';
+import { listMessageEdits, recordMessageEdit } from '../src/db/message_edits.ts';
 import { findBridgeMessageByDiscordId, findBridgeMessageByHarmonyId, hasSeenBridgeMessage } from '../src/db/bridge.ts';
 import { listLinkedAttachments } from '../src/db/attachments.ts';
 import { createEmbedService } from '../src/embeds/service.ts';
@@ -510,12 +518,44 @@ try {
     messages.history(channelId, { limit: 50 }, userId).messages.some((m) => m.content === 'edited in discord'),
   );
 
+  // Edit history: a Discord edit keeps the previous text, an unchanged one keeps nothing.
+  const d1Edits = listMessageEdits(db.sqlite, ingested.id);
+  check(
+    'a discord edit records the previous text',
+    d1Edits.length === 1 && d1Edits[0].source === 'discord' && d1Edits[0].content !== 'edited in discord',
+    JSON.stringify(d1Edits),
+  );
+  transport.emitEdit({ id: 'd1', channelId: '111', content: 'edited in discord' });
+  await sleep(50);
+  check('a discord edit with unchanged text records nothing', listMessageEdits(db.sqlite, ingested.id).length === 1);
+  {
+    const ghostId = randomUUID();
+    insertUser(db.sqlite, { id: ghostId, username: 'ghost-editor', passwordHash: 'scrypt$x$y$z', isOwner: false });
+    const keeperId = randomUUID();
+    insertUser(db.sqlite, { id: keeperId, username: 'keeper', passwordHash: 'scrypt$x$y$z', isOwner: false });
+    const when = new Date().toISOString();
+    recordMessageEdit(db.sqlite, { messageId: ingested.id, editorId: ghostId, content: 'x', editedAt: when, source: 'harmony' });
+    mergeUsers(db.sqlite, ghostId, keeperId);
+    check(
+      'a merge hands the edits to the surviving account',
+      listMessageEdits(db.sqlite, ingested.id).some((e) => e.content === 'x' && e.editor_id === keeperId),
+    );
+    deleteUser(db.sqlite, keeperId);
+    check(
+      'deleting an account leaves its edits with no editor',
+      listMessageEdits(db.sqlite, ingested.id).some((e) => e.content === 'x' && e.editor_id === null),
+    );
+  }
+
   transport.emitDelete({ id: 'd1', channelId: '111' });
   await sleep(50);
   check(
     'discord delete reaches harmony',
     messages.history(channelId, { limit: 50 }, userId).messages.every((m) => m.id !== ingested?.id),
   );
+  check('a soft-deleted message keeps its edit rows', listMessageEdits(db.sqlite, ingested.id).length === 2);
+  db.sqlite.prepare('DELETE FROM messages WHERE id = ?').run(ingested.id);
+  check('a hard delete takes the edit rows with it', listMessageEdits(db.sqlite, ingested.id).length === 0);
 
   // 7. Edits and deletes, Harmony -> Discord.
   const edited = messages.edit(auth, sent.id, 'edited in harmony');

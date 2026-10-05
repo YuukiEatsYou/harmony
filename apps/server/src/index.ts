@@ -28,6 +28,7 @@ import { createPinService } from './pins/service.ts';
 import { createSavedMessageService } from './saved/service.ts';
 import { createScheduledMessageService } from './scheduled/service.ts';
 import { createPollService } from './polls/service.ts';
+import { createEventService } from './events/service.ts';
 import { GatewayHub } from './realtime/hub.ts';
 import { createPruner } from './retention/pruner.ts';
 import { createBridgeService } from './bridge/service.ts';
@@ -37,6 +38,8 @@ import { createEmbedService } from './embeds/service.ts';
 import { createModerationService } from './moderation/service.ts';
 import { createMediaService } from './media/service.ts';
 import { createGifService } from './gifs/service.ts';
+import { createServerGifService } from './gifs/server-gifs.ts';
+import { createGifSourceService } from './gifs/sources.ts';
 import { registerErrorHandler } from './http/errors.ts';
 import { registerSecurityHeaders, warnAboutExposure } from './http/security.ts';
 import { registerWebClient, webClientIndex } from './http/webclient.ts';
@@ -58,12 +61,14 @@ import { registerPinRoutes } from './routes/pins.ts';
 import { registerSavedRoutes } from './routes/saved.ts';
 import { registerScheduledRoutes } from './routes/scheduled.ts';
 import { registerPollRoutes } from './routes/polls.ts';
+import { registerEventRoutes } from './routes/events.ts';
 import { registerAttachmentRoutes } from './routes/attachments.ts';
 import { registerEmbedRoutes } from './routes/embeds.ts';
 import { registerEmojiRoutes } from './routes/emojis.ts';
 import { registerStickerRoutes } from './routes/stickers.ts';
 import { registerMediaRoutes } from './routes/media.ts';
 import { registerGifRoutes } from './routes/gifs.ts';
+import { registerServerGifRoutes } from './routes/server-gifs.ts';
 import { registerUserRoutes } from './routes/users.ts';
 import { registerChannelSettingsRoutes } from './routes/channel-settings.ts';
 import { registerRetentionRoutes } from './routes/retention.ts';
@@ -117,11 +122,27 @@ const pollService = createPollService(db.sqlite, hub, messageService, {
   // A test hook: the smoke test shortens the wait for the expiry sweep.
   sweepMs: Number(process.env.HARMONY_POLL_SWEEP_MS) || undefined,
 });
+const eventService = createEventService(db.sqlite, hub, messageService, auditService, {
+  // Test hooks: the smoke test shortens the sweep, the reminder lead and the default length.
+  sweepMs: Number(process.env.HARMONY_EVENT_SWEEP_MS) || undefined,
+  reminderLeadMs: process.env.HARMONY_EVENT_REMINDER_LEAD_MS
+    ? Number(process.env.HARMONY_EVENT_REMINDER_LEAD_MS)
+    : undefined,
+  defaultDurationMs: Number(process.env.HARMONY_EVENT_DEFAULT_DURATION_MS) || undefined,
+});
 const moderationService = createModerationService({ sqlite: db.sqlite, hub, audit: auditService });
 const mediaService = createMediaService(db.sqlite, config);
+const gifSources = createGifSourceService(db.sqlite, config, { attachments: attachmentService });
 const gifService = createGifService(db.sqlite, config, {
   attachments: attachmentService,
   settings: settingsService,
+  sources: gifSources,
+});
+const serverGifService = createServerGifService(db.sqlite, {
+  attachments: attachmentService,
+  gifs: gifService,
+  audit: auditService,
+  hub,
 });
 
 const app = Fastify({ logger: { level: config.logLevel }, trustProxy: config.trustProxy });
@@ -147,6 +168,7 @@ const embedService = createEmbedService({
   settings: settingsService,
   hub,
   attachments: attachmentService,
+  sources: gifSources,
   renderMessage: (messageId) => messageService.byId(messageId),
   refreshDiscordAttachment: (url) => refreshDiscordAttachment?.(url) ?? Promise.resolve(null),
   log: (message, detail) => app.log.debug(detail ?? {}, message),
@@ -255,10 +277,12 @@ registerPinRoutes(app, { service: pinService });
 registerSavedRoutes(app, { service: savedService });
 registerScheduledRoutes(app, { service: scheduledService });
 registerPollRoutes(app, { service: pollService });
+registerEventRoutes(app, { service: eventService });
 registerAttachmentRoutes(app, { service: attachmentService, settings: settingsService });
 registerEmbedRoutes(app, { settings: settingsService, service: embedService });
 registerMediaRoutes(app, { service: mediaService, audit: auditService });
-registerGifRoutes(app, { service: gifService });
+registerGifRoutes(app, { service: gifService, sources: gifSources, settings: settingsService, audit: auditService });
+registerServerGifRoutes(app, { service: serverGifService });
 registerEmojiRoutes(app, { service: emojiService, importer: emojiImport, hub });
 registerStickerRoutes(app, { service: stickerService });
 registerUserRoutes(app, { db, users: userService, hub });
@@ -274,6 +298,7 @@ app.addHook('onClose', async () => {
   pruner.stop();
   scheduledService.stop();
   pollService.stop();
+  eventService.stop();
   await bridge.shutdown();
   db.close();
 });
@@ -304,6 +329,7 @@ try {
 // Pruning runs once at startup, then on the configured interval.
 pruner.start();
 pollService.start();
+eventService.start();
 
 // Deliver anything that came due while the server was down, then keep watching the clock.
 scheduledService.start();
