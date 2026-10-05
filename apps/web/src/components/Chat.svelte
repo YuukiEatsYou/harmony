@@ -11,16 +11,14 @@
   import { uploads } from '../lib/upload-queue.svelte';
   import ChannelSidebar from './ChannelSidebar.svelte';
   import Composer from './Composer.svelte';
-  import EventsButton from './EventsButton.svelte';
   import EventsPanel from './EventsPanel.svelte';
+  import HeaderActions from './HeaderActions.svelte';
   import Icon from './Icon.svelte';
   import KeyboardShortcuts from './KeyboardShortcuts.svelte';
   import MemberList from './MemberList.svelte';
   import MessageView from './MessageView.svelte';
   import PinsPanel from './PinsPanel.svelte';
-  import SavedButton from './SavedButton.svelte';
   import SavedPanel from './SavedPanel.svelte';
-  import ScheduledButton from './ScheduledButton.svelte';
   import ScheduledPanel from './ScheduledPanel.svelte';
   import UnreadBadge from './UnreadBadge.svelte';
 
@@ -61,7 +59,7 @@
     return 'Several people are typing…';
   });
 
-  /** The author shown in the due-reminder notice, matching SavedButton's. */
+  /** The author shown in the notice, matching the one HeaderActions draws beside a channel. */
   function reminderAuthor(message: Message): string {
     return message.author?.displayName ?? message.author?.username ?? 'Deleted user';
   }
@@ -148,18 +146,7 @@
         >
           <Icon name="inbox" size={20} />
         </button>
-        <button
-          type="button"
-          class="pins-open"
-          aria-label="Pinned messages"
-          title="Pinned messages"
-          onclick={() => ui.openPins()}
-        >
-          <Icon name="pin" size={20} />
-        </button>
-        <SavedButton />
-        <ScheduledButton />
-        <EventsButton />
+        <HeaderActions />
         <button
           type="button"
           class="search-open"

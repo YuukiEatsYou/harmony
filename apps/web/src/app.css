@@ -983,6 +983,121 @@ button.server-name:hover:not(:disabled) {
   box-shadow: 0 0 0 2px var(--h-bg);
 }
 
+/* The header's overflow menu: pinned, saved, scheduled and events behind one button. */
+.chat-header .header-actions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-header .header-menu-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  background: none;
+  color: var(--h-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  border-radius: var(--h-radius-sm);
+  transition: background var(--h-duration) var(--h-ease),
+              color var(--h-duration) var(--h-ease);
+}
+
+.chat-header .header-menu-toggle:hover,
+.chat-header .header-menu-toggle[aria-expanded='true'] {
+  background: var(--h-hover);
+  color: var(--h-text);
+  box-shadow: none;
+}
+
+/* Something wants attention: an accent dot, turned red for a failed scheduled send. */
+.chat-header .header-menu-toggle.has-waiting::after {
+  content: '';
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-accent);
+  box-shadow: 0 0 0 2px var(--h-bg);
+}
+
+.chat-header .header-menu-toggle.has-failed::after {
+  background: var(--h-error);
+}
+
+.header-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 12.5rem;
+  padding: 0.3rem;
+  border-radius: var(--h-radius);
+  background: var(--h-bg-overlay);
+  border: 1px solid var(--h-border-strong);
+  box-shadow: var(--h-shadow-lg);
+}
+
+.header-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.55rem;
+  width: 100%;
+  height: auto;
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--h-radius-sm);
+  background: none;
+  color: var(--h-text);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+}
+
+.header-menu button:hover:not(:disabled) {
+  background: var(--h-hover);
+  box-shadow: none;
+}
+
+.header-menu-icon {
+  display: inline-flex;
+  color: var(--h-text-muted);
+}
+
+.menu-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-error);
+}
+
+.menu-count {
+  margin-left: auto;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-accent);
+  color: var(--h-bg);
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Something failed to send: the count turns to the error color, like a mention dot. */
+.menu-count.failed {
+  background: var(--h-error);
+  color: #fff;
+}
+
 /* ---- Messages ---- */
 
 .messages {
@@ -1805,6 +1920,8 @@ button.mention:hover {
   display: flex;
   align-items: flex-end;
   gap: 0.5rem;
+  /* Anchors the + menu, which opens upward from the button. */
+  position: relative;
 }
 
 .composer form button {
@@ -1879,14 +1996,83 @@ button.mention:hover {
 }
 
 /*
- * The + button and its menu are the phone affordance: a wide screen shows the
- * four picker buttons directly, so these stay out of the layout there. The send
- * button is an icon at every width. See the max-width block at the end of this
- * file for the phone composer.
+ * The + button opens a menu of the less-used composer actions. On a wide screen
+ * it holds timestamp, attach and poll (emoji, gif and schedule send keep their
+ * own buttons); on a phone it gathers all of them and the direct buttons give
+ * their width back to the message field. See the max-width block at the end of
+ * this file for the phone differences.
  */
-.attach-more,
-.composer-actions,
+.attach-more {
+  display: inline-flex;
+}
+
 .composer-actions-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+}
+
+/* A button backdrop, so the shared hover/active styles are pinned off it. Kept
+   more specific than button:hover:not(:disabled), or the whole scrim tints accent. */
+.composer .composer-actions-backdrop:hover:not(:disabled),
+.composer .composer-actions-backdrop:active:not(:disabled) {
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.composer-actions {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 91;
+  min-width: 11rem;
+  padding: 0.35rem;
+  border-radius: var(--h-radius);
+  background: var(--h-bg-overlay);
+  border: 1px solid var(--h-border-strong);
+  box-shadow: var(--h-shadow-lg);
+}
+
+.composer .composer-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.6rem;
+  width: auto;
+  height: auto;
+  margin-bottom: 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: var(--h-radius-sm);
+  background: none;
+  color: var(--h-text);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+}
+
+.composer .composer-actions button:hover:not(:disabled) {
+  background: var(--h-hover);
+  box-shadow: none;
+}
+
+.composer-actions-icon {
+  display: inline-flex;
+  color: var(--h-text-muted);
+}
+
+/* Emoji, Gif and Schedule send have their own controls on a wide screen, so they are menu items only on a phone. */
+.composer .composer-actions .menu-mobile-only {
   display: none;
 }
 
@@ -4093,81 +4279,29 @@ button.roster-member:hover {
   /*
    * Phones get one + button that opens the picker menu, and an icon send button,
    * so the text field keeps most of the width instead of sharing it with four
-   * circles and the word Send.
+   * circles and the word Send. Emoji, Gif and Schedule send move into the menu
+   * here, where their direct controls are hidden.
    */
-  .composer form {
-    position: relative;
-  }
-
   .composer .attach:not(.attach-more) {
     display: none;
   }
 
-  .attach-more {
-    display: inline-flex;
+  .composer .composer-actions .menu-mobile-only {
+    display: flex;
   }
 
   .composer-actions-backdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    margin: 0;
-    padding: 0;
-    border: none;
-    border-radius: 0;
     background: rgb(0 0 0 / 35%);
-    box-shadow: none;
-    cursor: default;
     -webkit-backdrop-filter: blur(2px);
     backdrop-filter: blur(2px);
   }
 
   /* A button backdrop, so the shared hover/active styles are pinned off it. */
-  .composer-actions-backdrop:hover,
-  .composer-actions-backdrop:active {
+  .composer .composer-actions-backdrop:hover:not(:disabled),
+  .composer .composer-actions-backdrop:active:not(:disabled) {
     background: rgb(0 0 0 / 35%);
     box-shadow: none;
     transform: none;
-  }
-
-  .composer-actions {
-    display: flex;
-    flex-direction: column;
-    position: absolute;
-    left: 0;
-    bottom: calc(100% + 0.5rem);
-    z-index: 91;
-    min-width: 11rem;
-    padding: 0.35rem;
-    border-radius: var(--h-radius);
-    background: var(--h-bg-overlay);
-    border: 1px solid var(--h-border-strong);
-    box-shadow: var(--h-shadow-lg);
-  }
-
-  .composer .composer-actions button {
-    justify-content: flex-start;
-    gap: 0.6rem;
-    width: auto;
-    height: auto;
-    margin-bottom: 0;
-    padding: 0.6rem 0.7rem;
-    border-radius: var(--h-radius-sm);
-    background: none;
-    color: var(--h-text);
-    font-size: 0.9rem;
-    font-weight: 500;
-  }
-
-  .composer .composer-actions button:hover:not(:disabled) {
-    background: var(--h-hover);
-    box-shadow: none;
-  }
-
-  .composer-actions-icon {
-    display: inline-flex;
-    color: var(--h-text-muted);
   }
 
   /* 16px prevents iOS Safari from zooming on focus */
@@ -4236,24 +4370,6 @@ button.roster-member:hover {
 
 /* ---- Pinned messages ---- */
 
-.chat-header .pins-open {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.35rem 0.55rem;
-  background: none;
-  color: var(--h-text-muted);
-  line-height: 1;
-  border-radius: var(--h-radius-sm);
-  transition: background var(--h-duration) var(--h-ease),
-              color var(--h-duration) var(--h-ease);
-}
-
-.chat-header .pins-open:hover {
-  background: var(--h-hover);
-  color: var(--h-text);
-  box-shadow: none;
-}
-
 /* The marker beside a pinned message's time: small and quiet, like "(edited)". */
 .pin-marker {
   display: inline-flex;
@@ -4289,38 +4405,6 @@ button.roster-member:hover {
 }
 
 /* ---- Saved messages ---- */
-
-.chat-header .saved-open {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0.35rem 0.55rem;
-  background: none;
-  color: var(--h-text-muted);
-  line-height: 1;
-  border-radius: var(--h-radius-sm);
-  transition: background var(--h-duration) var(--h-ease),
-              color var(--h-duration) var(--h-ease);
-}
-
-.chat-header .saved-open:hover {
-  background: var(--h-hover);
-  color: var(--h-text);
-  box-shadow: none;
-}
-
-/* A reminder that is due gets the same dot as an unread mention on the inbox. */
-.chat-header .saved-open.has-due::after {
-  content: '';
-  position: absolute;
-  top: 0.15rem;
-  right: 0.15rem;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--h-radius-full);
-  background: var(--h-error);
-  box-shadow: 0 0 0 2px var(--h-bg);
-}
 
 /* The reminder choices drop down from the Remind button inside the message menu. */
 .remind-action {
@@ -5079,47 +5163,6 @@ select:focus {
   }
 }
 
-.chat-header .scheduled-open {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0.35rem 0.55rem;
-  background: none;
-  color: var(--h-text-muted);
-  line-height: 1;
-  border-radius: var(--h-radius-sm);
-  transition: background var(--h-duration) var(--h-ease),
-              color var(--h-duration) var(--h-ease);
-}
-
-.chat-header .scheduled-open:hover {
-  background: var(--h-hover);
-  color: var(--h-text);
-  box-shadow: none;
-}
-
-.scheduled-count {
-  position: absolute;
-  top: -0.05rem;
-  right: -0.05rem;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 4px;
-  border-radius: var(--h-radius-full);
-  background: var(--h-accent);
-  color: var(--h-bg);
-  font-size: 0.65rem;
-  font-weight: 700;
-  line-height: 15px;
-  text-align: center;
-}
-
-/* Something failed to send: the count turns to the error color, like a mention dot. */
-.chat-header .scheduled-open.has-failed .scheduled-count {
-  background: var(--h-error);
-  color: #fff;
-}
-
 .schedule-field {
   display: flex;
   flex-direction: column;
@@ -5217,37 +5260,6 @@ select:focus {
 }
 
 /* ---- Events ---- */
-
-.chat-header .events-open {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0.35rem 0.55rem;
-  background: none;
-  color: var(--h-text-muted);
-  line-height: 1;
-  border-radius: var(--h-radius-sm);
-  transition: background var(--h-duration) var(--h-ease),
-              color var(--h-duration) var(--h-ease);
-}
-
-.chat-header .events-open:hover {
-  background: var(--h-hover);
-  color: var(--h-text);
-  box-shadow: none;
-}
-
-/* Something is happening right now: a dot in the success color, like a presence dot. */
-.chat-header .events-open.has-live::after {
-  content: '';
-  position: absolute;
-  top: 0.2rem;
-  right: 0.3rem;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--h-radius-full);
-  background: var(--h-ok);
-}
 
 .events-panel .events-head-actions {
   display: flex;

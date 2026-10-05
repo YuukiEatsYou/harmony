@@ -13,7 +13,6 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { drafts, type Draft } from '../lib/drafts.svelte';
-  import { draftPreview } from '../lib/composer-preview';
   import { emojis } from '../lib/emojis.svelte';
   import { emojiUsage } from '../lib/emoji-usage.svelte';
   import { mediaFilesFrom } from '../lib/files';
@@ -25,7 +24,6 @@
   import { parseTimeExpression, timestampChoices, type ParsedMoment } from '../lib/time-input';
   import { loadUnicodeEmoji, type UnicodeEmoji } from '../lib/unicode-emoji';
   import { uploads } from '../lib/upload-queue.svelte';
-  import ComposerPreview from './ComposerPreview.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import GifPicker from './GifPicker.svelte';
   import SchedulePicker from './SchedulePicker.svelte';
@@ -56,10 +54,6 @@
     session.user && chat.activeChannelId ? `${session.user.id}:${chat.activeChannelId}` : null,
   );
   const value = $derived(drafts.get(draftKey).text);
-  /** The draft with its custom emoji drawn, or null while there is nothing to show. */
-  const preview = $derived(
-    draftPreview(value, emojis.lookup, (name) => members.byUsername.get(name.toLowerCase()), chat.channels),
-  );
   const pending = $derived(drafts.get(draftKey).attachments);
 
   let busy = $state(false);
@@ -967,10 +961,6 @@
     </ul>
   {/if}
 
-  {#if preview}
-    <ComposerPreview blocks={preview} />
-  {/if}
-
   <form onsubmit={onSubmit}>
     <button
       type="button"
@@ -989,16 +979,16 @@
         onclick={() => (showActions = false)}
       ></button>
       <div class="composer-actions" role="menu">
-        <button type="button" role="menuitem" onclick={toggleEmoji}>
+        <button type="button" role="menuitem" class="menu-mobile-only" onclick={toggleEmoji}>
           <span class="composer-actions-icon"><Icon name="smile" size={18} /></span> Emoji
         </button>
-        <button type="button" role="menuitem" onclick={toggleGifs}>
+        <button type="button" role="menuitem" class="menu-mobile-only" onclick={toggleGifs}>
           <span class="composer-actions-icon"><Icon name="gif" size={18} /></span> Gif
         </button>
         <button type="button" role="menuitem" disabled={timeoutUntil !== null} onclick={toggleTimes}>
           <span class="composer-actions-icon"><Icon name="clock" size={18} /></span> Timestamp
         </button>
-        <button type="button" role="menuitem" disabled={timeoutUntil !== null} onclick={toggleSchedule}>
+        <button type="button" role="menuitem" class="menu-mobile-only" disabled={timeoutUntil !== null} onclick={toggleSchedule}>
           <span class="composer-actions-icon"><Icon name="clock" size={18} /></span> Schedule send
         </button>
         <button type="button" role="menuitem" disabled={uploading || timeoutUntil !== null} onclick={pickFiles}>
@@ -1017,36 +1007,6 @@
       onclick={toggleEmoji}><Icon name="smile" size={20} /></button
     >
     <button type="button" class="attach attach-gif" title="Add gif" aria-label="Add gif" onclick={toggleGifs}>GIF</button>
-    <button
-      type="button"
-      class="attach timestamp-trigger"
-      title="Add timestamp"
-      aria-label="Add timestamp"
-      aria-expanded={showTimes}
-      aria-haspopup="dialog"
-      disabled={timeoutUntil !== null}
-      onclick={toggleTimes}><Icon name="clock" size={20} /></button
-    >
-    <button
-      type="button"
-      class="attach"
-      title="Attach image"
-      aria-label="Attach image"
-      disabled={uploading || timeoutUntil !== null}
-      onclick={pickFiles}
-    >
-      {#if uploading}…{:else}<Icon name="paperclip" size={20} />{/if}
-    </button>
-    <button
-      type="button"
-      class="attach poll-trigger"
-      title="Create poll"
-      aria-label="Create poll"
-      aria-expanded={showPoll}
-      aria-haspopup="dialog"
-      disabled={timeoutUntil !== null}
-      onclick={togglePoll}><Icon name="poll" size={20} /></button
-    >
     <input class="file-input" type="file" accept={acceptAttribute} multiple bind:this={fileInput} onchange={onFiles} />
     <!--
       Slowmode only holds back sending (see `send`): the field stays enabled so
