@@ -69,6 +69,22 @@ Do not wait to be asked, and do not leave finished work uncommitted.
 - Commit one coherent idea at a time. Do not bundle unrelated work just because
   it is convenient.
 
+## Branches and merging: never work on main
+
+Main is what people pull to install or update, so it has to be a state someone
+has actually run. The recent PR series caused trouble by landing on it directly,
+so from now on main is treated as a release branch only.
+
+- Never commit to main directly. Start every piece of work on a new branch off
+  main, named after the version it is expected to ship as: `v<version>`, for
+  example `v1.25.0`. Do the commits and the version bump on that branch.
+- Only merge that branch into main once the owner has tested and verified the
+  work on it. You may do the merge yourself once the owner says it is good;
+  pushing stays theirs (see above). If the planned version moves while you are
+  still on the branch, the branch name does not have to follow it.
+- A change that ships no code and no user-visible behavior, such as an edit to
+  this file, is the one exception and may go straight to main.
+
 ## Keep the docs current
 
 The documentation is part of the work, not an afterthought. As the project
