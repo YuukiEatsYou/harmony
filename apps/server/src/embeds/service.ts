@@ -2,6 +2,9 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   ALLOWED_IMAGE_TYPES,
   GatewayEvent,
+  Permission,
+  hasPermission,
+  isGifLinkHost,
   listEmbeddableUrls,
   type ImageContentType,
   type LinkEmbed,
@@ -9,10 +12,14 @@ import {
 } from '@harmony/shared';
 import type { AttachmentService } from '../attachments/service.ts';
 import { deleteAttachment, listLinkedAttachments, type AttachmentRow } from '../db/attachments.ts';
-import { setMessageEmbed } from '../db/messages.ts';
+import { canAccessChannel, channelAccessFor } from '../access/service.ts';
+import type { AuthContext } from '../auth/service.ts';
+import { findMessage, parseMessageEmbed, setMessageEmbed, setMessageEmbedsHidden } from '../db/messages.ts';
+import { HttpError } from '../http/errors.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import { resolvesToPublicHost } from './guard.ts';
+import { verifyLinkedGif, type VerifyLinkedGif } from './linked-gif.ts';
 import { readCappedBody } from './media.ts';
 import { parseEmbedMetadata } from './metadata.ts';
 import { fetchGiphyMedia, fetchTweetEmbed, fetchYouTubeEmbed, isDiscordAttachment, isGifPage, isGiphyPage, tweetStatusId, youtubeVideoId } from './providers.ts';
@@ -32,6 +39,12 @@ export interface EmbedService {
    * Best effort and asynchronous: a failure just leaves no preview.
    */
   resolve(messageId: string, content: string): void;
+  /**
+   * Removes every embed of a message (the card and any picture fetched from its
+   * link) and keeps them from coming back, edits included. The author or anyone
+   * with Manage Messages may do it. Returns the message as clients now see it.
+   */
+  suppress(auth: AuthContext, messageId: string): Promise<Message>;
 }
 
 export interface EmbedServiceDeps {
@@ -47,6 +60,8 @@ export interface EmbedServiceDeps {
    */
   refreshDiscordAttachment?: (url: string) => Promise<string | null>;
   log?: (message: string, detail?: unknown) => void;
+  /** Replaces the check made before a gif is linked; for tests, which cannot reach a gif host. */
+  verifyLinkedGif?: VerifyLinkedGif;
 }
 
 /**
@@ -191,6 +206,8 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
 
   async function resolveNow(messageId: string, content: string): Promise<void> {
     if (!deps.settings.get().embedsEnabled) return;
+    // Somebody removed this message's embeds by hand; that choice outlives edits.
+    if (findMessage(deps.sqlite, messageId)?.embeds_hidden) return;
 
     const url = listEmbeddableUrls(content)[0];
     const linked = listLinkedAttachments(deps.sqlite, messageId);
@@ -214,11 +231,77 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
       return;
     }
 
+    // A gif on a known gif host is pointed at instead of copied, when the
+    // instance is set to link. Anything that does not check out falls through
+    // to the ordinary path, which stores it.
+    if (deps.settings.get().gifStorage === 'link' && (await linkGif(messageId, url))) return;
+
     const userAgent = deps.settings.get().previewUserAgent ?? USER_AGENT;
     await applyOutcome(messageId, await resolveOutcome(url, userAgent));
   }
 
+  /**
+   * Records a gif link as the message's embed, without fetching the bytes into
+   * storage. Only allowlisted gif hosts get this far (the check repeats the
+   * allowlist), and only after `verifyLinkedGif` has looked at the response.
+   * Returns whether the message now carries the linked gif.
+   */
+  async function linkGif(messageId: string, url: string): Promise<boolean> {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch {
+      return false;
+    }
+    if (!isGifLinkHost(target)) return false;
+
+    // Already linked to this address, e.g. by the update Discord sends once it
+    // has unfurled the same link.
+    const current = parseMessageEmbed(findMessage(deps.sqlite, messageId)?.embed ?? null);
+    if (current?.gif && current.url === url) return true;
+
+    const settings = deps.settings.get();
+    const gif = await (deps.verifyLinkedGif ?? verifyLinkedGif)(url, {
+      maxImageBytes: settings.maxImageBytes,
+      maxVideoBytes: settings.maxVideoBytes,
+      userAgent: settings.previewUserAgent ?? USER_AGENT,
+    });
+    if (!gif) return false;
+
+    log('linked a gif instead of storing it', { messageId, url });
+    await applyOutcome(messageId, {
+      kind: 'embed',
+      embed: { url, title: null, description: null, siteName: target.hostname, imageUrl: null, player: null, gif },
+    });
+    return true;
+  }
+
   return {
+    async suppress(auth, messageId) {
+      const row = findMessage(deps.sqlite, messageId);
+      if (!row || row.deleted_at) {
+        throw new HttpError(404, 'message_not_found', 'That message does not exist.');
+      }
+      if (!canAccessChannel(deps.sqlite, channelAccessFor(deps.sqlite, auth.user.id), row.channel_id)) {
+        throw new HttpError(403, 'channel_forbidden', 'You do not have access to that channel.');
+      }
+      if (row.author_id !== auth.user.id && !hasPermission(auth.permissions, Permission.ManageMessages)) {
+        throw new HttpError(403, 'forbidden', 'Only the author or a moderator can remove embeds.');
+      }
+
+      // Flag first so no later resolution acts, then let one already running
+      // finish so it cannot put the embed back after it is cleared.
+      setMessageEmbedsHidden(deps.sqlite, messageId);
+      await (queues.get(messageId) ?? Promise.resolve());
+      dropLinkedImages(messageId);
+      setMessageEmbed(deps.sqlite, messageId, null);
+
+      const message = deps.renderMessage(messageId);
+      if (!message) throw new HttpError(404, 'message_not_found', 'That message does not exist.');
+      broadcast(messageId);
+      return message;
+    },
+
     resolve(messageId, content) {
       const run = (queues.get(messageId) ?? Promise.resolve())
         .then(() => resolveNow(messageId, content))

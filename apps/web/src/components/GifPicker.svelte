@@ -6,7 +6,14 @@
   import { meta } from '../lib/meta.svelte';
   import Icon from './Icon.svelte';
 
-  let { onpick }: { onpick: (attachment: Attachment) => void } = $props();
+  let {
+    onpick,
+    onlink,
+  }: {
+    onpick: (attachment: Attachment) => void;
+    /** Receives a checked gif address to send as text, when the instance links gifs instead of storing them. */
+    onlink?: (url: string) => void;
+  } = $props();
 
   /** How long typing settles before a search is asked for. */
   const SEARCH_DEBOUNCE_MS = 250;
@@ -110,7 +117,14 @@
     busy = tile.key;
     error = null;
     try {
-      onpick(await gifs.pick(tile.ref));
+      // In link mode a hosted gif is not downloaded: the server checks its address
+      // and the member sends that as the message. Saved and local gifs are already
+      // stored here and still go in as attachments.
+      if ('url' in tile.ref && onlink && meta.data?.gifStorage === 'link') {
+        onlink(await gifs.link(tile.ref.url));
+      } else {
+        onpick(await gifs.pick(tile.ref));
+      }
     } catch (cause) {
       error = cause instanceof ApiError ? cause.message : String(cause);
     } finally {

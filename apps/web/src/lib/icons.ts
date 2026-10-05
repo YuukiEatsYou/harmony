@@ -26,4 +26,5 @@ export type IconName =
   | 'sword'
   | 'shield'
   | 'chevron-down'
-  | 'more';
+  | 'more'
+  | 'poll';

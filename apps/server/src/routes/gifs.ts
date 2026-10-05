@@ -1,6 +1,6 @@
 import { createReadStream, statSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
-import { Permission, addGifFavoriteSchema, gifQuerySchema, gifSearchQuerySchema, pickGifSchema, type GifFavoriteListResponse, type GifListResponse, type GifSearchResponse } from '@harmony/shared';
+import { Permission, addGifFavoriteSchema, gifQuerySchema, gifSearchQuerySchema, linkGifSchema, pickGifSchema, type GifFavoriteListResponse, type GifListResponse, type GifSearchResponse } from '@harmony/shared';
 import { requirePermission } from '../auth/plugin.ts';
 import type { GifService } from '../gifs/service.ts';
 import { HttpError } from '../http/errors.ts';
@@ -69,6 +69,13 @@ export function registerGifRoutes(app: FastifyInstance, deps: GifRouteDeps): voi
       .header('Content-Length', String(statSync(path).size))
       .header('ETag', `"${favorite.hash}"`);
     return reply.send(createReadStream(path));
+  });
+
+  /** Checks a gif address for linking; only meaningful while the instance is set to link. */
+  app.post('/api/v1/gifs/link', async (request) => {
+    const auth = requirePermission(request, Permission.AttachFiles);
+    const input = parseBody(linkGifSchema, request.body);
+    return deps.service.link(auth, input.url);
   });
 
   app.post('/api/v1/gifs/pick', async (request) => {

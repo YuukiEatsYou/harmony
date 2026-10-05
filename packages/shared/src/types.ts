@@ -1,3 +1,6 @@
+import type { LinkedGif } from './gif-hosts.ts';
+import type { Poll } from './polls.ts';
+
 export type SnowflakeId = string;
 export type IsoTimestamp = string;
 export type ChannelType = 'text';
@@ -156,6 +159,12 @@ export interface LinkEmbed {
   imageUrl: string | null;
   /** An inline player to offer, when the link is one we can play ourselves. */
   player: EmbedPlayer | null;
+  /**
+   * Set when the link is a gif the instance chose to link to rather than store
+   * (gif storage mode "link"): `url` is then the gif itself, on an allowlisted
+   * gif host, and clients draw it directly from there.
+   */
+  gif?: LinkedGif | null;
 }
 
 /**
@@ -258,6 +267,8 @@ export interface Message {
    * clients keep the value they already hold.
    */
   saved: boolean;
+  /** The poll this message carries, or null for an ordinary message. */
+  poll: Poll | null;
 }
 
 /**

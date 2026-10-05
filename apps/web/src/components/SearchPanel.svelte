@@ -4,6 +4,18 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { members } from '../lib/members.svelte';
+  import {
+    activeToken,
+    applySuggestion,
+    buildSearchParams,
+    filterLabel,
+    mergeFilters,
+    parseSearchInput,
+    suggestFor,
+    type SearchFilter,
+    type Suggestion,
+  } from '../lib/search-query';
+  import { tick } from 'svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -14,6 +26,11 @@
   let term = $state('');
   let channelFilter = $state('');
   let authorFilter = $state('');
+  /** Filters typed as from:alice and finished, shown as chips above the results. */
+  let chips = $state<SearchFilter[]>([]);
+  let caret = $state(0);
+  let highlighted = $state(-1);
+  let listDismissed = $state(false);
   let results = $state<Message[]>([]);
   let searched = $state(false);
   let busy = $state(false);
@@ -23,9 +40,25 @@
   let debounce: ReturnType<typeof setTimeout> | null = null;
 
   const hasMore = $derived(results.length >= pageSize);
+  /**
+   * The text and filters as they would be searched: the chips, plus any token
+   * typed in the box (even an unfinished one, which is only taken once the
+   * search actually runs).
+   */
+  const typed = $derived(parseSearchInput(term, true));
+  const searchText = $derived(typed.text);
+  const request = $derived(buildSearchParams(typed.text, mergeFilters(chips, typed.filters)));
   /** A term on its own, or a filter on its own, is enough to search. */
-  const canSearch = $derived(term.trim().length > 0 || channelFilter !== '' || authorFilter !== '');
-  const filteringOnly = $derived(term.trim().length === 0 && canSearch);
+  const canSearch = $derived(request.searchable || channelFilter !== '' || authorFilter !== '');
+  const filteringOnly = $derived(searchText.length === 0 && canSearch);
+
+  const active = $derived(activeToken(term, caret));
+  const suggestions = $derived(
+    active && !listDismissed
+      ? suggestFor(active, { members: members.list, channels: chat.channels })
+      : [],
+  );
+  const listOpen = $derived(suggestions.length > 0);
 
   function fail(cause: unknown): void {
     error = cause instanceof ApiError ? cause.message : String(cause);
@@ -45,7 +78,7 @@
    * term case-insensitively. Svelte escapes the text, so this is safe.
    */
   function highlightParts(content: string): Array<{ text: string; match: boolean }> {
-    const needle = term.trim().toLowerCase();
+    const needle = searchText.toLowerCase();
     if (needle.length === 0) return [{ text: content, match: false }];
 
     const parts: Array<{ text: string; match: boolean }> = [];
@@ -63,9 +96,8 @@
   }
 
   function buildQuery(before?: Message): string {
-    const query = new URLSearchParams({ limit: String(pageSize) });
-    const text = term.trim();
-    if (text.length > 0) query.set('q', text);
+    const query = new URLSearchParams(request.params);
+    query.set('limit', String(pageSize));
     if (channelFilter) query.set('channelId', channelFilter);
     if (authorFilter) query.set('authorId', authorFilter);
     if (before) {
@@ -76,9 +108,16 @@
   }
 
   async function search(): Promise<void> {
+    if (request.problems.length > 0) {
+      results = [];
+      searched = false;
+      error = request.problems[0] ?? null;
+      return;
+    }
     if (!canSearch) {
       results = [];
       searched = false;
+      error = null;
       return;
     }
 
@@ -89,6 +128,8 @@
       results = data.messages;
       searched = true;
     } catch (cause) {
+      results = [];
+      searched = false;
       fail(cause);
     } finally {
       busy = false;
@@ -112,9 +153,70 @@
     }
   }
 
+  /**
+   * Moves finished filter tokens (from:alice followed by a space) out of the box
+   * and into chips. A token still being typed is left alone.
+   */
+  function takeFilters(final = false): void {
+    const parsed = parseSearchInput(term, final);
+    if (parsed.filters.length === 0) return;
+    chips = mergeFilters(chips, parsed.filters);
+    term = parsed.text.length > 0 && !final ? `${parsed.text} ` : parsed.text;
+    caret = term.length;
+  }
+
+  function syncCaret(): void {
+    caret = searchInput?.selectionStart ?? term.length;
+  }
+
+  function removeChip(filter: SearchFilter): void {
+    chips = chips.filter((chip) => chip !== filter);
+    onFilter();
+    searchInput?.focus();
+  }
+
+  async function choose(suggestion: Suggestion): Promise<void> {
+    if (!active) return;
+    const applied = applySuggestion(term, active, suggestion);
+    term = applied.text;
+    highlighted = -1;
+    await tick();
+    searchInput?.setSelectionRange(applied.caret, applied.caret);
+    caret = applied.caret;
+    takeFilters();
+    onFilter();
+  }
+
+  /** Arrow keys walk the suggestions, Tab or Enter take one, Escape puts them away. */
+  function onKeydown(event: KeyboardEvent): void {
+    if (!listOpen) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      highlighted = (highlighted + 1) % suggestions.length;
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      highlighted = highlighted <= 0 ? suggestions.length - 1 : highlighted - 1;
+    } else if (event.key === 'Tab' || (event.key === 'Enter' && highlighted >= 0)) {
+      event.preventDefault();
+      const picked = suggestions[highlighted >= 0 ? highlighted : 0];
+      if (picked) void choose(picked);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      listDismissed = true;
+    }
+  }
+
   /** Restarts the settle timer, so a search runs once typing pauses. */
   function onInput(): void {
+    syncCaret();
+    listDismissed = false;
+    highlighted = -1;
+    takeFilters();
     if (debounce) clearTimeout(debounce);
+    // While a suggestion list is up the token under the caret is unfinished, so
+    // wait for it rather than searching for half a name.
+    if (listOpen) return;
     debounce = setTimeout(() => {
       debounce = null;
       void search();
@@ -124,6 +226,7 @@
   /** Filters apply at once rather than waiting for more typing. */
   function onFilter(): void {
     if (debounce) clearTimeout(debounce);
+    takeFilters(true);
     void search();
   }
 
@@ -146,16 +249,59 @@
       </div>
 
       <form class="inline" onsubmit={(event) => { event.preventDefault(); onFilter(); }}>
-        <input
-          bind:this={searchInput}
-          bind:value={term}
-          oninput={onInput}
-          placeholder="Search this server…"
-          aria-label="Search messages"
-          autocomplete="off"
-        />
+        <div class="search-box">
+          <input
+            bind:this={searchInput}
+            bind:value={term}
+            oninput={onInput}
+            onkeydown={onKeydown}
+            onkeyup={syncCaret}
+            onclick={syncCaret}
+            placeholder="Search, or try from: in: has: before: after:"
+            aria-label="Search messages"
+            autocomplete="off"
+            role="combobox"
+            aria-expanded={listOpen}
+            aria-controls="search-suggestions"
+            aria-autocomplete="list"
+            aria-activedescendant={highlighted >= 0 ? `search-suggestion-${highlighted}` : undefined}
+          />
+          {#if listOpen}
+            <ul class="autocomplete search-suggestions" id="search-suggestions" role="listbox" aria-label="Filter suggestions">
+              {#each suggestions as suggestion, index (suggestion.value)}
+                <li role="presentation">
+                  <button
+                    type="button"
+                    id={`search-suggestion-${index}`}
+                    class="autocomplete-item"
+                    class:active={index === highlighted}
+                    role="option"
+                    aria-selected={index === highlighted}
+                    tabindex="-1"
+                    onmousedown={(event) => event.preventDefault()}
+                    onclick={() => choose(suggestion)}
+                  >
+                    <span class="autocomplete-name">{suggestion.label}</span>
+                    {#if suggestion.detail}<span class="autocomplete-detail">{suggestion.detail}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
         <button type="submit" disabled={busy}>Search</button>
       </form>
+
+      {#if chips.length > 0}
+        <ul class="search-chips" aria-label="Active filters">
+          {#each chips as chip (`${chip.key}:${chip.value}`)}
+            <li class="search-chip">
+              <span>{filterLabel(chip)}</span>
+              <button type="button" aria-label={`Remove filter ${filterLabel(chip)}`} onclick={() => removeChip(chip)}>×</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
       <div class="inline">
         <select bind:value={channelFilter} onchange={onFilter} title="Which channel to search">
@@ -176,7 +322,12 @@
       {#if error}<p class="form-error">{error}</p>{/if}
 
       {#if !canSearch}
-        <p class="muted">Search across every channel you can see, or pick a channel or member on its own.</p>
+        <p class="muted">
+          Search across every channel you can see. Narrow it with <code>from:name</code>,
+          <code>mentions:name</code>, <code>in:channel</code>, <code>has:image</code> (or video, gif, file, link, embed,
+          sticker, pin), <code>before:</code>, <code>after:</code> or <code>on:</code> a date like 2024-05-01, today or
+          yesterday. Quote names with spaces: <code>from:"Some Name"</code>.
+        </p>
       {:else if busy && results.length === 0}
         <p class="muted">Searching…</p>
       {:else if !searched}
@@ -186,7 +337,7 @@
           {#if filteringOnly}
             Nothing found for that filter.
           {:else}
-            No messages match “{term.trim()}”.
+            No messages match “{searchText}”.
           {/if}
         </p>
       {:else}

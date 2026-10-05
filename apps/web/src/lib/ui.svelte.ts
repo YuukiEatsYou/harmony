@@ -6,6 +6,7 @@ class UiState {
   inboxOpen = $state(false);
   pinsOpen = $state(false);
   savedOpen = $state(false);
+  scheduledOpen = $state(false);
   /** Off-canvas navigation, used on narrow screens. */
   sidebarOpen = $state(false);
   rosterOpen = $state(false);
@@ -60,6 +61,16 @@ class UiState {
     this.savedOpen = false;
   }
 
+  openScheduled(): void {
+    this.closeDrawers();
+    this.#closePanels();
+    this.scheduledOpen = true;
+  }
+
+  closeScheduled(): void {
+    this.scheduledOpen = false;
+  }
+
   openAdmin(): void {
     this.closeDrawers();
     this.#closePanels();
@@ -93,6 +104,7 @@ class UiState {
     this.inboxOpen = false;
     this.pinsOpen = false;
     this.savedOpen = false;
+    this.scheduledOpen = false;
   }
 
   /** Only one drawer is ever open, so they never overlap. */

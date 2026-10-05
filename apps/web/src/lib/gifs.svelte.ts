@@ -3,6 +3,7 @@ import type {
   GifFavorite,
   GifFavoriteListResponse,
   GifItem,
+  GifLinkResponse,
   GifListResponse,
   GifSearchResponse,
   GifSearchResult,
@@ -91,6 +92,11 @@ class GifState {
     await api(`/gifs/favorites/${favoriteId}`, { method: 'DELETE' });
     this.favorites = this.favorites.filter((entry) => entry.id !== favoriteId);
     this.local = this.local.map((item) => (item.favoriteId === favoriteId ? { ...item, favoriteId: null } : item));
+  }
+
+  /** Has the server check a hosted gif's address for linking; returns the address to send. */
+  async link(url: string): Promise<string> {
+    return (await api<GifLinkResponse>('/gifs/link', { method: 'POST', body: JSON.stringify({ url }) })).url;
   }
 
   /** Takes a gif into the message being written; returns the pending attachment. */

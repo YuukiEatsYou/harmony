@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { Permission } from '@harmony/shared';
 import { requirePermission } from '../auth/plugin.ts';
 import { fetchPublicImage } from '../embeds/media.ts';
+import type { EmbedService } from '../embeds/service.ts';
 import { HttpError } from '../http/errors.ts';
 import type { SettingsService } from '../settings/service.ts';
 
@@ -13,7 +14,20 @@ const DEFAULT_USER_AGENT = 'Harmony/1.0 link-preview';
  * one straight from the third party, so the viewer's address stays private and
  * an http-only image still shows on an https page.
  */
-export function registerEmbedRoutes(app: FastifyInstance, deps: { settings: SettingsService }): void {
+export function registerEmbedRoutes(
+  app: FastifyInstance,
+  deps: { settings: SettingsService; service: EmbedService },
+): void {
+  /**
+   * Removes all embeds of a message, for good. The author or a moderator
+   * (Manage Messages) may; there is deliberately no way back short of resending.
+   */
+  app.delete('/api/v1/messages/:id/embeds', async (request) => {
+    const auth = requirePermission(request, Permission.ViewChannels);
+    const { id } = request.params as { id: string };
+    return deps.service.suppress(auth, id);
+  });
+
   app.get('/api/v1/embeds/media', async (request, reply) => {
     requirePermission(request, Permission.ViewChannels);
 

@@ -30,6 +30,7 @@
   /** Written only: the server never sends a saved key back, so this starts blank. */
   let klipyKey = $state('');
   let klipyConfigured = $state(false);
+  let gifStorage = $state<'store' | 'link'>('store');
   let iconPaddingAuto = $state(true);
   let iconPadding = $state(String(DEFAULT_ICON_PADDING));
   let iconBackgroundAuto = $state(true);
@@ -78,6 +79,7 @@
       maxVideoMb = toMb(settings.maxVideoBytes);
       previewUserAgent = settings.previewUserAgent ?? '';
       klipyConfigured = settings.klipyConfigured;
+      gifStorage = settings.gifStorage;
       applyIcon(settings.icon);
       channels = channelData.channels;
     } catch (cause) {
@@ -206,6 +208,7 @@
           background: iconBackgroundAuto ? null : iconBackground,
         },
         previewUserAgent: previewUserAgent.trim(),
+        gifStorage,
       };
       // Blank leaves a size unchanged rather than clearing it.
       const imageBytes = toBytes(maxImageMb);
@@ -230,11 +233,19 @@
       maxVideoMb = toMb(updated.maxVideoBytes);
       previewUserAgent = updated.previewUserAgent ?? '';
       klipyConfigured = updated.klipyConfigured;
+      gifStorage = updated.gifStorage;
       klipyKey = '';
       // Remember the saved palette, and keep the public meta in step, so the
       // restore above falls back to what is actually stored.
       setSavedTheme(updated.theme);
-      if (meta.data) meta.data = { ...meta.data, theme: updated.theme, klipyConfigured: updated.klipyConfigured };
+      if (meta.data) {
+        meta.data = {
+          ...meta.data,
+          theme: updated.theme,
+          klipyConfigured: updated.klipyConfigured,
+          gifStorage: updated.gifStorage,
+        };
+      }
       message = 'Settings saved.';
     } catch (cause) {
       error = cause instanceof ApiError ? cause.message : String(cause);
@@ -411,6 +422,25 @@
           <button type="button" class="danger" onclick={clearKlipyKey} disabled={busy}>Clear key</button>
         </div>
       {/if}
+
+      <label>
+        Gif storage
+        <select bind:value={gifStorage}>
+          <option value="store">Store a copy on this server (recommended)</option>
+          <option value="link">Link to the hosted service</option>
+        </select>
+      </label>
+      <p class="muted">
+        <strong>Store a copy</strong> downloads each gif that is sent and serves it from this server. Members'
+        addresses stay private, and a gif survives its source disappearing, at the cost of disk space.
+        <strong>Link</strong> sends no bytes through this server for gifs from Klipy, Tenor's media hosts and
+        Giphy: the message just points at the gif and everyone's browser loads it from that service.
+        <strong>That service then sees the IP address of everyone who views the gif</strong>, and the gif
+        disappears if the service removes it. Only those known hosts are ever linked (https only, checked
+        before each message is accepted); every other gif, and every Discord attachment, is still stored.
+        Saving a gif to favorites always keeps a copy here. People with the page already open should reload
+        after you change this.
+      </p>
     </fieldset>
 
     {#if error}<p class="form-error">{error}</p>{/if}

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { loadEnvFile } from 'node:process';
 import { resolve } from 'node:path';
-import { GATEWAY_HEARTBEAT_MS, HARMONY_NAME } from '@harmony/shared';
+import { GATEWAY_HEARTBEAT_MS, HARMONY_NAME, SCHEDULED_MIN_LEAD_MS } from '@harmony/shared';
 import { DEFAULT_CSP } from './http/security.ts';
 
 export interface Config {
@@ -33,6 +33,10 @@ export interface Config {
    * changing outside tests, which shorten it to see a silent socket closed.
    */
   gatewayHeartbeatMs: number;
+  /** How often the scheduler looks for scheduled messages that have come due, in milliseconds. */
+  scheduledTickMs: number;
+  /** The shortest wait accepted for a scheduled message, in milliseconds. Tests shorten it. */
+  scheduledMinLeadMs: number;
   /** `Content-Security-Policy` sent to browsers, or null to leave the header off. */
   csp: string | null;
 }
@@ -96,6 +100,8 @@ export function loadConfig(): Config {
     pruneIntervalMinutes: readNumber(process.env.HARMONY_PRUNE_INTERVAL_MINUTES, 60),
     // A floor keeps a typo from turning every connection into a heartbeat storm.
     gatewayHeartbeatMs: Math.max(250, readNumber(process.env.HARMONY_GATEWAY_HEARTBEAT_MS, GATEWAY_HEARTBEAT_MS)),
+    scheduledTickMs: Math.max(100, readNumber(process.env.HARMONY_SCHEDULED_TICK_MS, 10_000)),
+    scheduledMinLeadMs: Math.max(0, readNumber(process.env.HARMONY_SCHEDULED_MIN_LEAD_MS, SCHEDULED_MIN_LEAD_MS)),
     csp: readCsp(process.env.HARMONY_CSP),
   };
 }

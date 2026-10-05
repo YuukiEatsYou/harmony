@@ -3,6 +3,7 @@ import { LIMITS, MAX_ICON_PADDING, MAX_UPLOAD_CEILING_BYTES } from './constants.
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
 import { MAX_MUTE_SECONDS, NOTIFICATION_LEVELS } from './channel-settings.ts';
+import { GIF_STORAGE_MODES, type GifStorageMode } from './gif-hosts.ts';
 import { HEX_COLOR_PATTERN } from './theme.ts';
 
 export const usernameSchema = z
@@ -238,6 +239,8 @@ export const updateSettingsSchema = z.object({
   setupCompleted: z.boolean().optional(),
   /** An empty string clears it, and the picker loses its hosted tab. */
   klipyApiKey: z.string().trim().max(200).nullable().optional(),
+  /** "store" keeps a copy of each gif here; "link" points at allowlisted gif hosts. */
+  gifStorage: z.enum(GIF_STORAGE_MODES as [GifStorageMode, ...GifStorageMode[]]).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
@@ -294,6 +297,10 @@ export const pickGifSchema = z.union([
   z.object({ url: z.string().min(1).max(2048) }),
 ]);
 export type PickGifInput = z.infer<typeof pickGifSchema>;
+
+/** A gif address to be checked and linked rather than stored. */
+export const linkGifSchema = z.object({ url: z.string().min(1).max(2048) });
+export type LinkGifInput = z.infer<typeof linkGifSchema>;
 
 /** The picker's hosted tab: a search term and a page size. */
 export const gifSearchQuerySchema = z.object({
@@ -429,8 +436,23 @@ export const adminUpdateUserSchema = z
   );
 export type AdminUpdateUserInput = z.infer<typeof adminUpdateUserSchema>;
 
+/** What `has:` can ask a message to carry. `pin` means the message is pinned. */
+export const SEARCH_HAS_VALUES = ['image', 'video', 'gif', 'file', 'link', 'embed', 'sticker', 'pin'] as const;
+export type SearchHas = (typeof SEARCH_HAS_VALUES)[number];
+
 /**
- * A message search. `q` is matched as a case-insensitive substring of the text,
+ * A repeated query parameter as a list: one value arrives as a bare string, two
+ * or more as an array, and both mean the same thing here.
+ */
+function queryList<T extends z.ZodTypeAny>(item: T, max: number) {
+  return z.preprocess((value) => (typeof value === 'string' ? [value] : value), z.array(item).max(max));
+}
+
+/**
+ * A message search. The named filters mirror Discord's: `from`, `mentions`,
+ * `in`, `has` and the `sentAfter`/`sentBefore` bounds in epoch milliseconds,
+ * which the client works out from the member's own calendar day. Names are
+ * resolved by the server, case-insensitively. `q` is matched as a case-insensitive substring of the text,
  * so `100%` finds that literally rather than as a wildcard. It may be left out
  * when a filter narrows the search instead, e.g. everything one member said.
  */
@@ -446,11 +468,35 @@ export const searchQuerySchema = z
     channelId: z.string().optional(),
     /** Narrow to one author. */
     authorId: z.string().optional(),
+    /** Author usernames or display names; a message by any of them matches. */
+    from: queryList(z.string().trim().min(1).max(64), 10).optional(),
+    /** Usernames named in the text; a message naming any of them matches. */
+    mentions: queryList(z.string().trim().min(1).max(64), 10).optional(),
+    /** Channel names; a message in any of them matches. */
+    in: queryList(z.string().trim().min(1).max(LIMITS.channelName.max), 10).optional(),
+    /** Every listed trait must hold. */
+    has: queryList(z.enum(SEARCH_HAS_VALUES), SEARCH_HAS_VALUES.length).optional(),
+    /** Only messages sent at or after this time (epoch milliseconds). */
+    sentAfter: z.coerce.number().int().min(0).max(8.64e15).optional(),
+    /** Only messages sent before this time (epoch milliseconds). */
+    sentBefore: z.coerce.number().int().min(0).max(8.64e15).optional(),
   })
-  .refine((value) => value.q !== undefined || value.channelId !== undefined || value.authorId !== undefined, {
-    message: 'A search needs a term or at least one filter.',
-    path: ['q'],
-  });
+  .refine(
+    (value) =>
+      value.q !== undefined ||
+      value.channelId !== undefined ||
+      value.authorId !== undefined ||
+      (value.from?.length ?? 0) > 0 ||
+      (value.mentions?.length ?? 0) > 0 ||
+      (value.in?.length ?? 0) > 0 ||
+      (value.has?.length ?? 0) > 0 ||
+      value.sentAfter !== undefined ||
+      value.sentBefore !== undefined,
+    {
+      message: 'A search needs a term or at least one filter.',
+      path: ['q'],
+    },
+  );
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 
 /** How long a moderation timeout lasts. */

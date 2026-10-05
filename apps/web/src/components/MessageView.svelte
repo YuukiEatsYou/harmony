@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Permission, hasPermission, isGifContentType, type Attachment, type LinkEmbed, type Message, type User } from '@harmony/shared';
+  import { Permission, hasPermission, isGifContentType, isGifLinkUrl, type Attachment, type LinkEmbed, type Message, type User } from '@harmony/shared';
   import { ApiError } from '../lib/api';
   import { chat } from '../lib/chat.svelte';
   import { avatarUrl, initial } from '../lib/avatar';
@@ -10,6 +10,7 @@
   import { gifs } from '../lib/gifs.svelte';
   import { lightbox } from '../lib/lightbox.svelte';
   import { members } from '../lib/members.svelte';
+  import { meta } from '../lib/meta.svelte';
   import { profileCard } from '../lib/profile-card.svelte';
   import { session } from '../lib/session.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
@@ -18,6 +19,8 @@
   import MemberBadge from './MemberBadge.svelte';
   import MessageContent from './MessageContent.svelte';
   import PinAction from './PinAction.svelte';
+  import RemoveEmbedsAction from './RemoveEmbedsAction.svelte';
+  import PollView from './PollView.svelte';
   import SaveAction from './SaveAction.svelte';
 
   /** Opens the profile card for an author, when there is one to show. */
@@ -166,6 +169,15 @@
   }
 
   /**
+   * Whether a linked gif is drawn: only while the instance is set to link (the
+   * page's Content-Security-Policy allows the gif hosts only then) and only for
+   * an address on the allowlist, whatever the server sent.
+   */
+  function linkedGifShown(embed: LinkEmbed): boolean {
+    return embed.gif != null && meta.data?.gifStorage === 'link' && isGifLinkUrl(embed.url);
+  }
+
+  /**
    * Whether a message is nothing but the link a picture was fetched from.
    *
    * Such a message shows the picture and the picture alone, the way Discord does:
@@ -174,6 +186,7 @@
    * keeps its text, link and all.
    */
   function isOnlyTheLink(message: Message): boolean {
+    if (message.embed && linkedGifShown(message.embed)) return message.content.trim() === message.embed.url;
     const source = message.attachments.find((attachment) => attachment.sourceUrl !== null)?.sourceUrl;
     return source != null && message.content.trim() === source;
   }
@@ -217,7 +230,7 @@
 
   // Only the author may edit; the author or any message manager may delete.
   function canEdit(message: Message): boolean {
-    return message.author?.id === myId;
+    return message.author?.id === myId && !message.poll;
   }
   function canDelete(message: Message): boolean {
     return message.author?.id === myId || hasPermission(permissions, Permission.ManageMessages);
@@ -550,8 +563,8 @@
               </div>
             </form>
           {:else}
-            {#if message.content && !isOnlyTheLink(message)}
-              <div class="content"><MessageContent {blocks} /></div>
+            {#if message.content && !isOnlyTheLink(message) && !message.poll}
+              <div class="content"><MessageContent {blocks} allowJumbo={message.attachments.length === 0} /></div>
             {/if}
 
             {#if message.stickers.length > 0}
@@ -662,8 +675,27 @@
               </div>
             {/if}
 
+            {#if message.poll}
+              <PollView {message} poll={message.poll} />
+            {/if}
+
             {#if message.embed}
-              {#if message.embed.player}
+              {#if message.embed.gif}
+                <!--
+                  A gif the instance links to instead of storing. It is drawn straight
+                  from the gif host, which sees the viewer's address, so it only shows
+                  while the instance is in link mode, and only for an allowlisted host.
+                -->
+                {#if linkedGifShown(message.embed)}
+                  <a class="embed-gif" href={message.embed.url} target="_blank" rel="noreferrer noopener">
+                    {#if message.embed.gif.contentType.startsWith('video/')}
+                      <video src={message.embed.url} autoplay loop muted playsinline preload="metadata"></video>
+                    {:else}
+                      <img src={message.embed.url} alt="" loading="lazy" referrerpolicy="no-referrer" />
+                    {/if}
+                  </a>
+                {/if}
+              {:else if message.embed.player}
                 <div class="embed">
                   <EmbedVideo
                     player={message.embed.player}
@@ -719,6 +751,7 @@
           </button>
           <PinAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           <SaveAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
+          <RemoveEmbedsAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           {#if canEdit(message)}
             <button
               type="button"

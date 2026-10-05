@@ -1,5 +1,6 @@
 <script lang="ts">
   import { emojis } from '../lib/emojis.svelte';
+  import { emojiUsage } from '../lib/emoji-usage.svelte';
   import { filterByName, filterUnicodeGroups, loadUnicodeEmoji, type UnicodeEmojiGroup } from '../lib/unicode-emoji';
 
   let { onpick }: { onpick: (emoji: string, emojiId: string | null) => void } = $props();
@@ -10,9 +11,12 @@
   /** A little daylight between the picker and the keyboard. */
   const REVEAL_MARGIN = 12;
 
-  type Tab = 'server' | 'unicode';
-  /** The instance's own emoji first: they are the ones people came here for. */
-  let tab = $state<Tab>('server');
+  type Tab = 'recent' | 'server' | 'unicode';
+  /**
+   * What this member uses most comes first when there is any history; failing
+   * that the instance's own emoji, which are the ones people came here for.
+   */
+  let tab = $state<Tab>(emojiUsage.ranked.length > 0 ? 'recent' : 'server');
   let query = $state('');
 
   let unicodeGroups = $state<UnicodeEmojiGroup[]>([]);
@@ -31,6 +35,17 @@
 
   const serverMatches = $derived(filterByName(emojis.picker, query));
   const unicodeMatches = $derived(filterUnicodeGroups(unicodeGroups, query));
+
+  /** Unicode names by character, so frequently used emoji can be searched too. */
+  const unicodeNames = $derived(
+    new Map(unicodeGroups.flatMap((group) => group.emojis.map((emoji) => [emoji.emoji, emoji.name] as const))),
+  );
+  const recentMatches = $derived.by(() => {
+    const needle = query.trim().toLowerCase();
+    return emojiUsage.ranked.filter((used) =>
+      !needle ? true : (used.emojiId ? used.emoji : (unicodeNames.get(used.emoji) ?? '')).toLowerCase().includes(needle),
+    );
+  });
 
   /** Searching is a different task from browsing, so the shortcuts step aside. */
   const searching = $derived(query.trim().length > 0);
@@ -85,6 +100,17 @@
       autocomplete="off"
     />
     <div class="emoji-tabs">
+      {#if emojiUsage.ranked.length > 0}
+        <button
+          type="button"
+          class="emoji-tab"
+          class:active={tab === 'recent'}
+          aria-pressed={tab === 'recent'}
+          onclick={() => (tab = 'recent')}
+        >
+          Frequent
+        </button>
+      {/if}
       <button
         type="button"
         class="emoji-tab"
@@ -115,7 +141,29 @@
       </div>
     {/if}
 
-    {#if tab === 'server'}
+    {#if tab === 'recent' && emojiUsage.ranked.length > 0}
+      {#if recentMatches.length === 0}
+        <p class="muted emoji-empty">No frequently used emoji match that.</p>
+      {:else}
+        <span class="emoji-group-name">Frequently used</span>
+        <div class="emoji-options">
+          {#each recentMatches as used (used.emojiId ?? used.emoji)}
+            <button
+              type="button"
+              class="emoji-option"
+              title={used.emojiId ? used.emoji : (unicodeNames.get(used.emoji) ?? used.emoji)}
+              onclick={() => onpick(used.emoji, used.emojiId)}
+            >
+              {#if used.emojiId}
+                <img src={`/api/v1/emojis/${used.emojiId}`} alt={used.emoji} />
+              {:else}
+                {used.emoji}
+              {/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {:else if tab !== 'unicode'}
       {#if serverMatches.length === 0}
         <p class="muted emoji-empty">
           {searching ? 'No server emoji match that.' : 'This server has no custom emoji yet.'}

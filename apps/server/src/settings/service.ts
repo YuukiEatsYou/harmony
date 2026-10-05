@@ -5,6 +5,7 @@ import {
   MAX_UPLOAD_CEILING_BYTES,
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
+  type GifStorageMode,
   type IconSettings,
   type RetentionSettings,
   type ThemeSettings,
@@ -35,6 +36,12 @@ export interface ServerSettings {
    * tab hangs on. The key itself never leaves the server.
    */
   klipyConfigured: boolean;
+  /**
+   * Whether a gif is stored on this server ("store", the default) or, when it
+   * comes from an allowlisted gif host, linked to there ("link"). See
+   * `gif-hosts.ts` in the shared package.
+   */
+  gifStorage: GifStorageMode;
 }
 
 /** A settings patch. `theme` is partial so one color can be changed on its own. */
@@ -51,6 +58,7 @@ export interface ServerSettingsUpdate {
   setupCompleted?: boolean;
   /** Cleared by an empty string, which takes the picker's hosted tab away. */
   klipyApiKey?: string | null;
+  gifStorage?: GifStorageMode;
 }
 
 export interface BridgeSettings {
@@ -103,6 +111,8 @@ export interface SettingsService {
   discordRedirectUri(): string | null;
   /** API key for the hosted gif service, or null when none is configured. */
   getKlipyKey(): string | null;
+  /** The gif storage mode, read on its own because the security headers ask on every response. */
+  getGifStorage(): GifStorageMode;
   /** Content hash of the uploaded server icon, or null for the built-in default. */
   getIconHash(): string | null;
   setIconHash(hash: string | null): void;
@@ -136,6 +146,7 @@ const KEY_ICON_HASH = 'instance_icon_hash';
 const KEY_IMAGE_BYTES = 'upload_image_bytes';
 const KEY_VIDEO_BYTES = 'upload_video_bytes';
 const KEY_KLIPY_KEY = 'klipy_api_key';
+const KEY_GIF_STORAGE = 'gif_storage';
 const KEY_PREVIEW_UA = 'preview_user_agent';
 const KEY_SETUP_COMPLETED = 'setup_completed';
 
@@ -216,7 +227,12 @@ function parseSize(raw: string | undefined, fallback: number): number {
  * settings shape minus the few that are worked out rather than defaulted, so a
  * caller cannot set something that is meant to be derived.
  */
-export type SettingsDefaults = Omit<ServerSettings, 'klipyConfigured'>;
+export type SettingsDefaults = Omit<ServerSettings, 'klipyConfigured' | 'gifStorage'>;
+
+/** A stored gif storage mode; anything unrecognized means the safe default, "store". */
+function parseGifStorage(raw: string | undefined): GifStorageMode {
+  return parseStringOrNull(raw) === 'link' ? 'link' : 'store';
+}
 
 export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDefaults): SettingsService {
   function get(): ServerSettings {
@@ -244,6 +260,7 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       previewUserAgent: parseStringOrNull(stored.get(KEY_PREVIEW_UA)),
       setupCompleted: setup ? parseBoolean(setup, defaults.setupCompleted) : defaults.setupCompleted,
       klipyConfigured: parseStringOrNull(stored.get(KEY_KLIPY_KEY)) !== null,
+      gifStorage: parseGifStorage(stored.get(KEY_GIF_STORAGE)),
     };
   }
 
@@ -314,6 +331,13 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       return parseStringOrNull(readAllSettings(sqlite).get(KEY_KLIPY_KEY));
     },
 
+    getGifStorage() {
+      const row = sqlite.prepare('SELECT value FROM server_settings WHERE key = ?').get(KEY_GIF_STORAGE) as
+        | { value: string }
+        | undefined;
+      return parseGifStorage(row?.value);
+    },
+
     setIconHash(hash) {
       writeSetting(sqlite, KEY_ICON_HASH, JSON.stringify(hash));
     },
@@ -357,6 +381,9 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       if (patch.klipyApiKey !== undefined) {
         const trimmed = patch.klipyApiKey?.trim() ?? '';
         writeSetting(sqlite, KEY_KLIPY_KEY, JSON.stringify(trimmed.length > 0 ? trimmed : null));
+      }
+      if (patch.gifStorage !== undefined) {
+        writeSetting(sqlite, KEY_GIF_STORAGE, JSON.stringify(patch.gifStorage));
       }
       return get();
     },

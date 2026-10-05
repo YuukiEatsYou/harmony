@@ -9,7 +9,6 @@ import {
   GatewayEvent,
   rewriteChannelMentions,
   rewriteMentions,
-  unwrapSuppressedLinks,
   type BridgeResponse,
   type DiscordChannelListResponse,
   type ImageContentType,
@@ -39,6 +38,8 @@ import {
   type EmojiRow,
 } from '../db/emojis.ts';
 import { findMessage } from '../db/messages.ts';
+import { listPinnedMessages } from '../db/pins.ts';
+import { findPollByMessage, listPollOptions, setOptionDiscordAnswerId } from '../db/polls.ts';
 import { countLocalReaction, listReactionsForMessages } from '../db/reactions.ts';
 import {
   findStickerByDiscordId,
@@ -58,6 +59,8 @@ import {
 import { HttpError } from '../http/errors.ts';
 import type { ServerLogService } from '../log/service.ts';
 import type { MessageService, ReactionEvent } from '../messages/service.ts';
+import type { PinService } from '../pins/service.ts';
+import type { PollService } from '../polls/service.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import type { UserService } from '../users/service.ts';
@@ -70,6 +73,8 @@ import {
   type DiscordIncomingDelete,
   type DiscordIncomingEdit,
   type DiscordIncomingMessage,
+  type DiscordIncomingPollEnd,
+  type DiscordIncomingPollVote,
   type DiscordIncomingPresence,
   type DiscordIncomingReaction,
   type DiscordIncomingReactionsRemoved,
@@ -80,6 +85,9 @@ import {
   type MirrorResult,
   type WebhookRef,
 } from './transport.ts';
+
+/** Discord lets a channel hold this many pins; Harmony's own cap matches it. */
+const DISCORD_MAX_PINS = 50;
 
 /** Discord's default upload ceiling for a non-boosted server. */
 const DISCORD_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -136,8 +144,11 @@ export interface BridgeDeps {
   config: Config;
   settings: SettingsService;
   messages: MessageService;
+  polls: PollService;
   users: UserService;
   hub: GatewayHub;
+  /** Optional so the bridge can be driven standalone; without it pins are not synced. */
+  pins?: PinService;
   logger: BridgeLogger;
   transportFactory: (token: string, logger: BridgeLogger) => DiscordTransport;
   /**
@@ -735,6 +746,12 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       return;
     }
 
+    // A poll is posted as a native Discord poll, through the bot.
+    if (message.poll) {
+      await mirrorPoll(message, channel);
+      return;
+    }
+
     const { content, allowedUserMentions } = await outboundContent(message);
     const files = collectMirrorFiles(message);
     if (!content && files.length === 0) {
@@ -758,6 +775,57 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     // Our own webhook message is accounted for too, so it is never mistaken for
     // something a member said if it is ever fetched back.
     rememberBridgeMessage(deps.sqlite, result.messageId, new Date().toISOString());
+  }
+
+  /** Discord's longest poll, in hours; a poll with no expiry here gets this much there. */
+  const DISCORD_MAX_POLL_HOURS = 768;
+
+  /**
+   * Posts a Harmony poll to Discord as a native poll. Discord's bots cannot
+   * vote, so the two sides count their own voters: what happens here stays here,
+   * and Discord's votes are carried back in (see ingestPollVote). The poll is the
+   * bot's message, since a webhook cannot carry one, so a line above it says whose
+   * question it is.
+   */
+  async function mirrorPoll(message: Message, channel: ChannelRow): Promise<void> {
+    const active = transport;
+    const poll = message.poll;
+    const row = poll ? findPollByMessage(deps.sqlite, message.id) : null;
+    if (!active || !poll || !row || !channel.discord_channel_id) return;
+
+    const hours = poll.closesAt
+      ? Math.min(Math.max(Math.ceil((Date.parse(poll.closesAt) - Date.now()) / 3_600_000), 1), DISCORD_MAX_POLL_HOURS)
+      : DISCORD_MAX_POLL_HOURS;
+    const result = await active.mirrorPoll({
+      discordChannelId: channel.discord_channel_id,
+      content: `${authorName(message)} asked in Harmony:`,
+      question: poll.question,
+      answers: poll.options.map((option) => ({ text: option.text, emoji: option.emoji })),
+      allowMultiple: poll.allowMultiple,
+      durationHours: hours,
+    });
+    insertBridgeMessage(deps.sqlite, {
+      harmonyMessageId: message.id,
+      discordMessageId: result.messageId,
+      createdAt: new Date().toISOString(),
+    });
+    rememberBridgeMessage(deps.sqlite, result.messageId, new Date().toISOString());
+    // Pair each option with the answer Discord numbered it as, so a vote there
+    // lands on the right option here.
+    listPollOptions(deps.sqlite, row.id).forEach((option, index) => {
+      const answerId = result.answerIds[index];
+      if (answerId !== undefined) setOptionDiscordAnswerId(deps.sqlite, option.id, answerId);
+    });
+  }
+
+  /** Ends the Discord copy of a poll somebody closed early here. */
+  async function mirrorPollEnd(message: Message): Promise<void> {
+    const active = transport;
+    if (!active) return;
+    const mapping = findBridgeMessageByHarmonyId(deps.sqlite, message.id);
+    const channel = findChannel(deps.sqlite, message.channelId);
+    if (!mapping || !channel?.discord_channel_id) return;
+    await active.endPoll({ channelId: channel.discord_channel_id, discordMessageId: mapping.discord_message_id });
   }
 
   /** Where a bridged Harmony message lives on the Discord side, if anywhere. */
@@ -970,8 +1038,9 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
 
   async function ingestOnce(message: DiscordIncomingMessage, silent: boolean): Promise<boolean> {
     const active = transport;
-    // Ignore bots, including our own mirrored webhook messages.
-    if (!active || message.fromBot) return false;
+    // Ignore bots, including our own mirrored webhook messages, and Discord's own
+    // notices such as "pinned a message to this channel".
+    if (!active || message.fromBot || message.system) return false;
     // Already accounted for: a backfill may meet a message whose Harmony copy was
     // deleted or pruned. The permanent record answers that even when the mapping
     // is gone, so removed content is not brought back.
@@ -982,6 +1051,9 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
 
     const author = resolveGhostUser(message.authorId, message.authorName, true);
     await mirrorGhostAvatar(active, author, message);
+
+    // A native Discord poll arrives as a poll message of its own.
+    if (message.poll) return ingestPoll(active, message, channel, author, silent);
 
     const attachmentIds: string[] = [];
     const skipped: string[] = [];
@@ -1016,13 +1088,14 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     // Anything we cannot mirror is preserved as text rather than dropped: an
     // attachment that will not download as its link, a sticker that cannot be
     // drawn as its name. Discord hides the preview of a suppressed link by
-    // wrapping it in angle brackets; drop them so the link unfurls here exactly
-    // as a typed one does. Emoji are learned above, so one from another server
-    // renders rather than falling back.
+    // wrapping it in angle brackets, and so does Harmony, so the text is kept
+    // as written: the client draws it as a plain link and no preview is made.
+    // Emoji are learned above, so one from another server renders rather than
+    // falling back.
     const translated = await translateInboundEmoji(linked.text);
     const said = [
       rewriteInboundChannelMentions(
-        rewriteInboundMentions(unwrapSuppressedLinks(translated), message.mentions),
+        rewriteInboundMentions(translated, message.mentions),
       ),
       ...skipped,
     ]
@@ -1055,6 +1128,81 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     // A link posted on Discord previews here too, exactly as if it were typed here.
     deps.resolvePreview?.(created.id, content);
     return true;
+  }
+
+  /**
+   * Brings a Discord poll in as a poll message with its options. Who has voted so
+   * far is read from Discord (up to its page of 100 per answer) and counted under
+   * the stand-in accounts, or under the member a Discord account is linked to, so
+   * a person who also votes here is still one voter. The poll is closed last, if
+   * Discord already closed it, because a closed poll takes no votes.
+   */
+  async function ingestPoll(
+    active: DiscordTransport,
+    message: DiscordIncomingMessage,
+    channel: ChannelRow,
+    author: UserRow,
+    silent: boolean,
+  ): Promise<boolean> {
+    const poll = message.poll;
+    if (!poll || poll.answers.length < 2) return false;
+
+    const answers = poll.answers.slice(0, 10);
+    const created = deps.messages.createPollBridged(
+      channel.id,
+      author.id,
+      {
+        question: poll.question.trim().slice(0, 300) || 'Poll',
+        options: answers.map((answer) => ({
+          text: answer.text.trim().slice(0, 55) || '…',
+          emoji: answer.emoji,
+          discordAnswerId: answer.id,
+        })),
+        allowMultiple: poll.allowMultiple,
+        closesAt: poll.expiresAt,
+        source: 'discord',
+      },
+      { createdAt: message.createdAt, silent },
+    );
+    insertBridgeMessage(deps.sqlite, {
+      harmonyMessageId: created.id,
+      discordMessageId: message.id,
+      createdAt: new Date().toISOString(),
+    });
+    rememberBridgeMessage(deps.sqlite, message.id, new Date().toISOString());
+
+    for (const answer of answers) {
+      try {
+        const voters = await active.fetchPollVoters({
+          channelId: message.channelId,
+          discordMessageId: message.id,
+          answerId: answer.id,
+        });
+        for (const voter of voters) {
+          const stand = resolveGhostUser(voter.id, voter.name);
+          deps.polls.voteBridged(created.id, answer.id, stand.id, true, true);
+        }
+      } catch (error) {
+        logger.debug('could not read the voters of a discord poll', {
+          messageId: message.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (poll.finalized) deps.polls.closeBridged(created.id);
+    return true;
+  }
+
+  async function ingestPollVote(vote: DiscordIncomingPollVote, add: boolean): Promise<void> {
+    const mapping = findBridgeMessageByDiscordId(deps.sqlite, vote.messageId);
+    if (!mapping) return;
+    const voter = resolveGhostUser(vote.userId, vote.userName);
+    deps.polls.voteBridged(mapping.harmony_message_id, vote.answerId, voter.id, add);
+  }
+
+  function ingestPollEnd(ended: DiscordIncomingPollEnd): void {
+    const mapping = findBridgeMessageByDiscordId(deps.sqlite, ended.messageId);
+    if (mapping) deps.polls.closeBridged(mapping.harmony_message_id);
   }
 
   /** How many recent Discord messages a plain backfill pulls in. */
@@ -1117,7 +1265,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     // same as one sent with it, and one that adds or newly suppresses a link
     // previews on the Harmony side to match.
     const content = rewriteInboundChannelMentions(
-      rewriteInboundMentions(unwrapSuppressedLinks(await translateInboundEmoji(edit.content)), edit.mentions),
+      rewriteInboundMentions(await translateInboundEmoji(edit.content), edit.mentions),
     );
     if (!deps.messages.editBridged(mapping.harmony_message_id, content)) return;
     deps.resolvePreview?.(mapping.harmony_message_id, content);
@@ -1194,6 +1342,185 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     }
   }
 
+  // ---- Pins ----
+
+  /**
+   * The pins Discord is known to hold per channel (by Discord channel id), as
+   * Discord message ids the bridge has accounted for. A channel with no entry has
+   * not been read yet this session. Discord only says that a channel's pins
+   * changed, never which message, so each change is found by comparing the pins
+   * it reports now with this record; acting only on the difference is what keeps
+   * a pin that failed to reach Discord, or one Harmony is full for, from being
+   * re-applied or undone by an unrelated pin elsewhere.
+   */
+  const discordPins = new Map<string, Set<string>>();
+  /** Channels whose pin sync failure has been reported already, so it is said once. */
+  const pinFailureReported = new Set<string>();
+  /** Pin work per Discord channel runs one piece at a time, in the order it arrived. */
+  const pinQueues = new Map<string, Promise<void>>();
+  /** Channels with a pin read already waiting, so a burst of changes costs one read. */
+  const pinReadWaiting = new Set<string>();
+
+  function queuePinWork(discordChannelId: string, work: () => Promise<void>): Promise<void> {
+    const next = (pinQueues.get(discordChannelId) ?? Promise.resolve()).then(work, work).catch(() => undefined);
+    pinQueues.set(discordChannelId, next);
+    return next;
+  }
+
+  /** A missing permission is told once per channel; it clears again on the next success. */
+  function reportPinFailure(channelId: string | undefined, action: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    const key = channelId ?? '';
+    if (pinFailureReported.has(key)) {
+      logger.debug('bridge pin sync failed again', { channelId, action, error: detail });
+      return;
+    }
+    pinFailureReported.add(key);
+    logger.info('bridge could not sync a pin with Discord', { channelId, action, error: detail });
+    deps.serverLog?.warn(
+      'bridge_pin_failed',
+      `bridge could not ${action} on Discord; the bot needs the Pin Messages permission in that channel`,
+      { channelId, error: detail },
+    );
+  }
+
+  function pinSucceeded(channelId: string): void {
+    pinFailureReported.delete(channelId);
+  }
+
+  /** Harmony pinned or unpinned a mirrored message: do the same to its Discord copy. */
+  function mirrorPin(message: Message, pinned: boolean): Promise<void> {
+    const active = transport;
+    if (!active) return Promise.resolve();
+    const target = reactionTarget(message.id, message.channelId);
+    if (!target) return Promise.resolve();
+    const { discordChannelId, discordMessageId } = target;
+
+    return queuePinWork(discordChannelId, async () => {
+      const known = discordPins.get(discordChannelId);
+      const label = pinned ? 'pin a message' : 'unpin a message';
+      // Already as wanted, which is what a pin that began on Discord looks like.
+      if (pinned && known?.has(discordMessageId)) return;
+      if (!pinned && known && !known.has(discordMessageId)) return;
+      if (pinned && known && known.size >= DISCORD_MAX_PINS) {
+        reportPinFailure(message.channelId, label, new Error('The Discord channel already has 50 pins.'));
+        return;
+      }
+      try {
+        const input = { channelId: discordChannelId, discordMessageId };
+        if (pinned) await active.pinMessage(input);
+        else await active.unpinMessage(input);
+        if (pinned) known?.add(discordMessageId);
+        else known?.delete(discordMessageId);
+        pinSucceeded(message.channelId);
+      } catch (error) {
+        // Harmony keeps its pin either way; Discord is simply left as it was.
+        reportPinFailure(message.channelId, label, error);
+      }
+    });
+  }
+
+  /**
+   * Brings Harmony's pins for one bridged channel in line with Discord's. Run
+   * for a channel not read yet this session (on connecting or reconnecting), it
+   * only adds, in both directions, because without a record of the last state
+   * there is no telling a pin made while the bridge was away from one removed.
+   * Afterwards it applies exactly what changed on Discord since the last read.
+   */
+  async function reconcilePins(discordChannelId: string): Promise<void> {
+    const active = transport;
+    const pins = deps.pins;
+    if (!active || !pins) return;
+    const channel = findChannelByDiscordId(deps.sqlite, discordChannelId);
+    if (!channel) return;
+
+    let current;
+    try {
+      current = await active.fetchPinned(discordChannelId);
+    } catch (error) {
+      reportPinFailure(channel.id, 'read the pins', error);
+      return;
+    }
+    // Oldest first, so the pins keep their order and a full channel keeps the oldest.
+    const oldestFirst = [...current].reverse();
+    const currentIds = new Set(current.map((pin) => pin.messageId));
+    const previous = discordPins.get(discordChannelId);
+    const accounted = new Set<string>();
+
+    /** Pins one Discord message here; false when it is unknown or Harmony has no room. */
+    const applyPin = (discordId: string, pinnedAt: string | null): boolean => {
+      const mapping = findBridgeMessageByDiscordId(deps.sqlite, discordId);
+      if (!mapping) return false;
+      const row = findMessage(deps.sqlite, mapping.harmony_message_id);
+      if (!row || row.deleted_at) return false;
+      if (row.pinned_at) return true;
+      pins.pinBridged(row.id, pinnedAt ?? undefined);
+      return findMessage(deps.sqlite, row.id)?.pinned_at != null;
+    };
+
+    let blocked = 0;
+    for (const pin of oldestFirst) {
+      if (previous?.has(pin.messageId)) {
+        accounted.add(pin.messageId);
+        continue;
+      }
+      if (applyPin(pin.messageId, pin.pinnedAt)) accounted.add(pin.messageId);
+      else blocked++;
+    }
+    if (blocked > 0) {
+      // Left out of the record on purpose, so a later change tries them again.
+      logger.debug('some discord pins could not be mirrored', { channelId: channel.id, blocked });
+    }
+
+    if (previous) {
+      for (const discordId of previous) {
+        if (currentIds.has(discordId)) continue;
+        const mapping = findBridgeMessageByDiscordId(deps.sqlite, discordId);
+        if (mapping) pins.unpinBridged(mapping.harmony_message_id);
+      }
+    } else {
+      // First read: Harmony's own pins that Discord lacks go over, oldest first,
+      // while Discord has room.
+      let count = currentIds.size;
+      const harmonyPins = listPinnedMessages(deps.sqlite, channel.id).reverse();
+      for (const row of harmonyPins) {
+        const mapping = findBridgeMessageByHarmonyId(deps.sqlite, row.id);
+        if (!mapping || currentIds.has(mapping.discord_message_id)) continue;
+        if (count >= DISCORD_MAX_PINS) break;
+        try {
+          await active.pinMessage({ channelId: discordChannelId, discordMessageId: mapping.discord_message_id });
+        } catch (error) {
+          reportPinFailure(channel.id, 'pin a message', error);
+          break;
+        }
+        pinSucceeded(channel.id);
+        accounted.add(mapping.discord_message_id);
+        count++;
+      }
+    }
+    discordPins.set(discordChannelId, accounted);
+  }
+
+  /** Reads one channel's pins, folding a burst of changes into a single read. */
+  function requestPinRead(discordChannelId: string): Promise<void> {
+    if (pinReadWaiting.has(discordChannelId)) return Promise.resolve();
+    pinReadWaiting.add(discordChannelId);
+    return queuePinWork(discordChannelId, async () => {
+      pinReadWaiting.delete(discordChannelId);
+      await reconcilePins(discordChannelId);
+    });
+  }
+
+  /** Reads the pins of every bridged channel afresh, best effort, one at a time. */
+  async function reconcileAllPins(): Promise<void> {
+    if (!deps.pins) return;
+    discordPins.clear();
+    for (const channel of listChannels(deps.sqlite)) {
+      if (!channel.discord_channel_id) continue;
+      await requestPinRead(channel.discord_channel_id);
+    }
+  }
+
   // Messages created or changed in Harmony are mirrored out; bridged-in changes
   // are applied through the *Bridged methods, which never notify, so nothing
   // ever bounces back to Discord.
@@ -1214,6 +1541,9 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
   deps.messages.onReactionAdded((event) => watch(() => mirrorReaction(event, 'add'), event.message.channelId));
   deps.messages.onReactionRemoved((event) => watch(() => mirrorReaction(event, 'remove'), event.message.channelId));
   deps.messages.onReactionsCleared((event) => watch(() => mirrorReaction(event, 'clear'), event.message.channelId));
+  deps.pins?.onPinned((message) => watch(() => mirrorPin(message, true), message.channelId));
+  deps.pins?.onUnpinned((message) => watch(() => mirrorPin(message, false), message.channelId));
+  deps.polls.onPollEnded((message) => watch(() => mirrorPollEnd(message), message.channelId));
 
   return {
     status,
@@ -1229,6 +1559,8 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         transport = null;
         activeToken = null;
         guildEmojiByName = null;
+        discordPins.clear();
+        pinFailureReported.clear();
         forgetDiscordPresence();
         deps.serverLog?.info('bridge_stopped', 'Discord bridge stopped');
       }
@@ -1265,6 +1597,25 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         }
       });
       transport.onPresence((presence) => applyDiscordPresence(presence));
+      transport.onPinsUpdated((discordChannelId) => {
+        if (!findChannelByDiscordId(deps.sqlite, discordChannelId)) return;
+        void requestPinRead(discordChannelId);
+      });
+      // A fresh session means pin changes in the gap were never seen: read them all again.
+      transport.onReconnected(() => void reconcileAllPins());
+      transport.onPollVoteAdded((vote) => {
+        void ingestPollVote(vote, true).catch((error: unknown) => logger.info('bridge poll sync failed', error));
+      });
+      transport.onPollVoteRemoved((vote) => {
+        void ingestPollVote(vote, false).catch((error: unknown) => logger.info('bridge poll sync failed', error));
+      });
+      transport.onPollEnded((ended) => {
+        try {
+          ingestPollEnd(ended);
+        } catch (error) {
+          logger.info('bridge poll sync failed', error);
+        }
+      });
       activeToken = desired;
       await transport.start();
       const connected = transport.status();
@@ -1273,7 +1624,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         guildName: connected.guildName,
       });
       // Backfill any history we have not seen yet, without blocking startup.
-      void importAllBridged();
+      void importAllBridged().then(() => reconcileAllPins());
     },
 
     async listDiscordChannels() {
@@ -1319,6 +1670,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
         activeToken = null;
         deps.serverLog?.info('bridge_stopped', 'Discord bridge stopped');
       }
+      discordPins.clear();
       forgetDiscordPresence();
     },
   };

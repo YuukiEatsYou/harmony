@@ -53,6 +53,68 @@ export interface DiscordIncomingMessage {
    * attachments instead.
    */
   forwarded?: boolean;
+  /**
+   * True for a message Discord generates itself rather than a person writing it,
+   * such as the "pinned a message to this channel" notice. Never bridged.
+   */
+  system?: boolean;
+  /** The native Discord poll this message carries, or null/absent for an ordinary message. */
+  poll?: DiscordIncomingPoll | null;
+}
+
+/** A Discord poll as it arrives with its message. */
+export interface DiscordIncomingPoll {
+  question: string;
+  /** Discord's answer ids are small integers, unique within the poll. */
+  answers: Array<{
+    id: number;
+    text: string;
+    /** A unicode emoji, or null (a custom emoji is not carried across). */
+    emoji: string | null;
+  }>;
+  allowMultiple: boolean;
+  /** When the poll closes, ISO 8601, or null. */
+  expiresAt: string | null;
+  /** True once Discord has closed it and published the results. */
+  finalized: boolean;
+}
+
+/** Somebody picked (or took back) an answer on a Discord poll. */
+export interface DiscordIncomingPollVote {
+  messageId: string;
+  channelId: string;
+  answerId: number;
+  userId: string;
+  userName: string;
+}
+
+/** Discord closed a poll, by its timer or because its author ended it. */
+export interface DiscordIncomingPollEnd {
+  messageId: string;
+  channelId: string;
+}
+
+/** A person who voted for one answer, as Discord lists them. */
+export interface DiscordPollVoter {
+  id: string;
+  name: string;
+}
+
+export interface MirrorPollInput {
+  discordChannelId: string;
+  /** Short text posted with the poll, saying whose question it is. */
+  content: string;
+  question: string;
+  answers: Array<{ text: string; emoji: string | null }>;
+  allowMultiple: boolean;
+  /** Whole hours until Discord closes it, 1 to 768. */
+  durationHours: number;
+}
+
+export interface MirrorPollResult {
+  messageId: string;
+  /** The Discord answer id of each answer, in the order they were given. */
+  answerIds: number[];
 }
 
 export interface DiscordIncomingEdit {
@@ -178,6 +240,19 @@ export interface ReactionInput {
   emoji: string;
 }
 
+/** One message pinned in a Discord channel. */
+export interface DiscordPin {
+  messageId: string;
+  /** When it was pinned, ISO 8601, or null when Discord did not say. */
+  pinnedAt: string | null;
+}
+
+/** Pins or unpins one Discord message. Needs the bot's Pin Messages permission there. */
+export interface PinInput {
+  channelId: string;
+  discordMessageId: string;
+}
+
 /**
  * Everything the bridge needs from Discord, behind one small interface. The
  * real implementation wraps discord.js; tests substitute a fake so the
@@ -202,6 +277,28 @@ export interface DiscordTransport {
    * then whenever someone's status changes.
    */
   onPresence(handler: (presence: DiscordIncomingPresence) => void): void;
+  /**
+   * Somebody pinned or unpinned a message in a Discord channel. Discord says only
+   * that the pins changed, never which message, so the bridge reads the list.
+   */
+  onPinsUpdated(handler: (channelId: string) => void): void;
+  /** The connection was re-established after a gap, so events may have been missed. */
+  onReconnected(handler: () => void): void;
+  /** Somebody voted on a Discord poll (needs the GuildMessagePolls intent). */
+  onPollVoteAdded(handler: (vote: DiscordIncomingPollVote) => void): void;
+  /** Somebody took their vote back. */
+  onPollVoteRemoved(handler: (vote: DiscordIncomingPollVote) => void): void;
+  /** Discord closed a poll. */
+  onPollEnded(handler: (ended: DiscordIncomingPollEnd) => void): void;
+  /**
+   * Posts a native Discord poll through the bot. A webhook cannot carry one, so
+   * unlike text the message is the bot's, not the member's.
+   */
+  mirrorPoll(input: MirrorPollInput): Promise<MirrorPollResult>;
+  /** Closes a poll the bot posted, which publishes its results on Discord. */
+  endPoll(input: BotDeleteInput): Promise<void>;
+  /** Who picked one answer, up to Discord's page of 100. Bots are left out. */
+  fetchPollVoters(input: { channelId: string; discordMessageId: string; answerId: number }): Promise<DiscordPollVoter[]>;
   mirror(input: MirrorInput): Promise<MirrorResult>;
   editMessage(input: EditInput): Promise<void>;
   deleteMessage(input: DeleteInput): Promise<void>;
@@ -228,4 +325,8 @@ export interface DiscordTransport {
    * a newly linked channel. Bots and webhooks are included; the caller filters.
    */
   fetchRecentMessages(channelId: string, limit: number): Promise<DiscordIncomingMessage[]>;
+  /** A channel's current pins, newest first. Discord allows at most 50. */
+  fetchPinned(channelId: string): Promise<DiscordPin[]>;
+  pinMessage(input: PinInput): Promise<void>;
+  unpinMessage(input: PinInput): Promise<void>;
 }

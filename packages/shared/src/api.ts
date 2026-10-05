@@ -12,6 +12,7 @@ import type {
   SavedMessage,
   User,
 } from './types.ts';
+import type { GifStorageMode } from './gif-hosts.ts';
 import type { ThemeSettings } from './theme.ts';
 import type { ChannelNotificationSettings } from './channel-settings.ts';
 
@@ -135,6 +136,12 @@ export interface InstanceMeta {
    */
   klipyConfigured: boolean;
   /**
+   * How gifs are kept: "store" saves a copy on this server, "link" points at the
+   * hosted gif service for gifs from a few known gif hosts. Clients draw linked
+   * gifs only while this is "link".
+   */
+  gifStorage: GifStorageMode;
+  /**
    * Whether Discord sign-in is offered on the sign-in screen, i.e. OAuth is
    * configured, switched on, and the instance has a public URL. Off unless an
    * administrator turns it on.
@@ -193,6 +200,8 @@ export interface ServerSettingsResponse {
    * never sent back out.
    */
   klipyConfigured: boolean;
+  /** How gifs are kept; see `InstanceMeta.gifStorage`. */
+  gifStorage: GifStorageMode;
 }
 
 /** A user together with the roles assigned to them. */
@@ -425,6 +434,12 @@ export interface GifSearchResult {
   width: number | null;
   height: number | null;
   title: string;
+}
+
+/** Response for `POST /api/v1/gifs/link`: the checked address to put in a message. */
+export interface GifLinkResponse {
+  url: string;
+  contentType: string;
 }
 
 export interface GifSearchResponse {

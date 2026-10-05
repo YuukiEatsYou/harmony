@@ -18,9 +18,31 @@ import {
   resolveChannelSettings,
   rewriteChannelMentions,
 } from '@harmony/shared';
+import {
+  POLL_LIMITS,
+  applyPollUpdate,
+  createPollSchema,
+  isPollClosed,
+  nextPollChoice,
+  pollLeaders,
+  pollPercent,
+  pollTimeLeft,
+} from '@harmony/shared';
 import { HIGHLIGHT_LANGUAGES, highlight } from '../src/lib/highlighter.ts';
+import { isJumbo, unicodeEmojiIn } from '../src/lib/jumbo-emoji.ts';
+import {
+  USAGE_CAP,
+  USAGE_HALF_LIFE_MS,
+  emojiInContent,
+  parseUsage,
+  rankEntries,
+  recordUsage,
+  resolveUsage,
+  scoreAt,
+} from '../src/lib/emoji-usage.ts';
 import { inlineSegmentsOf, parseMessage } from '../src/lib/message-text.ts';
 import { mergeLatest, mentionsUser } from '../src/lib/messages.ts';
+import { draftProblem, newPollDraft, toCreatePollBody, withAddedOption, withoutOption } from '../src/lib/poll-draft.ts';
 import {
   matchScore,
   rankSwitcher,
@@ -38,10 +60,31 @@ import {
   timestampToken,
   toDateTimeInputs,
 } from '../src/lib/time-input.ts';
+import {
+  defaultScheduleTime,
+  describeSendTime,
+  parseScheduleInput,
+  removeScheduled,
+  scheduleChoices,
+  scheduleProblem,
+  scheduledBadge,
+  upsertScheduled,
+} from '../src/lib/schedule-time.ts';
 import { firstUnreadIndex, muteLabel, newMessageCount, newMessagesLabel, pillCount } from '../src/lib/unread.ts';
 import { formatTimestamp, formatTimestampTitle } from '../src/lib/timestamp.ts';
 import { draftPreview } from '../src/lib/composer-preview.ts';
 import { filterByName, filterUnicodeGroups } from '../src/lib/unicode-emoji.ts';
+import {
+  activeToken,
+  applySuggestion,
+  buildSearchParams,
+  filterToken,
+  mergeFilters,
+  parseSearchDate,
+  parseSearchInput,
+  suggestFor,
+} from '../src/lib/search-query.ts';
+import { SLASH_COMMANDS, applySlashCommand, matchSlashCommands, slashQuery } from '../src/lib/slash-commands.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -794,6 +837,362 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('next to a link it still counts', hasEmoji(draft(':YES: https://example.com/a')));
   check('formatting is kept in the preview', hasEmoji(draft('**bold** :YES:')));
 }
+
+// ---- Jumbo emoji and frequently used emoji ----
+{
+  console.log('\nJumbo emoji');
+  const lookup = new Map([
+    ['party', { id: 'e-party', name: 'party', hash: 'h', animated: false }],
+    ['cat', { id: 'e-cat', name: 'cat', hash: 'h', animated: false }],
+  ]);
+  const jumbo = (text) => isJumbo(parseMessage(text, lookup, () => undefined));
+  check('one custom emoji is jumbo', jumbo(':party:'));
+  check('one unicode emoji is jumbo', jumbo('😀'));
+  check('mixed custom and unicode, spaced, is jumbo', jumbo(':party: 😀  :cat:\n🎉'));
+  check('unicode emoji with no spaces between is jumbo', jumbo('😀😀😀'));
+  check('text makes it ordinary', !jumbo('hi 😀') && !jumbo(':party: lol'));
+  check('an unknown shortcode is not jumbo', !jumbo(':nope:') && !jumbo(':party: :nope:'));
+  check('the empty message is not jumbo', !jumbo('') && !jumbo('   '));
+  check('27 emoji are jumbo, 28 are not', jumbo('😀'.repeat(27)) && !jumbo('😀'.repeat(28)));
+  check('the cap counts custom and unicode together', jumbo(':party:' + ' 😀'.repeat(26)) && !jumbo(':party: ' + '😀 '.repeat(27)));
+  check('skin tones are one emoji', jumbo('👍🏽') && unicodeEmojiIn('👍🏽').length === 1);
+  check('ZWJ sequences are one emoji', jumbo('👩‍👩‍👧‍👦') && unicodeEmojiIn('👩‍👩‍👧‍👦').length === 1);
+  check('a ZWJ sequence with a skin tone is one emoji', unicodeEmojiIn('🧑🏽‍🚀').length === 1);
+  check('flags are one emoji', jumbo('🇯🇵 🇺🇸') && unicodeEmojiIn('🇯🇵').length === 1);
+  check('a lone regional indicator is not an emoji', !jumbo('🇯'));
+  check('a subdivision flag is one emoji', jumbo('🏴󠁧󠁢󠁥󠁮󠁧󠁿'));
+  check('a keycap is an emoji', jumbo('1️⃣') && jumbo('#️⃣'));
+  check('plain digits, # and * are not emoji', !jumbo('1') && !jumbo('#') && !jumbo('*') && !jumbo('123'));
+  check('a text-style copyright sign is not an emoji', !jumbo('©') && jumbo('©️'));
+  check('a heart with a variation selector is an emoji', jumbo('❤️') && jumbo('❤'));
+  check('emoji inside code are not jumbo', !jumbo('`😀`') && !jumbo('```\n😀\n```'));
+  check('a quote of emoji is not jumbo', !jumbo('> 😀') && !jumbo('> :party:'));
+  check('a list of emoji is not jumbo', !jumbo('- 😀') && !jumbo('1. :party:'));
+  check('a header of emoji is not jumbo', !jumbo('# 😀'));
+  check('blank lines between emoji keep it jumbo', jumbo('😀\n\n😀'));
+  check('a link is not jumbo', !jumbo('https://example.com'));
+  check('bold emoji still count', jumbo('**😀**'));
+
+  console.log('\nEmoji usage');
+  const DAY = 24 * 60 * 60 * 1000;
+  const t0 = 1_700_000_000_000;
+  const use = (emoji, emojiId = null) => ({ emoji, emojiId });
+  let entries = recordUsage([], [use('😀'), use(':party:', 'e-party'), use('😀')], t0);
+  check('uses are counted', entries.length === 2 && entries[0].emoji === '😀' && entries[0].score === 2);
+  check('scores halve every half-life', Math.abs(scoreAt(entries[0], t0 + USAGE_HALF_LIFE_MS) - 1) < 1e-9);
+  const later = t0 + 60 * DAY;
+  entries = recordUsage(entries, [use(':party:', 'e-party')], later);
+  check('recent use outranks a stale favourite', rankEntries(entries, later)[0].emojiId === 'e-party');
+  check('a custom emoji is keyed by id, so a rename merges', recordUsage(entries, [use(':fiesta:', 'e-party')], later).length === 2);
+  const many = Array.from({ length: USAGE_CAP + 10 }, (_, i) => use(String.fromCodePoint(0x1f600 + i)));
+  check('usage is capped', recordUsage([], many, t0).length === USAGE_CAP);
+  const kept = recordUsage(recordUsage([], [use('😀'), use('😀'), use('😀')], t0), many.slice(1), t0);
+  check('the cap drops the lowest scores, not the favourites', kept.some((e) => e.emoji === '😀'));
+  const live = new Map([['e-party', { id: 'e-party', name: 'party2' }]]);
+  const resolved = resolveUsage(entries, live, later);
+  check('deleted custom emoji are dropped and renamed ones take the new name', resolved.length === 2 && resolved[0].emoji === ':party2:');
+  check('with no custom emoji left only unicode remains', resolveUsage(entries, new Map(), later).every((e) => e.emojiId === null));
+  const sent = emojiInContent('hi :party: 😀 `:cat:` 👍🏽 :nope:', lookup);
+  check('sent content yields its resolvable emoji, outside code', sent.length === 3 && sent[0].emojiId === 'e-party' && sent[1].emoji === '😀' && sent[2].emoji === '👍🏽');
+  check('stored usage round-trips', parseUsage(JSON.stringify(entries)).length === 2);
+  check('malformed storage reads as empty', parseUsage('nope').length === 0 && parseUsage('{}').length === 0 && parseUsage(null).length === 0);
+  check('malformed entries are skipped', parseUsage(JSON.stringify([{ emoji: 1 }, null, { emoji: 'x', emojiId: null, score: 1, last: 1 }])).length === 1);
+}
+
+// --- Search filter syntax ---
+{
+  const keys = (parsed) => parsed.filters.map((filter) => `${filter.key}=${filter.value}`).join('|');
+
+  const basic = parseSearchInput('hello from:alice in:general world has:image ');
+  check('filters come out of the text', basic.text === 'hello world');
+  check('every filter is kept in order', keys(basic) === 'from=alice|in=general|has=image');
+  check('keys are case-insensitive', keys(parseSearchInput('FROM:Bob Has:GIF ')) === 'from=Bob|has=GIF');
+  check('a quoted value may hold spaces', keys(parseSearchInput('from:"Some Name" ')) === 'from=Some Name');
+  check('quoted values do not leak into the text', parseSearchInput('x from:"Some Name" y ').text === 'x y');
+  check('an unknown key stays as text', parseSearchInput('re:thing ').text === 're:thing');
+  check('a time-looking word stays text', parseSearchInput('meet at 10:30 ').text === 'meet at 10:30');
+  check('a bare key is dropped, not searched', parseSearchInput('from: hello ').text === 'hello');
+  check('a token still being typed stays in the text', parseSearchInput('hi from:ali', false).text === 'hi from:ali');
+  check('a finished token is taken while typing', keys(parseSearchInput('hi from:ali ', false)) === 'from=ali');
+  check('the last token is taken on submit', keys(parseSearchInput('hi from:ali')) === 'from=ali');
+  check(
+    'an unterminated quote is one token',
+    parseSearchInput('from:"Some Na', false).text === 'from:"Some Na' && keys(parseSearchInput('from:"Some Na')) === 'from=Some Na',
+  );
+  check('tokens round-trip with quoting', filterToken({ key: 'from', value: 'Some Name' }) === 'from:"Some Name"');
+  check('a plain value is not quoted', filterToken({ key: 'in', value: 'general' }) === 'in:general');
+  check(
+    'duplicate filters are merged away',
+    mergeFilters([{ key: 'from', value: 'Al' }], [{ key: 'from', value: 'al' }, { key: 'has', value: 'pin' }]).length === 2,
+  );
+
+  const now = new Date(2024, 4, 15, 13, 30);
+  const day = (y, m, d) => new Date(y, m - 1, d).getTime();
+  check('a date is the local start of that day', parseSearchDate('2024-05-01', now)?.getTime() === day(2024, 5, 1));
+  check('today and yesterday work', parseSearchDate('today', now)?.getTime() === day(2024, 5, 15) && parseSearchDate('Yesterday', now)?.getTime() === day(2024, 5, 14));
+  check('an impossible date is refused', parseSearchDate('2024-02-31', now) === null && parseSearchDate('soon', now) === null);
+
+  const request = (text, filters) => buildSearchParams(text, filters, now);
+  const built = request('cats', [
+    { key: 'from', value: 'alice' },
+    { key: 'from', value: '@Bob' },
+    { key: 'in', value: '#general' },
+    { key: 'has', value: 'Image' },
+  ]);
+  check('text becomes q', built.params.get('q') === 'cats');
+  check('repeated from values are all sent, without the @', built.params.getAll('from').join() === 'alice,Bob');
+  check('in drops a leading hash', built.params.get('in') === 'general');
+  check('has is lower-cased', built.params.get('has') === 'image' && built.problems.length === 0);
+  check('on: is the whole local day', (() => {
+    const r = request('', [{ key: 'on', value: '2024-05-01' }]);
+    return r.params.get('sentAfter') === String(day(2024, 5, 1)) && r.params.get('sentBefore') === String(day(2024, 5, 2));
+  })());
+  check('before: is the start of the day', request('', [{ key: 'before', value: 'today' }]).params.get('sentBefore') === String(day(2024, 5, 15)));
+  check('after: is the end of the day', request('', [{ key: 'after', value: 'yesterday' }]).params.get('sentAfter') === String(day(2024, 5, 15)));
+  check('a filter alone is searchable', request('', [{ key: 'has', value: 'pin' }]).searchable === true);
+  check('nothing at all is not searchable', request('', []).searchable === false);
+  const bad = request('x', [{ key: 'has', value: 'banana' }, { key: 'after', value: 'whenever' }]);
+  check('bad values are reported and block the search', bad.problems.length === 2 && bad.searchable === false);
+
+  const sources = {
+    members: [
+      { username: 'alice', displayName: 'Alice Liddell' },
+      { username: 'bob', displayName: null },
+      { username: 'malice', displayName: null },
+    ],
+    channels: [{ name: 'general' }, { name: 'off topic' }, { name: 'gaming' }],
+  };
+  const text = 'hello from:ali';
+  const token = activeToken(text, text.length);
+  check('the token under the caret is found', token?.key === 'from' && token.partial === 'ali' && token.start === 6);
+  check('plain text under the caret has no token', activeToken('hello wor', 9) === null);
+  check('after trailing whitespace there is no token', activeToken('from:alice ', 11) === null);
+  check('an unknown key has no token', activeToken('re:ali', 6) === null);
+  check('a quoted partial is read without its quote', activeToken('from:"Some Na', 13)?.partial === 'Some Na');
+  const people = suggestFor(token, sources);
+  check('members match by username or display name', people.map((s) => s.value).join() === 'alice,malice');
+  check('a prefix match ranks first', people[0]?.value === 'alice' && people[0].label === 'Alice Liddell' && people[0].detail === '@alice');
+  check('an empty partial offers everyone', suggestFor({ key: 'from', partial: '', start: 0, end: 5 }, sources).length === 3);
+  check('channels are offered by name', suggestFor({ key: 'in', partial: 'g', start: 0, end: 4 }, sources).map((s) => s.value).join() === 'general,gaming');
+  check('has offers the fixed list', suggestFor({ key: 'has', partial: 'p', start: 0, end: 5 }, sources).map((s) => s.value).join() === 'pin');
+  check('dates offer today and yesterday', suggestFor({ key: 'on', partial: 'to', start: 0, end: 5 }, sources, now).map((s) => s.value).join() === 'today');
+  const applied = applySuggestion('hello in:off other', activeToken('hello in:off other', 12), { label: '#off topic', value: 'off topic' });
+  check('applying a suggestion quotes a name with spaces', applied.text === 'hello in:"off topic" other');
+  check('and puts the caret after the token', applied.caret === 'hello in:"off topic" '.length);
+}
+
+// --- Scheduled messages: choosing and describing the time ---
+{
+  const base = { now: writeNow, locale: 'en-US', timeZone: 'UTC' };
+  const asIso = (epoch) => (epoch === null ? null : new Date(epoch).toISOString().slice(0, 16));
+
+  check('a typed time reads like the composer expressions', asIso(parseScheduleInput('5pm', base)) === '2025-12-24T17:00');
+  check('with or without the @', parseScheduleInput('@5pm', base) === parseScheduleInput('5pm', base));
+  check('a day and a time', asIso(parseScheduleInput('tomorrow 9am', base)) === '2025-12-25T09:00');
+  check('a countdown', asIso(parseScheduleInput('in 2h', base)) === '2025-12-24T17:00');
+  check('nonsense is not a time', parseScheduleInput('whenever', base) === null);
+  check('empty is not a time', parseScheduleInput('  ', base) === null);
+
+  check('nothing chosen is a problem', scheduleProblem(null, writeNow) !== null);
+  check('a time in the past is a problem', scheduleProblem(writeNow - 1000, writeNow) !== null);
+  check('a time seconds away is a problem', scheduleProblem(writeNow + 10_000, writeNow) !== null);
+  check('a time a few minutes out is fine', scheduleProblem(writeNow + 5 * 60_000, writeNow) === null);
+  check('a time within a year is fine', scheduleProblem(writeNow + 300 * 86_400_000, writeNow) === null);
+  check('a time past a year is a problem', scheduleProblem(writeNow + 400 * 86_400_000, writeNow) !== null);
+
+  const choices = scheduleChoices(writeNow, { locale: 'en-US', timeZone: 'UTC' });
+  check('quick choices run from soonest to latest', choices.every((choice, index) => index === 0 || choice.at > choices[index - 1].at));
+  check('in 30 minutes is 30 minutes', choices[0].at === writeNow + 30 * 60_000);
+  check('tomorrow morning is 9:00 the next day', asIso(choices.at(-1).at) === '2025-12-25T09:00');
+  check('and every quick choice can be scheduled', choices.every((choice) => scheduleProblem(choice.at, writeNow) === null));
+  check('the default is an hour out, on a five minute mark', defaultScheduleTime(writeNow) === writeNow + 60 * 60_000);
+  check('and rounds up', defaultScheduleTime(writeNow + 60_000) === writeNow + 65 * 60_000);
+
+  check(
+    'a time today is described as today, with the zone',
+    describeSendTime(writeNow + 2 * hour, base) === 'Today at 5:00 PM (UTC)',
+  );
+  check('tomorrow is named', describeSendTime(Date.UTC(2025, 11, 25, 9, 0), base) === 'Tomorrow at 9:00 AM (UTC)');
+  check('later this week is a weekday', describeSendTime(Date.UTC(2025, 11, 27, 9, 0), base) === 'Saturday at 9:00 AM (UTC)');
+  check(
+    'further out is a date',
+    describeSendTime(Date.UTC(2026, 0, 10, 9, 0), base) === 'Jan 10, 2026 at 9:00 AM (UTC)',
+  );
+  check(
+    'the member\'s own zone decides the day',
+    describeSendTime(Date.UTC(2025, 11, 25, 23, 30), { ...base, timeZone: 'Asia/Tokyo' }) === 'Tomorrow at 8:30 AM (Asia/Tokyo)' && describeSendTime(Date.UTC(2025, 11, 24, 23, 30), { ...base, timeZone: 'Asia/Tokyo' }) === 'Today at 8:30 AM (Asia/Tokyo)',
+  );
+
+  const entry = (id, sendAt, status = 'pending') => ({ id, sendAt, status, content: id, channelId: 'c', attachments: [], replyToId: null, createdAt: sendAt, error: null });
+  const early = entry('a', '2026-01-01T10:00:00.000Z');
+  const late = entry('b', '2026-01-01T12:00:00.000Z', 'failed');
+  let list = upsertScheduled([], late);
+  list = upsertScheduled(list, early);
+  check('the list stays soonest first', list.map((item) => item.id).join() === 'a,b');
+  list = upsertScheduled(list, { ...early, sendAt: '2026-01-01T13:00:00.000Z' });
+  check('an update replaces in place and re-sorts', list.map((item) => item.id).join() === 'b,a' && list.length === 2);
+  check('removing drops one', removeScheduled(list, 'a').map((item) => item.id).join() === 'b');
+  check('removing a stranger changes nothing', removeScheduled(list, 'zzz').length === 2);
+  check('the badge counts everything and the failed ones', scheduledBadge(list).count === 2 && scheduledBadge(list).failed === 1);
+  check('an empty list has an empty badge', scheduledBadge([]).count === 0 && scheduledBadge([]).failed === 0);
+}
+
+// --- Suppressed links: <url> shows a plain link and asks for no preview ---
+{
+  const angle = inline('see <https://example.com/a?b=1> now');
+  check(
+    'an angle link is drawn without its brackets',
+    plain('see <https://example.com/a?b=1> now') === 'see https://example.com/a?b=1 now',
+  );
+  check(
+    'and links to the bare address',
+    angle.some((s) => s.type === 'link' && s.href === 'https://example.com/a?b=1' && s.noEmbed === true),
+  );
+  check('so nothing in it is offered for a preview', listEmbeddableUrls('see <https://example.com/a?b=1> now').length === 0);
+  check(
+    'a bare link beside an angle link is still the only one offered',
+    listEmbeddableUrls('<https://example.com/a> and https://example.com/b').join() === 'https://example.com/b',
+  );
+  check(
+    'trailing punctuation outside the brackets stays text',
+    plain('<https://example.com/a>.') === 'https://example.com/a.',
+  );
+  check(
+    'inside code the brackets are literal',
+    plain('`<https://example.com/a>`') === '<https://example.com/a>' && listEmbeddableUrls('`<https://example.com/a>`').length === 0,
+  );
+  check(
+    'an edit that removes the brackets makes the link embeddable again',
+    listEmbeddableUrls('<https://example.com/a>').length === 0 && listEmbeddableUrls('https://example.com/a').length === 1,
+  );
+}
+
+// --- Slash helpers ---
+{
+  // The text sent is escaped Markdown that displays as ¯\_(ツ)_/¯.
+  const SHRUG = '¯\\\\\\_(ツ)\\_/¯';
+  const FLIP = '(╯°□°)╯︵ ┻━┻';
+  check('slash: shrug alone is the face', applySlashCommand('/shrug') === SHRUG);
+  check('slash: and the shrug displays intact through the markdown parser', plain(applySlashCommand('/shrug')) === '¯\\_(ツ)_/¯');
+  check('slash: every face survives the markdown parser', plain(applySlashCommand('/unflip')) === '┬─┬ノ( º _ ºノ)' && plain(applySlashCommand('/lenny')) === '( ͡° ͜ʖ ͡°)' && plain(applySlashCommand('/tableflip')) === '(╯°□°)╯︵ ┻━┻');
+  check('slash: shrug appends to text', applySlashCommand('/shrug oh well') === `oh well ${SHRUG}`);
+  check('slash: trailing spaces are dropped', applySlashCommand('/shrug   ') === SHRUG);
+  check('slash: extra spaces before the text are dropped', applySlashCommand('/shrug    hi  ') === `hi ${SHRUG}`);
+  check('slash: tableflip', applySlashCommand('/tableflip') === FLIP && applySlashCommand('/tableflip ugh') === `ugh ${FLIP}`);
+  check('slash: unflip', applySlashCommand('/unflip') === '┬─┬ノ( º _ ºノ)');
+  check('slash: lenny', applySlashCommand('/lenny') === '( ͡° ͜ʖ ͡°)');
+  check('slash: me italicizes', applySlashCommand('/me waves') === '_waves_');
+  check('slash: me with no text is left as typed', applySlashCommand('/me') === '/me' && applySlashCommand('/me   ') === '/me   ');
+  check('slash: me keeps each line italic on its own', applySlashCommand('/me one\ntwo') === '_one_\n_two_');
+  check('slash: me leaves blank lines alone', applySlashCommand('/me one\n\ntwo') === '_one_\n\n_two_');
+  check('slash: me with an underscore uses stars', applySlashCommand('/me snake_case') === '*snake_case*');
+  check('slash: me with text on the next line', applySlashCommand('/me\nhello') === '_hello_');
+  check('slash: spoiler wraps', applySlashCommand('/spoiler the butler did it') === '||the butler did it||');
+  check('slash: spoiler spans lines', applySlashCommand('/spoiler a\nb') === '||a\nb||');
+  check('slash: spoiler with no text is left as typed', applySlashCommand('/spoiler') === '/spoiler');
+  check('slash: an unknown command is plain text', applySlashCommand('/foo bar') === '/foo bar');
+  check('slash: a path is untouched', applySlashCommand('/usr/bin/env') === '/usr/bin/env');
+  check('slash: a path that starts with a command word is untouched', applySlashCommand('/shrugged') === '/shrugged');
+  check('slash: a command with a path after it is untouched', applySlashCommand('/me/profile') === '/me/profile');
+  check('slash: a command later in the text is untouched', applySlashCommand('hi /shrug') === 'hi /shrug');
+  check('slash: commands are lowercase only', applySlashCommand('/Shrug') === '/Shrug');
+  check('slash: a backslash escape sends a literal slash', applySlashCommand('\\/shrug') === '/shrug');
+  check('slash: the escape works on any text', applySlashCommand('\\/me hi') === '/me hi');
+  check('slash: a lone slash is text', applySlashCommand('/') === '/');
+  check('slash: multi-line text after a face', applySlashCommand('/shrug a\nb') === `a\nb ${SHRUG}`);
+  check('slash: a tab separates the command', applySlashCommand('/spoiler\thi') === '||hi||');
+  check('slash: ordinary text is untouched', applySlashCommand('hello world') === 'hello world');
+  check('slash: popup lists every command for a bare slash', matchSlashCommands('').length === SLASH_COMMANDS.length);
+  check('slash: popup filters by prefix', matchSlashCommands('s').map((c) => c.name).join() === 'shrug,spoiler');
+  check('slash: popup is empty for an unknown word', matchSlashCommands('zzz').length === 0);
+  check('slash: the query is read only at the start', slashQuery('/sh') === 'sh' && slashQuery('hi /sh') === null);
+  check('slash: a path is not a query', slashQuery('/usr/bin') === null && slashQuery('/sh ') === null);
+}
+
+// Polls: the pure pieces behind the poll view and the poll form.
+{
+  const poll = {
+    messageId: 'm1',
+    question: 'q',
+    allowMultiple: false,
+    closesAt: null,
+    closedAt: null,
+    source: 'harmony',
+    totalVoters: 4,
+    myVotes: ['a'],
+    options: [
+      { id: 'a', text: 'A', emoji: null, count: 2 },
+      { id: 'b', text: 'B', emoji: null, count: 2 },
+      { id: 'c', text: 'C', emoji: null, count: 0 },
+    ],
+  };
+  check('a share is a whole percentage', pollPercent(1, 3) === 33 && pollPercent(2, 3) === 67 && pollPercent(4, 4) === 100);
+  check('nobody voting is 0%, not NaN', pollPercent(0, 0) === 0 && pollPercent(3, 0) === 0);
+  check('ties all lead; no votes means no leader', pollLeaders(poll).join() === 'a,b' && pollLeaders({ options: [{ count: 0 }] }).length === 0);
+  const now = Date.parse('2026-01-01T12:00:00Z');
+  const at = (ms) => new Date(now + ms).toISOString();
+  check('a poll with no expiry never closes by the clock', isPollClosed({ closedAt: null, closesAt: null }, now) === false);
+  check('a poll closes when its time passes', isPollClosed({ closedAt: null, closesAt: at(-1) }, now) && !isPollClosed({ closedAt: null, closesAt: at(1000) }, now));
+  check('a poll closed by hand stays closed', isPollClosed({ closedAt: at(-5000), closesAt: at(60_000) }, now));
+  check(
+    'time left reads in minutes, hours and days',
+    pollTimeLeft(at(90_000), now) === '2 minutes left' &&
+      pollTimeLeft(at(3_600_000), now) === '1 hour left' &&
+      pollTimeLeft(at(5 * 3_600_000), now) === '5 hours left' &&
+      pollTimeLeft(at(3 * 86_400_000), now) === '3 days left',
+  );
+  check('a minute is singular, and a lapsed time says closing soon', pollTimeLeft(at(30_000), now) === '1 minute left' && pollTimeLeft(at(-1), now) === 'Closing soon');
+  check('no expiry reads as nothing', pollTimeLeft(null, now) === '');
+  check('a single-answer poll swaps the choice', nextPollChoice(poll, ['a'], 'b').join() === 'b');
+  check('clicking the chosen option withdraws it', nextPollChoice(poll, ['a'], 'a').length === 0);
+  const multi = { allowMultiple: true };
+  check('a multiple-answer poll toggles', nextPollChoice(multi, ['a'], 'b').join() === 'a,b' && nextPollChoice(multi, ['a', 'b'], 'a').join() === 'b');
+  const update = {
+    messageId: 'm1',
+    channelId: 'c',
+    closedAt: null,
+    totalVoters: 5,
+    options: [{ id: 'a', count: 2 }, { id: 'b', count: 3 }, { id: 'c', count: 0 }],
+    actorId: 'me',
+    actorVotes: ['b'],
+  };
+  const mine = applyPollUpdate(poll, update, 'me');
+  check('an update sets the counts, and the choice when it is the viewer\'s own', mine.options[1].count === 3 && mine.totalVoters === 5 && mine.myVotes.join() === 'b');
+  const theirs = applyPollUpdate(poll, update, 'someone-else');
+  check('someone else\'s vote leaves the viewer\'s choice alone', theirs.options[1].count === 3 && theirs.myVotes.join() === 'a');
+  const closing = applyPollUpdate(poll, { ...update, actorId: null, actorVotes: null, closedAt: at(0) }, 'me');
+  check('a close update keeps the choice and marks it closed', closing.myVotes.join() === 'a' && closing.closedAt === at(0));
+  check('an update does not mutate the poll it was applied to', poll.options[1].count === 2 && poll.totalVoters === 4);
+
+  let draft = newPollDraft();
+  check('a new form has two empty options, one answer, a day', draft.options.length === 2 && draft.allowMultiple === false && draft.durationHours === 24);
+  check('an empty form says what it lacks', draftProblem(draft) === 'Ask a question first.');
+  draft.question = '  Lunch?  ';
+  check('a question alone still needs options', draftProblem(draft) === 'Give at least 2 options.');
+  draft.options[0].text = 'Soup';
+  draft.options[1].text = '   ';
+  check('blank options do not count', draftProblem(draft) === 'Give at least 2 options.');
+  draft.options[1].text = 'Salad';
+  draft.options[1].emoji = ' 🥗 ';
+  check('a complete form can be sent', draftProblem(draft) === null);
+  draft = withAddedOption(draft);
+  check('a spare row is dropped from the request, text and emoji are trimmed', (() => {
+    const body = toCreatePollBody(draft);
+    return body.question === 'Lunch?' && body.options.length === 2 && body.options[0].emoji === null && body.options[1].emoji === '🥗' && body.durationHours === 24;
+  })());
+  check('the request the form builds passes the server schema', createPollSchema.safeParse(toCreatePollBody(draft)).success);
+  while (draft.options.length < POLL_LIMITS.optionsMax) draft = withAddedOption(draft);
+  check('options stop at ten', withAddedOption(draft).options.length === 10);
+  check('rows keep distinct keys', new Set(draft.options.map((o) => o.key)).size === 10);
+  let shrunk = draft;
+  for (const option of [...draft.options]) shrunk = withoutOption(shrunk, option.key);
+  check('options stop at two', shrunk.options.length === 2);
+  const noExpiry = { ...newPollDraft(), question: 'q', durationHours: null };
+  noExpiry.options[0].text = 'a';
+  noExpiry.options[1].text = 'b';
+  check('no expiry is sent as null and accepted', toCreatePollBody(noExpiry).durationHours === null && createPollSchema.safeParse(toCreatePollBody(noExpiry)).success);
+}
+
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

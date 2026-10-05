@@ -15,18 +15,22 @@
   import { drafts, type Draft } from '../lib/drafts.svelte';
   import { draftPreview } from '../lib/composer-preview';
   import { emojis } from '../lib/emojis.svelte';
+  import { emojiUsage } from '../lib/emoji-usage.svelte';
   import { mediaFilesFrom } from '../lib/files';
   import { members } from '../lib/members.svelte';
   import { meta } from '../lib/meta.svelte';
   import type { IconName } from '../lib/icons';
   import { session } from '../lib/session.svelte';
+  import { applySlashCommand, matchSlashCommands, slashQuery } from '../lib/slash-commands';
   import { parseTimeExpression, timestampChoices, type ParsedMoment } from '../lib/time-input';
   import { loadUnicodeEmoji, type UnicodeEmoji } from '../lib/unicode-emoji';
   import { uploads } from '../lib/upload-queue.svelte';
   import ComposerPreview from './ComposerPreview.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
   import GifPicker from './GifPicker.svelte';
+  import SchedulePicker from './SchedulePicker.svelte';
   import Icon from './Icon.svelte';
+  import PollComposer from './PollComposer.svelte';
   import TimestampPicker from './TimestampPicker.svelte';
 
   const acceptAttribute = ALLOWED_ATTACHMENT_TYPES.join(',');
@@ -69,6 +73,8 @@
   let showPicker = $state(false);
   let showGifs = $state(false);
   let showTimes = $state(false);
+  let showSchedule = $state(false);
+  let showPoll = $state(false);
   /** The phone-only + menu that gathers the four picker buttons. */
   let showActions = $state(false);
 
@@ -105,7 +111,8 @@
   type Trigger =
     | { kind: 'emoji'; start: number; query: string }
     | { kind: 'mention'; start: number; query: string; moment: ParsedMoment | null }
-    | { kind: 'channel'; start: number; query: string };
+    | { kind: 'channel'; start: number; query: string }
+    | { kind: 'slash'; start: number; query: string };
 
   /** One row in the autocomplete popup, whichever kind it is. */
   interface Suggestion {
@@ -272,24 +279,65 @@
    * something rather than leaving a menu sitting over the picker.
    */
   function toggleEmoji(): void {
+    showPoll = false;
     showPicker = !showPicker;
     showGifs = false;
     showTimes = false;
+    showSchedule = false;
     showActions = false;
   }
 
   function toggleGifs(): void {
+    showPoll = false;
     showGifs = !showGifs;
     showPicker = false;
     showTimes = false;
+    showSchedule = false;
     showActions = false;
   }
 
   function toggleTimes(): void {
+    showPoll = false;
     showTimes = !showTimes;
     showPicker = false;
     showGifs = false;
+    showSchedule = false;
     showActions = false;
+  }
+
+  /** Opens the "send later" popover, from the + menu, the button by Send or Ctrl+Shift+Enter. */
+  function toggleSchedule(): void {
+    showSchedule = !showSchedule;
+    showPoll = false;
+    showPicker = false;
+    showGifs = false;
+    showTimes = false;
+    showActions = false;
+    activeTrigger = null;
+  }
+
+  /** The server has the draft now, so the box is emptied the way a send empties it. */
+  function onScheduled(): void {
+    const key = draftKey;
+    if (key !== null) drafts.clear(key);
+    chat.replyTarget = null;
+    showSchedule = false;
+    activeTrigger = null;
+    void tick().then(() => textInput?.focus());
+  }
+
+  function togglePoll(): void {
+    showPoll = !showPoll;
+    showSchedule = false;
+    showPicker = false;
+    showGifs = false;
+    showTimes = false;
+    showActions = false;
+  }
+
+  function closePoll(refocus: boolean): void {
+    showPoll = false;
+    if (refocus) textInput?.focus();
   }
 
   function pickFiles(): void {
@@ -382,6 +430,10 @@
    */
   function detectTrigger(text: string, caret: number): Trigger | null {
     const before = text.slice(0, caret);
+
+    // A slash helper only exists as the first word of the message.
+    const slash = slashQuery(before);
+    if (slash !== null && matchSlashCommands(slash).length > 0) return { kind: 'slash', start: 0, query: slash };
 
     const emoji = /(?:^|\s):([a-zA-Z0-9_]{0,32})$/.exec(before);
     if (emoji) {
@@ -502,7 +554,50 @@
             }))
         : [];
 
-      return [...server, ...unicode].slice(0, maxSuggestions);
+      // Emoji this member uses a lot rise: a bare `:` offers their top few, and
+      // a typed query keeps its order except that used matches go first (the
+      // sort is stable, so equal scores keep custom ahead of unicode).
+      const scores = emojiUsage.scores;
+      const scoreOf = (suggestion: Suggestion): number => scores.get(suggestion.key.replace(/^(?:emoji|unicode):/, '')) ?? 0;
+      const used: Suggestion[] = needle
+        ? []
+        : emojiUsage.ranked.slice(0, 6).map((entry) =>
+            entry.emojiId
+              ? {
+                  key: `emoji:${entry.emojiId}`,
+                  label: entry.emoji,
+                  detail: null,
+                  imageUrl: `/api/v1/emojis/${entry.emojiId}`,
+                  initial: null,
+                  icon: null,
+                  insert: `${entry.emoji} `,
+                }
+              : {
+                  key: `unicode:${entry.emoji}`,
+                  label: unicodeEmoji.find((e) => e.emoji === entry.emoji)?.name ?? entry.emoji,
+                  detail: null,
+                  imageUrl: null,
+                  initial: null,
+                  emoji: entry.emoji,
+                  icon: null,
+                  insert: `${entry.emoji} `,
+                },
+          );
+      const seen = new Set(used.map((suggestion) => suggestion.key));
+      const merged = [...used, ...[...server, ...unicode].filter((suggestion) => !seen.has(suggestion.key))];
+      return (needle ? merged.sort((a, b) => scoreOf(b) - scoreOf(a)) : merged).slice(0, maxSuggestions);
+    }
+
+    if (trigger.kind === 'slash') {
+      return matchSlashCommands(needle).map((command) => ({
+        key: `slash:${command.name}`,
+        label: command.usage,
+        detail: command.description,
+        imageUrl: null,
+        initial: null,
+        icon: null,
+        insert: `/${command.name} `,
+      }));
     }
 
     if (trigger.kind === 'channel') {
@@ -606,6 +701,13 @@
       }
     }
 
+    // Ctrl+Shift+Enter (Cmd on a Mac) schedules the draft instead of sending it.
+    if (event.key === 'Enter' && event.shiftKey && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+      event.preventDefault();
+      if (timeoutUntil === null) toggleSchedule();
+      return;
+    }
+
     // Enter sends and Shift+Enter starts a new line, as in Discord. A key that
     // finishes an IME composition is left to the IME, or picking a Japanese
     // candidate would send the message. Some browsers report `isComposing`
@@ -650,7 +752,7 @@
    */
   async function send(): Promise<void> {
     const key = draftKey;
-    const content = value.trim();
+    const content = applySlashCommand(value.trim());
     if (key === null || busy || uploading || timeoutUntil !== null || slowmodeRemaining > 0) return;
     if (!content && pending.length === 0) return;
 
@@ -779,11 +881,33 @@
   {/if}
 
   {#if showGifs}
-    <GifPicker onpick={addGif} />
+    <GifPicker onpick={addGif} onlink={(url) => {
+        showGifs = false;
+        void insertAtCaret(url);
+      }} />
+  {/if}
+
+  {#if showPoll}
+    <PollComposer onclose={closePoll} />
   {/if}
 
   {#if showTimes}
     <TimestampPicker onpick={(token) => insertAtCaret(token)} onclose={closeTimes} />
+  {/if}
+
+  {#if showSchedule && chat.activeChannel}
+    <SchedulePicker
+      channelId={chat.activeChannel.id}
+      channelName={chat.activeChannel.name}
+      content={value}
+      attachmentIds={pending.map((attachment) => attachment.id)}
+      replyToId={chat.replyTarget?.id ?? null}
+      onscheduled={onScheduled}
+      onclose={(refocus) => {
+        showSchedule = false;
+        if (refocus) textInput?.focus();
+      }}
+    />
   {/if}
 
   {#if pending.length > 0}
@@ -873,8 +997,14 @@
         <button type="button" role="menuitem" disabled={timeoutUntil !== null} onclick={toggleTimes}>
           <span class="composer-actions-icon"><Icon name="clock" size={18} /></span> Timestamp
         </button>
+        <button type="button" role="menuitem" disabled={timeoutUntil !== null} onclick={toggleSchedule}>
+          <span class="composer-actions-icon"><Icon name="clock" size={18} /></span> Schedule send
+        </button>
         <button type="button" role="menuitem" disabled={uploading || timeoutUntil !== null} onclick={pickFiles}>
           <span class="composer-actions-icon"><Icon name="paperclip" size={18} /></span> Attach image
+        </button>
+        <button type="button" role="menuitem" disabled={timeoutUntil !== null} onclick={togglePoll}>
+          <span class="composer-actions-icon"><Icon name="poll" size={18} /></span> Poll
         </button>
       </div>
     {/if}
@@ -906,6 +1036,16 @@
     >
       {#if uploading}…{:else}<Icon name="paperclip" size={20} />{/if}
     </button>
+    <button
+      type="button"
+      class="attach poll-trigger"
+      title="Create poll"
+      aria-label="Create poll"
+      aria-expanded={showPoll}
+      aria-haspopup="dialog"
+      disabled={timeoutUntil !== null}
+      onclick={togglePoll}><Icon name="poll" size={20} /></button
+    >
     <input class="file-input" type="file" accept={acceptAttribute} multiple bind:this={fileInput} onchange={onFiles} />
     <!--
       Slowmode only holds back sending (see `send`): the field stays enabled so
@@ -934,6 +1074,18 @@
       onfocus={updateAutocomplete}
       onblur={() => (activeTrigger = null)}
     ></textarea>
+    <button
+      type="button"
+      class="schedule-trigger"
+      title="Schedule send (Ctrl+Shift+Enter)"
+      aria-label="Schedule send"
+      aria-expanded={showSchedule}
+      aria-haspopup="dialog"
+      disabled={uploading || timeoutUntil !== null}
+      onpointerdown={(event) => event.preventDefault()}
+      onmousedown={(event) => event.preventDefault()}
+      onclick={toggleSchedule}><Icon name="chevron-down" size={16} /></button
+    >
     <button
       type="submit"
       class="send"

@@ -139,12 +139,15 @@ export function listReferencedHashes(sqlite: DatabaseSync): Set<string> {
   return hashes;
 }
 
+/** An upload waiting for a scheduled message to carry it is not abandoned, whatever its age. */
+const NOT_SCHEDULED_SQL = 'id NOT IN (SELECT attachment_id FROM scheduled_message_attachments)';
+
 /**
  * The attachments retention must keep: those hanging off a pinned or saved
  * message. `message_id` is null for an abandoned upload, which is never exempt,
  * and the explicit null check keeps NOT IN from turning null into "not deleted".
  */
-const EXEMPT_ATTACHMENT_SQL = `message_id IS NULL OR message_id NOT IN (${EXEMPT_MESSAGE_IDS_SQL})`;
+const EXEMPT_ATTACHMENT_SQL = `(message_id IS NULL OR message_id NOT IN (${EXEMPT_MESSAGE_IDS_SQL})) AND ${NOT_SCHEDULED_SQL}`;
 
 /** Deletes image rows only; callers sweep the blobs afterwards. */
 export function deleteImageAttachmentsOlderThan(sqlite: DatabaseSync, before: string): number {
@@ -165,7 +168,7 @@ export function deleteVideoAttachmentsOlderThan(sqlite: DatabaseSync, before: st
 /** Uploads that were never attached to a message (abandoned drafts). */
 export function deleteUnattachedAttachmentsOlderThan(sqlite: DatabaseSync, before: string): number {
   const result = sqlite
-    .prepare('DELETE FROM attachments WHERE message_id IS NULL AND created_at < ?')
+    .prepare(`DELETE FROM attachments WHERE message_id IS NULL AND created_at < ? AND ${NOT_SCHEDULED_SQL}`)
     .run(before);
   return Number(result.changes);
 }

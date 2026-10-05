@@ -133,6 +133,24 @@ retention pruning — at the cost of a scan that is imperceptible at the message
 produces. The channels a searcher may see are resolved first and passed into the query, so a locked
 channel cannot leak through a result.
 
+### Filters
+
+Discord-style filters narrow the same scan: `from`, `mentions`, `in`, `has`, and a sent-after /
+sent-before time range. They are plain `AND` conditions in `searchMessages` (`db/messages.ts`) with
+every value bound as a parameter; the `has` traits map to fixed SQL strings, never to caller input.
+Names are resolved in `MessageService.search`, and the order matters for safety: `in` is matched only
+against the channels the caller can already see, so a hidden channel and a channel that does not exist
+both answer `404 no_such_channel`, and every other filter is applied inside that visible set. `from`
+and `mentions` resolve names to accounts case-insensitively (username or display name); a name that
+matches nobody simply matches no messages. `mentions` is a substring match on the literal `@username`
+text rather than the `mentions` table, because that table skips self-mentions, bots and Discord
+stand-ins. Dates are sent as epoch milliseconds: the client turns a local calendar day into bounds so
+the server never needs to know the member's time zone.
+
+On the client, `lib/search-query.ts` is the pure half: it tokenizes the box (quotes keep a name with a
+space whole), turns finished `key:value` tokens into chips, builds the request, and ranks the
+suggestions for the token under the caret. `SearchPanel.svelte` only wires it to the DOM.
+
 If a very large instance ever needed ranking or word matching, SQLite's FTS5 is available in the
 bundled build and would slot in behind the same endpoint.
 
@@ -145,12 +163,14 @@ The bridge mirrors messages both ways. On the Discord side you need to:
    are privileged: the toggles work right away for a bot in fewer than 100
    servers, and need Discord's approval beyond that. Message Content is what makes
    message text readable. Presence is what tells Harmony who on the Discord side is
-   online, for the member list of a bridged channel.
+   online, for the member list of a bridged channel. The poll intent the bridge also
+   asks for is not privileged and needs no toggle.
 3. Invite the bot with at least **View Channels**, **Send Messages**, **Read
    Message History**, **Add Reactions** and **Manage Webhooks**. Add **Manage
    Messages** too if a message written on Discord should also disappear there when
    it is deleted in Harmony; a webhook can only delete its own messages, so the bot
-   does that itself.
+   does that itself. Add **Pin Messages** if pins should sync from Harmony to
+   Discord (pins made on Discord reach Harmony without it).
 
 Intents are read when the bot connects, so restart Harmony after changing them. If
 an intent is requested that has not been enabled, Discord refuses the connection
@@ -288,6 +308,25 @@ grouped file, so the shape the picker relies on is asserted by the text smoke te
 against the package itself, which is what would catch an upgrade changing it into
 an empty list with no error anywhere.
 
+**Frequently used.** The client remembers the emoji a member sends in messages,
+adds as reactions (adding, not removing) and so on, in `localStorage` under
+`harmony:emoji-usage:<user id>`, per device and never sent to the server. Storage
+access is guarded and an in-memory copy backs it, so it still works for a session
+with storage blocked. `lib/emoji-usage.ts` holds the pure part: up to 36 entries,
+each a use count that halves every 14 days (so recency and frequency both count),
+custom emoji keyed by id so a rename merges and a deleted one is dropped when
+resolved against the live list. The picker shows a **Frequent** tab first when
+there is any history, a bare `:` in the composer offers the top few, and a typed
+`:query` keeps its order except that used matches float up (stable, so custom
+stays ahead of unicode on equal scores).
+
+**Jumbo emoji.** A message that is a single paragraph of nothing but emoji
+(custom ones that resolve and/or unicode, whitespace between, at most 27) and has
+no attachments is drawn large, as on Discord. `lib/jumbo-emoji.ts` decides, using
+`Intl.Segmenter` graphemes so skin tones, ZWJ sequences, flags and keycaps count as
+one emoji while bare digits, `#` and `*` do not. Quotes, lists, headers, code and
+unknown `:names:` make a message ordinary.
+
 An emoji from another Discord server is the one kind the picker does not offer.
 When a bridged message or reaction names an emoji this instance does not have,
 the bridge fetches it from Discord's own emoji CDN by its id — the id in the
@@ -401,12 +440,106 @@ Reading pins follows channel locking exactly as history does. A change is broadc
 `MESSAGE_UPDATE`, which every client already applies; the pins panel listens for the same event (and
 `MESSAGE_DELETE`) to stay current while it is open. Pins and unpins are written to the audit log.
 
-The logic lives in `pins/service.ts`, deliberately shaped like the message service because
-**Discord pin sync is planned but not built yet**. A local pin or unpin notifies `onPinned` /
-`onUnpinned`, which the bridge can subscribe to and repeat on Discord; a pin observed on Discord is
-applied through `pinBridged` / `unpinBridged`, which skip permission checks and notify no listener,
-so a pin can never echo back and forth. Its update is broadcast straight from the pin service, not
-through the message service's edit path, so a pin is never mistaken for an edit and mirrored as one.
+The logic lives in `pins/service.ts`, deliberately shaped like the message service because the
+bridge syncs pins with Discord. A local pin or unpin notifies `onPinned` / `onUnpinned`, which the
+bridge subscribes to and repeats on Discord; a pin observed on Discord is applied through
+`pinBridged` / `unpinBridged`, which skip permission checks and notify no listener, so a pin can
+never echo back and forth. Its update is broadcast straight from the pin service, not through the
+message service's edit path, so a pin is never mistaken for an edit and mirrored as one. A bridged
+pin is audited too, with no actor; the log shows it as made by *Discord*.
+
+### Pin sync with Discord
+
+Only messages the bridge has mapped can be pinned across: Harmony messages it mirrored, and Discord
+messages it imported. A pin on anything else is ignored on the Discord side and kept in Harmony.
+
+**Harmony to Discord.** Pinning or unpinning a mapped message calls the bot's pin route on its
+Discord copy. This needs the **Pin Messages** permission (Discord's `PinMessages`, split out of
+Manage Messages) for the bot in that channel. If Discord refuses, the pin stays in Harmony, nothing
+is surfaced to the member, and the failure is written once per channel to the server log as
+`bridge_pin_failed`; the next success re-arms the warning. A Discord channel that already holds 50
+pins is reported the same way.
+
+**Discord to Harmony.** Discord's `channelPinsUpdate` carries only a timestamp, never which message
+changed, and the "pinned a message to this channel" notice is a separate system message. So the bridge
+ignores the notice (`DiscordIncomingMessage.system`, set from discord.js's `message.system`; it is
+never a person's words) and instead reads the channel's pin list (`GET /channels/:id/messages/pins`)
+whenever the event fires. It keeps, in memory, the set of Discord pin ids it has accounted for per
+channel, and applies only the difference since the last read: new ids are pinned in Harmony with
+`pinBridged` (keeping Discord's pin time), ids that disappeared are unpinned with `unpinBridged`.
+Acting on the difference, not on the whole list, is what stops a pin Discord refused from being undone,
+or an unpin Discord refused from being re-applied, by some unrelated change later. Reads of one
+channel are queued one at a time together with the pin calls we make, and a burst of events folds into
+a single read, so the rate limit is not stressed and a read never races our own pin.
+
+**Loops.** `pinBridged` / `unpinBridged` never notify, so a Discord pin cannot go back out. Our own
+pin comes back as a `channelPinsUpdate`; the read finds the id already in the record and changes
+nothing.
+
+**Cap.** Harmony and Discord both allow 50. A Discord pin that Harmony has no room for is left unpinned
+and kept out of the record, so it is tried again on a later pin update once a slot is free.
+
+**Backfill.** When the bridge connects, and again after Discord forces a fresh session (events in the
+gap are lost), every bridged channel is read once with no record yet. That first read only adds, in both
+directions, up to Discord's 50: Discord pins that Harmony lacks are pinned here, and Harmony pins that
+Discord lacks are sent over, oldest first. Without a stored record there is no telling a pin made while
+the bridge was away from one that was removed, so an unpin made on one side while the bridge was
+offline is undone by the other side's pin. It costs one request per bridged channel plus at most 50
+pin calls.
+
+## Polls
+
+A poll is a message whose text is the question, plus three tables (`polls`, `poll_options`,
+`poll_votes`, migration 28) that cascade from the message. Making the question the message text
+means search, reply quotes, the inbox and notifications need no poll awareness, and a poll message
+refuses edits because the options are fixed once people vote. A soft delete keeps the rows and every
+read filters the message out like any other; a retention delete takes the poll with it through the
+foreign keys.
+
+A vote is one row per person per option, with `poll_id` repeated on it so "has this person voted"
+and the distinct-voter count need no join. Casting a vote replaces the caller's whole choice in a
+transaction. `mergeUsers` keeps one vote per person when two accounts merge: the survivor's choice
+stands in a single-answer poll and the sets are united in a multiple-answer one.
+
+Results are live. A vote or a close broadcasts `POLL_UPDATE` through the hub with the channel's
+visibility rules, so a locked channel's polls never reach a member without the role. The payload
+carries counts and the actor, not a per-viewer view, in the same way reaction events carry the user:
+each client keeps its own `myVotes`. A timer (`polls/service.ts`, every 15 seconds; the smoke test
+shortens it with `HARMONY_POLL_SWEEP_MS`) closes polls whose time is up, and a vote that lands after
+the time but before the sweep closes the poll itself and is refused. Voting is rate limited per
+member.
+
+### Polls across the bridge
+
+What the Discord API allows decides what crosses:
+
+- **Harmony to Discord, the poll itself.** A poll made here is posted to the bridged channel as a
+  native Discord poll with the same options, emoji, multiple-answer setting and duration. A webhook
+  cannot carry a poll, so the *bot* posts it, with a line above saying whose question it is. A poll
+  with no expiry is posted with Discord's longest duration (32 days).
+- **Discord to Harmony, the poll itself.** A native poll arrives as a poll message (`source` is
+  `discord`) with its options. Only unicode emoji on options are carried; a custom emoji is dropped.
+  Text posted with the poll is not carried.
+- **Discord to Harmony, votes.** Votes arrive live through the `GuildMessagePolls` intent (not
+  privileged, so there is nothing to enable) and are counted under the voter's stand-in account, or
+  under the member whose Discord id is linked. When a poll is first read, its existing voters are
+  fetched too, up to the 100 per answer that Discord's endpoint returns, so a poll with more voters on
+  Discord than that is undercounted here.
+- **Harmony to Discord, votes: not possible.** Discord gives a bot no way to vote, so a vote made
+  in Harmony never reaches Discord. Discord's own tally shows only Discord voters, while Harmony shows
+  the union. This is a limit of the platform, not of the bridge.
+- **Closing, both ways.** Ending a Harmony poll by hand ends the Discord poll through the bot (it
+  is the poll's author there). Discord closing a poll that was made there closes it here. A poll
+  made here is governed by Harmony's clock: Discord's own timer on it, which differs for a poll with
+  no expiry, is ignored. A poll made on Discord cannot be ended from Harmony.
+- **Deleting** a poll message here deletes the Discord message, as for any other message.
+
+A person is never counted twice. A Discord account linked to a member resolves to that member, so
+their Discord vote and their Harmony vote are the same row, and in a single-answer poll the latest
+choice from either side replaces the earlier one. There is no loop to guard against beyond the usual
+rule: bridged votes and closes go through `voteBridged` / `closeBridged`, which skip permission
+checks and notify no listener, and only a local early end notifies the bridge. The poll's Discord
+message is also recorded in the permanent seen-set, like any other mirrored message.
 
 ## Saved messages
 
@@ -421,6 +554,29 @@ something a retention sweep should take away. The exemption is a single SQL frag
 in `db/attachments.ts` apply, so a pinned or saved message and its pictures and clips survive image,
 video and message retention and are spared by emergency pruning too. They go only when the message
 itself is deleted by its author or a moderator, which cascades the save away.
+
+## Scheduled messages
+
+A scheduled message is one member's queued post, in `scheduled_messages` (with its uploads in
+`scheduled_message_attachments`). `scheduled/service.ts` owns a timer: one `setInterval` tick (10 s,
+`HARMONY_SCHEDULED_TICK_MS`) that also runs once at startup to catch up on anything that came due while
+the server was down. Delivery calls the same `MessageService.create` as a hand-sent message, with an
+auth context rebuilt from the author's current roles, so channel visibility, Send Messages, timeouts,
+bans and slowmode are all checked at send time. The claim is atomic: the queue row is deleted inside
+the transaction that inserts the message (the node:sqlite calls are synchronous, so nothing interleaves),
+and a failure rolls both back, which is why a message is never sent twice and a crash loses nothing.
+A permanent failure leaves the row as `failed` with a reason and notifies the owner's sessions; slowmode
+is treated as a wait and retried for five minutes. Uploads linked from the queue are excluded from the
+"abandoned upload" and age rules in `db/attachments.ts`, and `MessageService` refuses to attach them to
+any other message. `mergeUsers` re-owns the rows; deleting a channel or user cascades them away.
+
+On the client, `lib/scheduled.svelte.ts` only mirrors the queue (it loads the list and follows
+`SCHEDULED_MESSAGE_UPDATE`); nothing is timed in the browser, so a message goes out whether or not a tab
+is open. The pure parts (reading the typed time with the same parser the composer's `@` timestamps use,
+checking it, describing it in the member's own zone) are in `lib/schedule-time.ts` and covered by the
+text smoke test. The composer opens `SchedulePicker` from the chevron by Send, the + menu or
+Ctrl+Shift+Enter, and `ScheduledPanel` (header clock button, with a count badge) lists, edits, sends
+and deletes entries, failed ones included.
 
 ## Notification sounds
 
@@ -438,6 +594,20 @@ what the sound actually is, and when it plays, is the client's business.
 
 Which messages count as a mention is decided by the same parser that renders them,
 so a name inside a backtick block is a quotation rather than a summons.
+
+## Slash helpers
+
+Typing `/` as the first character of the message box opens the same suggestion popup that `:`, `@` and
+`#` use, listing `/shrug`, `/tableflip`, `/unflip`, `/lenny`, `/me <text>` and `/spoiler <text>`. They
+are client-side text transforms in `apps/web/src/lib/slash-commands.ts`, applied when the message is
+sent; the server never sees the command, only the finished text. (The shrug is sent as escaped
+Markdown, `¯\\\_(ツ)\_/¯`, exactly as Discord's own client does, because its backslash and underscores
+would otherwise be eaten and the face italicized.) The first four append an emoticon to
+whatever follows the command word, `/me` sends the text in italics (one emphasis run per line, since
+italics do not cross a line break) and `/spoiler` wraps it in `||`. A command only counts when the first
+word is exactly a known lowercase name followed by whitespace or the end of the text, so `/foo`,
+`/usr/bin` and `/shrugged` go out untouched, and a leading `\/` sends a literal slash. `/me` and
+`/spoiler` with nothing after them are left as typed.
 
 ## Links and media
 
@@ -474,6 +644,15 @@ preview metadata, and that address is fetched by the same guarded path and kept 
 differ only in access — Tenor serves its pages to anyone, while Klipy puts them behind a Cloudflare
 challenge and hands them over to a recognized crawler name alone. That is precisely what the opt-in
 `previewUserAgent` setting is for, and why Klipy page links preview only once it is set.
+
+A link in angle brackets (`<https://example.com>`) is suppressed, as on Discord. The shared
+`listEmbeddableUrls` skips it, so the resolver finds nothing, and the client's parser draws it as a
+plain link without the brackets. The bridge used to strip the brackets from incoming Discord text so
+the link would unfurl here; it now keeps them, which is also what makes a suppressed link round-trip
+(Harmony sends the text to Discord as written, and Discord's own edits come back the same way). The
+manual counterpart, Remove embeds, sets `messages.embeds_hidden` (migration 30), which the resolver
+checks before doing anything, so the flag outlives edits. It drops the card and any fetched picture,
+and is not mirrored to Discord.
 
 A Discord attachment link needs a different trick again, because the address itself is the problem:
 Discord signs it and the signature expires, so a link copied out of the client usually arrives already
@@ -550,6 +729,61 @@ is what the policy allows, and it has the happy side effect that browsing the pi
 Klipy every member's address. One consequence is worth knowing: the tile and the copy that is kept are
 not the same file, because a grid of full-size gifs would be megabytes through the instance's own
 connection for every search.
+
+## Gif storage: store or link
+
+By default every gif is brought home: a picked Klipy result or a pasted gif address is downloaded and
+kept as a content-addressed blob. That is the right default for a community instance: members' IP
+addresses never reach a third party, a gif survives its source disappearing, and retention, the media
+gallery and the bridge all keep working on files that are really here. The cost is disk and the
+download.
+
+The admin setting `gifStorage` (Settings, Gifs) lets an owner trade that away: in `link` mode a gif on
+an allowlisted gif host is not downloaded; the message just points at it. The trade-offs, which the
+admin help text also states:
+
+- **Privacy.** Every viewer's browser contacts the gif host, which sees their IP address and, for the
+  duration of the request, that they opened Harmony. `Referrer-Policy: no-referrer` stops it learning
+  the channel. Store mode leaks nothing.
+- **Durability.** A linked gif disappears when the host removes it or changes its address. Tenor's API
+  is shutting down on 30 June 2026 although `media.tenor.com` keeps serving existing addresses; Klipy
+  is the hosted service the picker uses. Store mode is immune.
+- **Cost.** Link mode saves disk and one download per new gif.
+- **Safety.** Hotlinking is the risky half, so it is narrow. The allowlist is in
+  `packages/shared/src/gif-hosts.ts`, matched on the parsed URL (https, default port, no credentials,
+  exact host or real subdomain), and is used in four places that must agree: the server's check, the
+  parse of stored embeds (a hand-edited row cannot name another host), the client before it draws
+  anything, and the Content-Security-Policy. Nothing outside the list is ever linked, and a Discord
+  CDN link is never on it: those addresses are signed with `ex`/`is`/`hm` parameters and expire in
+  about a day, so the bridge keeps downloading and storing them.
+
+How it works without a new table: a linked gif is an ordinary embed. The message text is the gif's
+address, and when the embed resolver sees an allowlisted address in link mode it calls
+`verifyLinkedGif` (`embeds/linked-gif.ts`) and, if that passes, stores `LinkEmbed.gif`
+(`{ contentType, width, height }`) on the message's `embed` column with the gif's address as the embed
+`url`. The check goes through the same public-address guard as every outbound fetch, follows no
+redirects at all (so the file cannot live anywhere the allowlist did not see), requires a gif-like
+content type (GIF, animated WebP, MP4, WebM) and applies the instance's own image or video size limit.
+A host that fails any of it simply falls back to the stored path. The size comes from the host's
+`Content-Length` and the file is not downloaded, so a host that lies about it is trusted for the
+size only; it still cannot serve anything the allowlist does not name. Order of preference when a
+message arrives: a copy already stored here (free, and private), then a link, then a download.
+
+The picker keeps its tile previews going through the server's media proxy, so browsing the picker
+reveals nothing either way; only a gif that is actually sent is hotlinked. In link mode picking a
+Klipy result calls `POST /api/v1/gifs/link`, which runs the same check and hands back the address,
+and the composer inserts it as text. Favorites, the This server tab and `gifs/pick` are untouched:
+they are stored bytes, and saving a hosted gif to favorites still keeps a copy.
+
+The Content-Security-Policy is built per response (`http/security.ts`): only the built-in policy is
+widened, only `img-src` and `media-src`, only while the mode is on. It is read per page load, so a
+client with the app already open needs a reload after the setting changes. A custom `HARMONY_CSP` is
+never modified. Switching back to `store` leaves existing linked embeds in the database; clients stop
+drawing them (and the browser would refuse them anyway) and the address shows as plain text.
+
+The bridge needs nothing: a message is text plus the embed, and a linked gif's text is just the
+address, so Discord unfurls it itself. Incoming Discord links to an allowlisted host are linked the
+same way in link mode.
 
 ## Server log
 

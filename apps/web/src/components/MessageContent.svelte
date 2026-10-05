@@ -1,13 +1,17 @@
 <script lang="ts">
   import type { User } from '@harmony/shared';
   import { chat } from '../lib/chat.svelte';
+  import { isJumbo } from '../lib/jumbo-emoji';
   import { inlineSegmentsOf, type InlineSegment, type ListBlock, type MessageBlock } from '../lib/message-text';
   import { profileCard } from '../lib/profile-card.svelte';
   import { formatTimestamp, formatTimestampTitle } from '../lib/timestamp';
   import CodeBlock from './CodeBlock.svelte';
 
   /** The parsed text of one message, drawn as Discord would draw it. */
-  let { blocks }: { blocks: MessageBlock[] } = $props();
+  let { blocks, allowJumbo = true }: { blocks: MessageBlock[]; allowJumbo?: boolean } = $props();
+
+  /** A message of nothing but emoji is drawn large, as on Discord. */
+  const jumbo = $derived(allowJumbo && isJumbo(blocks));
 
   function openCard(user: User, element: HTMLElement): void {
     profileCard.show(user, element);
@@ -124,4 +128,4 @@
   {/each}
 {/snippet}
 
-{@render blockList(blocks)}
+{#if jumbo}<span class="jumbo-emoji">{@render blockList(blocks)}</span>{:else}{@render blockList(blocks)}{/if}

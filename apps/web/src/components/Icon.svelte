@@ -102,5 +102,9 @@
     <path d="M5.5 12h.01" stroke-width="3" />
     <path d="M12 12h.01" stroke-width="3" />
     <path d="M18.5 12h.01" stroke-width="3" />
+  {:else if name === 'poll'}
+    <path d="M5 20V11" />
+    <path d="M12 20V4" />
+    <path d="M19 20v-6" />
   {/if}
 </svg>

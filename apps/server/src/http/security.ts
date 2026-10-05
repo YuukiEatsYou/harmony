@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { gifLinkCspSources } from '@harmony/shared';
 
 /**
  * A strict policy for the single-page client. It loads only its own bundle and
@@ -22,9 +23,29 @@ export const DEFAULT_CSP = [
   'frame-src https://www.youtube-nocookie.com',
 ].join('; ');
 
+/**
+ * The default policy with `img-src` and `media-src` opened to the allowlisted
+ * gif hosts, for an instance whose gif storage mode is "link". Only those two
+ * directives change, and only to the fixed list in the shared package.
+ */
+export const DEFAULT_CSP_WITH_GIF_HOSTS = DEFAULT_CSP.split('; ')
+  .map((directive) =>
+    directive.startsWith('img-src ') || directive.startsWith('media-src ')
+      ? `${directive} ${gifLinkCspSources().join(' ')}`
+      : directive,
+  )
+  .join('; ');
+
 export interface SecurityOptions {
   /** The `Content-Security-Policy` value, or null to leave the header off. */
   csp: string | null;
+  /**
+   * Whether gifs are linked rather than stored right now. Asked on every
+   * response, so flipping the setting takes effect on the next page load. It
+   * only widens the built-in policy; a policy set through `HARMONY_CSP` is the
+   * operator's own and is sent exactly as written.
+   */
+  linkedGifs?: () => boolean;
 }
 
 /** Adds the hardening headers a browser needs, to every response. */
@@ -36,7 +57,10 @@ export function registerSecurityHeaders(app: FastifyInstance, options: SecurityO
     reply.header('X-Frame-Options', 'DENY');
     // Nothing here needs to tell an external site which channel a member is in.
     reply.header('Referrer-Policy', 'no-referrer');
-    if (options.csp) reply.header('Content-Security-Policy', options.csp);
+    if (options.csp) {
+      const widen = options.csp === DEFAULT_CSP && options.linkedGifs?.() === true;
+      reply.header('Content-Security-Policy', widen ? DEFAULT_CSP_WITH_GIF_HOSTS : options.csp);
+    }
     // HSTS is only meaningful once the request really did arrive over TLS, which
     // `request.protocol` reports correctly when `trustProxy` is set.
     if (request.protocol === 'https') {

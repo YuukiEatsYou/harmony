@@ -24,10 +24,12 @@ code wins — please open an issue.
   - [Auth](#auth)
   - [Channels and categories](#channels-and-categories)
   - [Messages](#messages)
+  - [Polls](#polls)
   - [Search](#search)
   - [Mentions and replies](#mentions-and-replies)
   - [Pinned messages](#pinned-messages)
   - [Saved messages](#saved-messages)
+  - [Scheduled messages](#scheduled-messages)
   - [Reactions](#reactions)
   - [Attachments](#attachments)
   - [Media gallery](#media-gallery)
@@ -238,6 +240,7 @@ type Message = {
   embed: LinkEmbed | null;      // link preview, see "Link previews"
   pinnedAt: string | null;      // when it was pinned, see "Pinned messages"
   saved: boolean;               // whether the viewer saved it, see "Saved messages"
+  poll: Poll | null;            // the poll this message carries, see "Polls"
 };
 
 type LinkEmbed = {
@@ -497,6 +500,7 @@ Public instance information a client needs before signing in.
   "allowedImageTypes": ["image/png", "image/jpeg", "image/gif", "image/webp"],
   "allowedVideoTypes": ["video/mp4"],
   "klipyConfigured": false,
+  "gifStorage": "store",
   "discordAuthEnabled": false,
   "limits": {
     "messageLength": 4000,
@@ -917,6 +921,23 @@ Cloudflare, and so Klipy, among others — refuse that name and the preview neve
 logs `link preview refused` when that happens. Setting `previewUserAgent` to a name such sites allow
 is the only way to preview them.
 
+#### Suppressing previews
+
+Wrapping a link in angle brackets, `<https://example.com>`, as on Discord, asks for no preview: the
+text is stored exactly as written, nothing is resolved, and clients draw an ordinary link without the
+brackets. The Discord bridge keeps the brackets in both directions, so a link suppressed on one side
+is suppressed on the other. Editing re-evaluates: adding the brackets drops the existing preview, and
+removing them lets the link resolve again.
+
+#### `DELETE /api/v1/messages/:id/embeds` — auth (author or `ManageMessages`)
+
+Removes every embed of a message for good: the preview card and any picture the server fetched from a
+link in the text (an upload is not an embed and stays). The message is flagged, so editing it later
+does not bring a preview back. Returns the updated message and fires `MESSAGE_UPDATE`. `403` for
+anyone else, `404` for a missing or deleted message or one in a channel the caller cannot see.
+There is no inverse; sending the link again resolves it normally. The removal is not mirrored to
+Discord, where the unfurl stays.
+
 #### `GET /api/v1/embeds/media` — `ViewChannels`
 
 Serves a preview image for a card, given the embed's `imageUrl` as a `url` query parameter. A client
@@ -929,6 +950,95 @@ The URL is treated as hostile exactly like the metadata fetch — public hosts o
 re-checked — the response must be an `image/*` type of at most 8 MB, and SVG is refused because it
 can carry script. Returns `404 media_unavailable` when the image cannot be fetched, so a client
 should tolerate a broken image rather than expect one.
+
+### Polls
+
+A poll is a message. Its `content` is the question, so search, reply quotes and notifications work
+without knowing about polls, and the message carries the poll in `Message.poll`. A client should
+draw the poll instead of the text. A poll message cannot be edited (`400 poll_not_editable`);
+deleting the message deletes the poll and its votes.
+
+```ts
+type Poll = {
+  messageId: string;
+  question: string;
+  allowMultiple: boolean;
+  closesAt: string | null;     // when it closes by itself, or null for no expiry
+  closedAt: string | null;     // when it was closed, by the clock or by hand
+  source: 'harmony' | 'discord'; // where it was made, see "Discord polls" below
+  options: PollOption[];       // in the order they were asked
+  totalVoters: number;         // distinct people; below the sum of counts when allowMultiple
+  myVotes: string[];           // option ids the viewer chose (a broadcast carries [])
+};
+
+type PollOption = {
+  id: string;
+  text: string;                // 1-55 characters
+  emoji: string | null;        // a unicode emoji, or null
+  count: number;
+};
+```
+
+The limits are Discord's, so any poll can be posted there as a native one: a question of up to 300
+characters, 2 to 10 options, a duration of 1 to 768 hours (32 days). Results are live and are never
+hidden: everyone who can see the channel sees the counts at any time, and who voted for an option
+is available on demand (polls are not anonymous, as on Discord).
+
+#### `POST /api/v1/channels/:id/polls` — `SendMessages`
+
+```json
+{
+  "question": "Pizza or tacos?",
+  "options": [{ "text": "Pizza", "emoji": "🍕" }, { "text": "Tacos" }],
+  "allowMultiple": false,
+  "durationHours": 24,
+  "replyToId": null
+}
+```
+
+`allowMultiple` defaults to `false` and `durationHours` to `24`; `durationHours: null` is a poll that
+never closes. Everything that applies to sending a message applies here (channel access, timeouts,
+slowmode). Returns the new `Message` (with `poll`) and fires `MESSAGE_CREATE`.
+
+#### `PUT /api/v1/messages/:id/poll/votes` — `ViewChannels`, rate limited
+
+```json
+{ "optionIds": ["…"] }
+```
+
+Replaces the caller's whole choice, so changing a vote and withdrawing one (`[]`) are the same
+call. A poll that takes one answer refuses more than one (`400 single_choice`); an option from
+another poll is `400 invalid_option`; a closed poll, including one whose time ran out a moment ago,
+is `409 poll_closed`. Needs access to the channel (`403 channel_forbidden`) and refuses a timed-out
+member (`403 timed_out`). Returns the `Poll` as the caller sees it and fires `POLL_UPDATE`.
+
+#### `POST /api/v1/messages/:id/poll/end` — auth (author or `ManageMessages`)
+
+Closes the poll now; the counts stay. `409 poll_closed` when it already is. A poll that was made on
+Discord is closed by Discord, not from here (`409 poll_external`). Returns the `Poll` and fires
+`POLL_UPDATE`.
+
+#### `GET /api/v1/messages/:id/poll/voters` — `ViewChannels`
+
+| Query | Type |
+| --- | --- |
+| `optionId` | required |
+
+```json
+{ "optionId": "…", "total": 3, "voters": [ { "user": { /* User */ }, "votedAt": "…" } ] }
+```
+
+Who chose one option, earliest first, at most 100 (`total` is the full count). Follows channel
+locking like history does.
+
+#### Discord polls
+
+On a bridged channel a poll made here is posted to Discord as a native poll, and a native Discord
+poll arrives here as a poll message (`source: "discord"`). Discord's API gives a bot no way to cast
+a vote, so **votes made in Harmony stay in Harmony**: Discord shows only its own voters, while
+Harmony shows both. Votes made on Discord are counted here under the voter's stand-in account, or
+under their own account when their Discord id is linked, so one person is one voter however they
+vote. See [the technical notes](TECHNICAL.md#polls) for what crosses the bridge and what does not.
 
 ### Search
 
@@ -950,10 +1060,20 @@ is one they can already read.
 | `authorId` | string | — | Narrow to one author |
 | `before` | ISO 8601 string | — | Return matches older than this timestamp |
 | `beforeId` | string | — | Id of the match `before` came from |
+| `from` | string ≤64, repeatable (up to 10) | — | Author username or display name, case-insensitive. Several values mean any of them; a name nobody has matches nothing |
+| `mentions` | string ≤64, repeatable | — | Messages whose text names `@username`, for any of the given members. A substring match on the literal `@name` |
+| `in` | string ≤64, repeatable | — | Channel name, case-insensitive, leading `#` ignored. Several mean any of them. A channel that is unknown **or hidden from the caller** returns `404 no_such_channel` |
+| `has` | `image` `video` `gif` `file` `link` `embed` `sticker` `pin`, repeatable | — | Every listed trait must hold. `image` includes gifs, `file` is any attachment, `link` is an `http(s)://` address in the text, `embed` a resolved link preview, `pin` a pinned message. Anything else is `400` |
+| `sentAfter` | integer, epoch ms | — | Only messages sent at or after this instant |
+| `sentBefore` | integer, epoch ms | — | Only messages sent before this instant |
 
-At least one of `q`, `channelId` or `authorId` is required; a filter on its own is a valid search,
-which is how a client lists everything one member said or everything in one channel. Asking for none
-of them returns `400 validation_error`.
+Repeat a parameter to give several values (`?from=ann&from=bob`). Dates are bounds in epoch
+milliseconds, so the client works out what "on 2024-05-01" means in the member's own time zone.
+
+At least one of `q`, `channelId`, `authorId` or a filter above is required; a filter on its own is a
+valid search, which is how a client lists everything one member said, everything in one channel or
+everything pinned. Asking for none of them returns `400 validation_error`. Filters only ever narrow
+the channels the caller can already see, so none of them can reveal a hidden channel's messages.
 
 `%` and `_` in `q` are literal characters, not wildcards. Deleted messages are never returned, and
 an edited message is found by its current text only. Paging works exactly like
@@ -1013,6 +1133,14 @@ unpinning fires an ordinary `MESSAGE_UPDATE` that a client applies like any othe
 no separate pin event. A channel holds at most 50 pins, Discord's own limit. Locked channels follow
 [the same rule as history](#channel-locking): a member who cannot see the channel cannot list its
 pins either, and a deleted message drops out of the list (and stops counting towards the limit).
+
+On a bridged channel pins sync with Discord both ways (see the bridge section of the technical notes).
+Pinning a message that was mirrored to Discord pins its copy there, which needs the bot to hold *Pin
+Messages* in the channel; if it does not, the pin still succeeds here and the failure is only written
+to the server log. A message pinned or unpinned on Discord arrives as the same `MESSAGE_UPDATE`, with
+`pinnedAt` set to the time Discord pinned it. A Discord pin that would exceed this channel's 50 is
+skipped. Bridged pins are audited as `message_pin` / `message_unpin` with a null `actor` and
+`detail.actorName` of `"Discord"`.
 
 #### `GET /api/v1/channels/:id/pins` — `ViewChannels`
 
@@ -1090,6 +1218,70 @@ Fires `SAVED_MESSAGE_UPDATE` to the caller's sessions when anything changed.
 
 Removes the save. Returns `204`, also when it was not saved, and works for a message the caller can
 no longer see. Fires `SAVED_MESSAGE_UPDATE` with `saved: null` when there was one.
+
+### Scheduled messages
+
+"Send later": a member's private queue of messages that the **server** posts at the chosen time, so
+they go out with every tab closed. Nothing about the queue is visible to anyone else, and changes go
+only to the owner's own sessions as `SCHEDULED_MESSAGE_UPDATE`.
+
+```ts
+type ScheduledMessage = {
+  id: string;
+  channelId: string;
+  content: string;
+  attachments: Attachment[];  // uploads waiting to go out with it
+  replyToId: string | null;
+  sendAt: string;             // ISO timestamp
+  createdAt: string;
+  status: 'pending' | 'failed';
+  error: string | null;       // why a failed one could not be sent
+};
+```
+
+A member may hold up to 25 (`MAX_SCHEDULED_PER_MEMBER`, failed ones included). `sendAt` must be at
+least 30 seconds ahead (`SCHEDULED_MIN_LEAD_MS`; an operator or test can shorten it with
+`HARMONY_SCHEDULED_MIN_LEAD_MS`) and at most a year out; otherwise `400 invalid_send_time`.
+
+Delivery goes through the ordinary send path with the author's permissions worked out **at that
+moment**: the channel must still be visible, they need Send Messages (and Attach Files for uploads),
+and they must not be timed out or banned, or the entry becomes `failed` with the reason in `error`
+and nothing is posted. A reply whose parent was deleted fails the same way. Slowmode is not bypassed;
+a message held back by it is retried for a few minutes and fails only if the window never opens. A
+failed entry is never dropped: it stays in the list until the member sends it by hand, gives it a new
+time (which re-queues it) or cancels it. A message that comes due while the server is down is sent at
+the next start. The queue row is deleted in the same database transaction that inserts the message,
+so a message is never sent twice. Deleting a channel or an account removes its entries.
+
+Uploads named by a scheduled message are claimed by it: they cannot be used in another message and
+retention spares them (they would otherwise be pruned as abandoned after 24 hours).
+
+#### `GET /api/v1/users/@me/scheduled` — `ViewChannels`
+
+The caller's own entries, soonest first: `{ "scheduled": [ScheduledMessage] }`.
+
+#### `POST /api/v1/channels/:id/scheduled` — `SendMessages`
+
+Body `{ content, attachmentIds?, replyToId?, sendAt }`, the first three as for `POST
+/channels/:id/messages`. Returns `201` with the `ScheduledMessage`. `403 channel_forbidden` for a
+channel the caller cannot see, `404 channel_not_found`, `400 too_many_scheduled`, `400
+invalid_send_time`, `400 invalid_reply`, `400 invalid_attachment` / `attachment_in_use`.
+
+#### `PATCH /api/v1/users/@me/scheduled/:id` — `ViewChannels`
+
+Body `{ content?, sendAt? }`, at least one. Returns the entry. Giving a `sendAt` puts a `failed`
+entry back to `pending` and clears its error; changing only the text leaves its status alone.
+Somebody else's entry is `404 scheduled_not_found`.
+
+#### `DELETE /api/v1/users/@me/scheduled/:id` — `ViewChannels`
+
+Cancels it. `204`, also when it is already gone.
+
+#### `POST /api/v1/users/@me/scheduled/:id/send` — `SendMessages`
+
+Sends it now and returns the posted `Message`. The same checks as an ordinary send apply; a refusal
+is returned as the error and the entry stays as it was. `404` if it was already sent or cancelled
+(concurrent calls deliver it exactly once).
 
 ### Reactions
 
@@ -1304,6 +1496,40 @@ be.
 A gif this instance already holds costs nothing to pick: the attachment is a new row pointing at
 bytes that are already there, a few hundred bytes and no bandwidth. A hosted one is fetched and kept
 first. Picking a **saved** gif also counts as using it, moving its `usedAt` forward.
+
+#### Linked gifs
+
+With `gifStorage: "link"` a gif is not copied here. Only gifs on these hosts qualify, matched on the
+parsed address (https, default port, no credentials, exact host or a real subdomain): `*.klipy.com`
+(media subdomains such as `static.klipy.com`, not the bare site), `media.tenor.com`,
+`media1.tenor.com`, `media.giphy.com`, `i.giphy.com` and `media0`–`media4.giphy.com`. The list is
+`GIF_LINK_EXACT_HOSTS` / `GIF_LINK_SUFFIX_HOSTS` in `packages/shared/src/gif-hosts.ts`. Everything
+else, and every Discord attachment (those addresses are signed and expire), is stored as before.
+
+A message carries a linked gif as ordinary text: its content is the gif's address. When the link
+resolver (see [Link previews](#link-previews)) meets such an address in link mode, it checks it and
+sets the message's `embed` to `{ url, title: null, description: null, siteName: <host>, imageUrl:
+null, player: null, gif: { contentType, width, height } }` with the gif's own address in `url`. The
+check: allowlisted host, resolves to a public address, **no redirects followed**, status `200`, a
+`Content-Type` of `image/gif`, `image/webp`, `video/mp4` or `video/webm`, and a size within the
+instance's image or video limit (by `Content-Length`, or by reading up to the limit when none is
+declared). Failing any of that, the gif is stored by the ordinary path instead. A copy this instance
+already holds is reused rather than linked past. A client draws `embed.url` directly (`<img>` or a
+muted looping `<video>`) only while `gifStorage` is `"link"` and the address is on the allowlist;
+`width` and `height` are `null` because gif services do not tell the server.
+
+While the mode is on, the built-in `Content-Security-Policy` opens `img-src` and `media-src` to those
+hosts and nothing else; a policy set with `HARMONY_CSP` is sent exactly as written. The page is served
+with `Referrer-Policy: no-referrer`. **Viewers' IP addresses are visible to the gif host.**
+
+#### `POST /api/v1/gifs/link` — `AttachFiles`
+
+Body `{ "url": string }`. Checks a hosted gif's address as above and returns
+`{ "url": string, "contentType": string }`; the client then sends that address as the message text.
+`409 gif_link_disabled` while the mode is `"store"`, `400 invalid_gif_url` for an address off the
+allowlist, `415 invalid_gif` when the host did not serve a gif of a sensible size. Nothing is stored.
+Saved (favorite) gifs, the This server tab and `POST /api/v1/gifs/pick` are unchanged: they are
+stored bytes. Saving a hosted gif to favorites still keeps a copy.
 
 ### Custom emoji
 
@@ -1899,6 +2125,7 @@ Returns `204`.
 `{ "serverName"?: string, "requireInvite"?: boolean, "defaultChannelId"?: string | null,
 "embedsEnabled"?: boolean, "maxImageBytes"?: number, "maxVideoBytes"?: number,
 "previewUserAgent"?: string | null, "klipyApiKey"?: string | null,
+"gifStorage"?: "store" | "link",
 "theme"?: { "background"?: string | null, "accent"?: string | null },
 "icon"?: { "padding"?: number | null, "background"?: string | null } }`.
 Returns the updated settings. `serverName` and `theme` changing also update `GET /api/v1/meta`.
@@ -1910,7 +2137,10 @@ sets the client name used when unfurling a link; an empty string or `null` means
 picker's hosted tab away. The key is **write-only** — it goes in through here and is never sent back
 out, the response carrying only `klipyConfigured` — and it is used server-side, never in a browser.
 `setupCompleted` records that the owner has been through the first-run setup; setting it `false`
-again makes the wizard greet them once more.
+again makes the wizard greet them once more. `gifStorage` is `"store"` (the default: a gif that is
+sent is downloaded and kept here) or `"link"` (a gif on an allowlisted gif host is not downloaded;
+the message points at it). It is also in `GET /api/v1/meta`; see
+[Linked gifs](#linked-gifs) for what it changes.
 
 `icon.padding` is a percentage of an installed app icon's tile to leave clear around the artwork,
 from 0 to 45. `null` works it out from the image: none for a picture with no transparent pixels,
@@ -2185,6 +2415,7 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `MESSAGE_REACTION_ADD` | `ReactionUpdatePayload` |
 | `MESSAGE_REACTION_REMOVE` | `ReactionUpdatePayload` |
 | `MESSAGE_REACTIONS_CLEAR` | `ReactionsClearPayload` |
+| `POLL_UPDATE` | `PollUpdatePayload`, to members who can see the channel |
 | `TYPING_START` | `TypingStartPayload` |
 | `PRESENCE_UPDATE` | `PresenceUpdatePayload` |
 | `CHANNEL_CREATE` / `CHANNEL_UPDATE` | `Channel` |
@@ -2199,6 +2430,7 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `EMOJI_DELETE` | `{ id }` |
 | `RETENTION_APPLIED` | `PruneSummary` |
 | `SAVED_MESSAGE_UPDATE` | `{ messageId, channelId, saved: SavedMessage \| null }`, to the saver's own sessions only |
+| `SCHEDULED_MESSAGE_UPDATE` | `{ id, scheduled: ScheduledMessage \| null, reason }`, reason one of created, updated, failed, sent, cancelled; to the owner's own sessions only |
 | `CHANNEL_SETTINGS_UPDATE` | `ChannelNotificationSettings`, sent only to the member it belongs to |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
@@ -2211,6 +2443,24 @@ locks a channel or category behind a role (or moves a channel into a locked cate
 could see it but no longer can receive a `CHANNEL_DELETE` / `CATEGORY_DELETE` carrying only the id,
 while the `CHANNEL_UPDATE` / `CATEGORY_UPDATE` goes only to those who still can. Treat either as
 "this is gone for you"; refetching `GET /api/v1/channels` gives the authoritative list.
+
+`POLL_UPDATE` fires when a vote changes or a poll closes, with the new counts rather than a per-viewer
+view:
+
+```ts
+type PollUpdatePayload = {
+  messageId: string;
+  channelId: string;
+  closedAt: string | null;
+  options: { id: string; count: number }[];
+  totalVoters: number;
+  actorId: string | null;       // who voted; null when the poll closed
+  actorVotes: string[] | null;  // that member's choices now; null with actorId
+};
+```
+
+A client applies the counts, and replaces its own `myVotes` only when `actorId` is its own user. A
+`MESSAGE_UPDATE` for a poll message (a pin, say) carries `myVotes: []` and must not clobber it.
 
 `ReactionUpdatePayload` carries the reacting user so each client can decide whether the `me` flag
 applies to itself; the server broadcasts one payload to everyone:

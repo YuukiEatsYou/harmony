@@ -19,6 +19,7 @@ export function registerMetaRoutes(app: FastifyInstance, deps: { config: Config;
       allowedImageTypes: ALLOWED_IMAGE_TYPES,
       allowedVideoTypes: ALLOWED_VIDEO_TYPES,
       klipyConfigured: settings.klipyConfigured,
+      gifStorage: settings.gifStorage,
       // Offered only when it is configured, switched on, and reachable from the
       // internet, since Discord has to be able to call us back.
       discordAuthEnabled:

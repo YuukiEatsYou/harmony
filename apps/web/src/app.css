@@ -1402,6 +1402,24 @@ img.avatar {
   line-height: 1.5;
 }
 
+/* A gif the instance links to rather than stores: just the picture, no card. */
+.embed-gif {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.4rem 0 0;
+  line-height: 0;
+}
+
+.embed-gif img,
+.embed-gif video {
+  display: block;
+  max-width: min(420px, 100%);
+  max-height: 360px;
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-deep);
+}
+
 .embed-image {
   display: block;
   max-width: 100%;
@@ -2301,6 +2319,19 @@ button.roster-member:hover {
   width: auto;
   margin: 0 1px;
   vertical-align: -0.25em;
+}
+
+/* A message of only emoji: Discord's large size, for custom and unicode alike. */
+.jumbo-emoji {
+  display: block;
+  font-size: 2.25rem;
+  line-height: 1.2;
+}
+
+.jumbo-emoji .emoji {
+  height: 3rem;
+  margin: 0 2px;
+  vertical-align: middle;
 }
 
 .emoji-picker {
@@ -3605,6 +3636,66 @@ button.roster-member:hover {
   list-style: none;
 }
 
+.search-box {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 140px;
+}
+
+.search-box input {
+  width: 100%;
+}
+
+.search-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 5;
+}
+
+.search-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.2rem 0.15rem 0.6rem;
+  border: 1px solid var(--h-border-strong);
+  border-radius: 999px;
+  background: var(--h-accent-subtle);
+  color: var(--h-text);
+  font-size: 0.82rem;
+}
+
+.search-chip button {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--h-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.search-chip button:hover {
+  background: var(--h-active);
+  color: var(--h-text);
+}
+
 .search-result {
   display: block;
   width: 100%;
@@ -4829,4 +4920,175 @@ select:focus {
   width: 40px;
   height: 40px;
   border-radius: 50%;
+}
+
+/* ---- Scheduled messages ---- */
+
+/* The small chevron beside Send that opens "Schedule send". */
+.composer .schedule-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  flex-shrink: 0;
+  width: 26px;
+  height: 38px;
+  margin-right: -0.35rem;
+  padding: 0;
+  border-radius: var(--h-radius-lg);
+  background: none;
+  color: var(--h-text-muted);
+  transition: background var(--h-duration) var(--h-ease),
+              color var(--h-duration) var(--h-ease);
+}
+
+.composer .schedule-trigger:hover:not(:disabled),
+.composer .schedule-trigger[aria-expanded='true'] {
+  background: var(--h-hover);
+  color: var(--h-text);
+  box-shadow: none;
+}
+
+/* The phone's + menu carries the same action, so the extra button gives its width back. */
+@media (max-width: 768px) {
+  .composer .schedule-trigger {
+    display: none;
+  }
+}
+
+.chat-header .scheduled-open {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  background: none;
+  color: var(--h-text-muted);
+  line-height: 1;
+  border-radius: var(--h-radius-sm);
+  transition: background var(--h-duration) var(--h-ease),
+              color var(--h-duration) var(--h-ease);
+}
+
+.chat-header .scheduled-open:hover {
+  background: var(--h-hover);
+  color: var(--h-text);
+  box-shadow: none;
+}
+
+.scheduled-count {
+  position: absolute;
+  top: -0.05rem;
+  right: -0.05rem;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-accent);
+  color: var(--h-bg);
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Something failed to send: the count turns to the error color, like a mention dot. */
+.chat-header .scheduled-open.has-failed .scheduled-count {
+  background: var(--h-error);
+  color: #fff;
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.schedule-field label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+}
+
+.schedule-field input {
+  min-width: 0;
+  color-scheme: inherit;
+}
+
+.schedule-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.schedule-choices button {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.schedule-note,
+.schedule-summary,
+.schedule-snippet {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.schedule-snippet {
+  overflow-wrap: anywhere;
+}
+
+.schedule-reading {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.scheduled-panel .scheduled-intro {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+}
+
+.scheduled-panel .scheduled-entry.failed {
+  background: var(--h-bg-deep);
+  box-shadow: inset 3px 0 0 var(--h-error);
+}
+
+.scheduled-panel .scheduled-text {
+  margin: 0.4rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.scheduled-panel .scheduled-error,
+.scheduled-panel .scheduled-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+}
+
+.scheduled-panel .scheduled-files {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+}
+
+.scheduled-panel .scheduled-text-edit {
+  width: 100%;
+  margin: 0.4rem 0;
+  resize: vertical;
+  font: inherit;
+}
+
+.scheduled-notice.failed {
+  box-shadow: inset 3px 0 0 var(--h-error), var(--h-shadow-lg);
+}
+
+/* The composer's form lays its children out from the bottom edge; this one stacks. */
+.schedule-picker .timestamp-form {
+  align-items: stretch;
+}
+
+.schedule-picker .timestamp-form > button[type='submit'] {
+  align-self: flex-end;
 }

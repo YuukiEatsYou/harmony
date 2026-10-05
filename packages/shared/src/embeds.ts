@@ -52,13 +52,13 @@ export function listEmbeddableUrls(text: string): string[] {
 }
 
 /**
- * Removes Discord's angle-bracket link suppression from message text.
+ * Removes angle-bracket link suppression from message text, leaving plain URLs.
  *
- * Discord stores a URL as `<https://…>` when its sender hid the preview, and
- * that suppression is a Discord-side rendering detail: Discord shows the reader
- * an ordinary link. Carrying the brackets into Harmony would leave the URL
- * looking normal but unfurlless, so bridged text is unwrapped before it is
- * stored. Code spans are skipped, since brackets there are literal characters.
+ * The bridge no longer calls this: Harmony honors `<https://…>` itself (no
+ * preview, drawn as an ordinary link), so bridged text keeps its brackets in
+ * both directions and a suppressed link stays suppressed on either side. Kept
+ * as a utility for callers that need the bare URL. Code spans are skipped,
+ * since brackets there are literal characters.
  */
 export function unwrapSuppressedLinks(text: string): string {
   const code: string[] = [];

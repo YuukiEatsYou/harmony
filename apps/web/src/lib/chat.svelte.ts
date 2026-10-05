@@ -5,6 +5,8 @@ import type {
   ChannelNotificationSettings,
   MeResponse,
   Message,
+  Poll,
+  PollUpdatePayload,
   PruneSummary,
   Reaction,
   ReactionsClearPayload,
@@ -13,8 +15,10 @@ import type {
   TypingStartPayload,
   User,
 } from '@harmony/shared';
+import { applyPollUpdate } from '@harmony/shared';
 import { ApiError, api } from './api';
 import { emojis } from './emojis.svelte';
+import { emojiUsage } from './emoji-usage.svelte';
 import { gifs } from './gifs.svelte';
 import { mentionsUser, mergeLatest } from './messages';
 import { members } from './members.svelte';
@@ -200,6 +204,11 @@ class ChatStore {
   /** Whether a channel stands out as unread: something new in it, and not muted. */
   unreadShown(channel: Pick<Channel, 'id' | 'categoryId'>): boolean {
     return this.unread.has(channel.id) && !channelSettings.resolve(channel).muted;
+  }
+
+  /** Replaces the poll on a loaded message, with the one the server just answered with. */
+  applyPoll(messageId: string, poll: Poll): void {
+    this.messages = this.messages.map((message) => (message.id === messageId ? { ...message, poll } : message));
   }
 
   /**
@@ -758,6 +767,7 @@ class ChatStore {
         replyToId: replyToId ?? undefined,
       }),
     });
+    emojiUsage.recordContent(content);
     if (channelId !== this.activeChannelId) return;
 
     // Sending from an older stretch of history means wanting to see the reply
@@ -796,10 +806,12 @@ class ChatStore {
 
   /** Adds or removes the current user's reaction; the gateway echoes the result. */
   async toggleReaction(messageId: string, emoji: string, emojiId: string | null): Promise<void> {
+    const removing = this.messages.find((m) => m.id === messageId)?.reactions.some((r) => r.emoji === emoji && r.me);
     await api(`/messages/${messageId}/reactions`, {
       method: 'POST',
       body: JSON.stringify({ emoji, emojiId: emojiId ?? undefined }),
     });
+    if (!removing) emojiUsage.record([{ emoji, emojiId }]);
   }
 
   /** Edits a message's text; the gateway echoes the update. */
@@ -988,10 +1000,26 @@ class ChatStore {
           // The same goes for `saved`, which a broadcast never knows.
           this.messages = this.messages.map((existing) =>
             existing.id === message.id
-              ? { ...message, reactions: existing.reactions, saved: existing.saved }
+              ? {
+                  ...message,
+                  reactions: existing.reactions,
+                  saved: existing.saved,
+                  // The same for the member's own poll choice, which a broadcast never knows.
+                  poll: message.poll && existing.poll ? { ...message.poll, myVotes: existing.poll.myVotes } : message.poll,
+                }
               : existing,
           );
         }
+        break;
+      }
+      case 'POLL_UPDATE': {
+        const payload = frame.d as PollUpdatePayload;
+        if (payload.channelId !== this.activeChannelId) break;
+        this.messages = this.messages.map((message) =>
+          message.id === payload.messageId && message.poll
+            ? { ...message, poll: applyPollUpdate(message.poll, payload, session.user?.id ?? null) }
+            : message,
+        );
         break;
       }
       case 'MESSAGE_REACTION_ADD':

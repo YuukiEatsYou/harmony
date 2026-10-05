@@ -58,6 +58,29 @@ export function findUserByUsername(sqlite: DatabaseSync, username: string): User
   return (sqlite.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined) ?? null;
 }
 
+/** Just enough of a user to resolve a typed name to an account. */
+export interface PersonName {
+  id: string;
+  username: string;
+  displayName: string | null;
+}
+
+/** Everyone who has an account, banned or not: their old messages are still searchable. */
+export function listAllUserNames(sqlite: DatabaseSync): PersonName[] {
+  const rows = sqlite.prepare('SELECT id, username, display_name FROM users').all() as unknown as Array<{
+    id: string;
+    username: string;
+    display_name: string | null;
+  }>;
+  return rows.map((row) => ({ id: row.id, username: row.username, displayName: row.display_name }));
+}
+
+/** Whether a typed name (a leading @ is ignored) is this person's username or display name, ignoring case. */
+export function matchesPerson(person: PersonName, name: string): boolean {
+  const wanted = name.replace(/^@/, '').toLowerCase();
+  return person.username.toLowerCase() === wanted || (person.displayName?.toLowerCase() ?? null) === wanted;
+}
+
 export function listUsers(sqlite: DatabaseSync): UserRow[] {
   // Banned users are no longer members, so they are left out of every roster.
   return sqlite
@@ -179,11 +202,30 @@ export function mergeUsers(sqlite: DatabaseSync, fromId: string, intoId: string)
       .run(fromId, intoId);
     sqlite.prepare('UPDATE saved_messages SET user_id = ? WHERE user_id = ?').run(intoId, fromId);
 
+    // Scheduled messages have their own ids, so they simply change hands.
+    sqlite.prepare('UPDATE scheduled_messages SET user_id = ? WHERE user_id = ?').run(intoId, fromId);
+
     // A ban is keyed by user id, so keep the survivor's own and drop the other.
     sqlite
       .prepare('DELETE FROM bans WHERE user_id = ? AND EXISTS (SELECT 1 FROM bans WHERE user_id = ?)')
       .run(fromId, intoId);
     sqlite.prepare('UPDATE bans SET user_id = ? WHERE user_id = ?').run(intoId, fromId);
+
+    // Poll votes: one person who voted under both accounts keeps a single vote.
+    // Where the survivor already chose the same option the outgoing row goes, and
+    // in a poll that takes one answer the survivor's own choice stands over any
+    // other the outgoing account made, so the merge never leaves two.
+    sqlite
+      .prepare(
+        `DELETE FROM poll_votes
+          WHERE user_id = ?
+            AND (EXISTS (SELECT 1 FROM poll_votes v
+                          WHERE v.option_id = poll_votes.option_id AND v.user_id = ?)
+                 OR EXISTS (SELECT 1 FROM poll_votes v JOIN polls p ON p.id = v.poll_id
+                             WHERE v.poll_id = poll_votes.poll_id AND v.user_id = ? AND p.allow_multiple = 0))`,
+      )
+      .run(fromId, intoId, intoId);
+    sqlite.prepare('UPDATE poll_votes SET user_id = ? WHERE user_id = ?').run(intoId, fromId);
 
     sqlite.prepare('DELETE FROM users WHERE id = ?').run(fromId);
     sqlite.exec('COMMIT');

@@ -621,4 +621,121 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 27,
+    name: 'scheduled_messages',
+    up(db) {
+      /*
+       * Messages a member scheduled to be sent later, which the server delivers
+       * itself so they go out with every tab closed. One member's private list,
+       * like saved_messages: either the member or the channel going takes their
+       * rows with it.
+       *
+       * `send_at` is epoch milliseconds, since the scheduler compares it against
+       * the clock. `status` is pending or failed (due but undeliverable, with
+       * the reason in `error`). A row is deleted in the same transaction
+       * that inserts the real message, so a delivery either happened completely
+       * or not at all and a message cannot go out twice. `reply_to_id` is not a
+       * foreign key on purpose: a parent that was deleted meanwhile must fail
+       * the send with a reason rather than silently erase the schedule.
+       *
+       * The attachments sit in their own table, without a foreign key to the
+       * attachment: retention reads it to spare an upload that is waiting for its
+       * message, and one that went missing anyway is reported when the send fails.
+       */
+      db.exec(`
+        CREATE TABLE scheduled_messages (
+          id          TEXT PRIMARY KEY,
+          user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+          content     TEXT NOT NULL,
+          reply_to_id TEXT,
+          send_at     INTEGER NOT NULL,
+          created_at  INTEGER NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'pending',
+          error       TEXT
+        );
+        CREATE INDEX idx_scheduled_messages_due ON scheduled_messages(status, send_at);
+        CREATE INDEX idx_scheduled_messages_user ON scheduled_messages(user_id, send_at);
+        CREATE INDEX idx_scheduled_messages_channel ON scheduled_messages(channel_id);
+
+        CREATE TABLE scheduled_message_attachments (
+          scheduled_id  TEXT NOT NULL REFERENCES scheduled_messages(id) ON DELETE CASCADE,
+          attachment_id TEXT NOT NULL,
+          position      INTEGER NOT NULL,
+          PRIMARY KEY (scheduled_id, attachment_id)
+        );
+        CREATE INDEX idx_scheduled_attachments_attachment ON scheduled_message_attachments(attachment_id);
+      `);
+    },
+  },
+  {
+    version: 28,
+    name: 'polls',
+    up(db) {
+      /*
+       * Polls hang off a message, one at most, and go with it: a retention delete
+       * of the message takes the poll, its options and every vote through the
+       * foreign keys (a soft delete keeps them, and reads filter the message out
+       * like any other). `source` records where the poll was made, because a poll
+       * that came from Discord is closed by Discord, not from here.
+       *
+       * A vote is one row per member per option. `poll_id` is repeated on the vote
+       * so "has this member voted in this poll" and the distinct-voter count need
+       * no join. A stand-in account for a Discord voter is an ordinary user row,
+       * so a linked member's Discord vote and their own are one person's, and the
+       * primary key keeps them from being counted twice.
+       *
+       * `discord_answer_id` pairs an option with the answer it became on Discord
+       * (their ids are small integers, unique within one poll); null when the poll
+       * was never bridged. The partial index serves the expiry sweep and stays as
+       * small as the set of polls still open.
+       */
+      db.exec(`
+        CREATE TABLE polls (
+          id             TEXT PRIMARY KEY,
+          message_id     TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+          question       TEXT NOT NULL,
+          allow_multiple INTEGER NOT NULL DEFAULT 0,
+          closes_at      TEXT,
+          closed_at      TEXT,
+          source         TEXT NOT NULL DEFAULT 'harmony',
+          created_at     TEXT NOT NULL
+        );
+        CREATE INDEX idx_polls_open_expiry ON polls(closes_at)
+          WHERE closed_at IS NULL AND closes_at IS NOT NULL;
+
+        CREATE TABLE poll_options (
+          id                TEXT PRIMARY KEY,
+          poll_id           TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+          position          INTEGER NOT NULL,
+          text              TEXT NOT NULL,
+          emoji             TEXT,
+          discord_answer_id INTEGER,
+          UNIQUE (poll_id, position)
+        );
+
+        CREATE TABLE poll_votes (
+          poll_id   TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+          option_id TEXT NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE,
+          user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          voted_at  TEXT NOT NULL,
+          PRIMARY KEY (option_id, user_id)
+        );
+        CREATE INDEX idx_poll_votes_poll_user ON poll_votes(poll_id, user_id);
+      `);
+    },
+  },
+  {
+    version: 30,
+    name: 'message_embeds_hidden',
+    up(db) {
+      /*
+       * Set when a message's author (or a moderator) removed its embeds. The
+       * link resolver skips a hidden message for good, edits included, so the
+       * preview or fetched picture does not come back with the next edit.
+       */
+      db.exec(`ALTER TABLE messages ADD COLUMN embeds_hidden INTEGER NOT NULL DEFAULT 0`);
+    },
+  },
 ];

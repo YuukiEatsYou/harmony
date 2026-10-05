@@ -9,8 +9,8 @@ machine you own, with a bridge so nobody has to leave Discord behind.
 ## What is this?
 
 One instance is one server: channels and categories, a member list, replies,
-emoji reactions, custom emoji, images and video, invites, per-channel slowmode,
-message search across everything you can see, notification sounds, timeouts and
+emoji reactions, polls, custom emoji, images and video, invites, per-channel slowmode,
+message search across everything you can see (with Discord-style filters such as from:, in:, has: and dates), notification sounds, timeouts and
 bans, and an admin panel for all of it. It runs as a single small program, keeps
 everything in one folder you can back up, and needs no database server, no Docker
 and no cloud account.

@@ -175,7 +175,8 @@ to walk you through this on first run, and **Admin → Bridge** does the same la
    Both are privileged: the toggles work right away for a bot in fewer than 100
    servers, and need Discord's approval beyond that.
 3. Invite the bot to your server with **View Channels**, **Send Messages**, **Read
-   Message History**, **Add Reactions** and **Manage Webhooks**.
+   Message History**, **Add Reactions** and **Manage Webhooks**. Add **Pin Messages** too if pinning
+   a message in Harmony should pin it on Discord as well.
 4. Paste the token into **Admin → Bridge**, set the public base URL, and enable it.
 
 **Restart Harmony after changing the intents.** The bot reads them only when it
@@ -189,6 +190,11 @@ channels and custom emoji can be imported from the admin panel, which bridges
 whatever it imports. Discord users show up as stand-in accounts; they take an
 online or offline marker from Discord itself, which is why the Presence intent
 matters for the member list of a bridged channel.
+
+The bridge also requests the **Guild Message Polls** intent, which is not privileged and
+has no toggle, so there is nothing to enable: it is how votes on a Discord poll reach
+Harmony. Give the bot **Send Messages** in a bridged channel to let it post a Harmony
+poll there as a native poll.
 
 Do not re-invite the bot to change an intent. Intents are a property of the bot's
 gateway connection rather than a permission, so the toggles apply to the bot you
@@ -363,5 +369,10 @@ The server sends a strict `Content-Security-Policy` that allows only its own
 scripts and styles, its own API and gateway, and the YouTube player the link
 previews embed. If you run custom clients or add something the policy blocks, set
 `HARMONY_CSP` to a policy of your own, or to `off` to send none. The other
+When an admin sets Gif storage to "Link to the hosted service", the built-in
+policy additionally allows images and media from a short fixed list of gif hosts
+(Klipy, Tenor's media hosts, Giphy's media hosts); a policy you set yourself is
+never modified, so add those hosts to its `img-src` and `media-src` if you use
+link mode with one. The other
 hardening headers (`X-Content-Type-Options`, `X-Frame-Options`,
 `Referrer-Policy`, and HSTS over HTTPS) stay on either way.

@@ -3,8 +3,10 @@ import { existsSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   isGifContentType,
+  isGifLinkHost,
   type Attachment,
   type GifFavorite,
+  type GifLinkResponse,
   type GifItem,
   type GifSearchResult,
 } from '@harmony/shared';
@@ -29,6 +31,7 @@ import {
   upsertGifFavorite,
 } from '../db/gif_favorites.ts';
 import { findMessage } from '../db/messages.ts';
+import { verifyLinkedGif, type VerifyLinkedGif } from '../embeds/linked-gif.ts';
 import { fetchPublicImage } from '../embeds/media.ts';
 import { HttpError } from '../http/errors.ts';
 import type { SettingsService } from '../settings/service.ts';
@@ -50,6 +53,13 @@ export interface GifService {
    * would an upload. A gif already stored costs a row; a hosted one is fetched.
    */
   pick(auth: AuthContext, ref: { attachmentId?: string; favoriteId?: string; url?: string }): Promise<Attachment>;
+  /**
+   * Checks a gif address from the hosted service for linking (gif storage mode
+   * "link"): it must be https on an allowlisted gif host and actually serve a gif
+   * of a sensible size. Nothing is stored; the checked address is handed back for
+   * the member to send as the message text. Refused while the mode is "store".
+   */
+  link(auth: AuthContext, url: string): Promise<GifLinkResponse>;
   /** Absolute path of a kept gif's bytes, or null when they are gone. */
   filePathFor(favorite: { hash: string }): string | null;
   /**
@@ -64,6 +74,8 @@ export interface GifService {
 export interface GifServiceDeps {
   attachments: AttachmentService;
   settings: SettingsService;
+  /** Replaces the check made before a gif is linked; for tests, which cannot reach a gif host. */
+  verifyLinkedGif?: VerifyLinkedGif;
 }
 
 /** How many candidate rows to look at to fill a page once duplicates are dropped. */
@@ -264,6 +276,30 @@ export function createGifService(sqlite: DatabaseSync, config: Config, deps: Gif
       // link is deliberately left off: a picked gif belongs to its message the way
       // an upload does, and is not undone when the text around it changes.
       return draftFrom(source, auth, filename);
+    },
+
+    async link(_auth, url) {
+      const settings = deps.settings.get();
+      if (settings.gifStorage !== 'link') {
+        throw new HttpError(409, 'gif_link_disabled', 'This server keeps its own copy of every gif.');
+      }
+      let target: URL;
+      try {
+        target = new URL(url);
+      } catch {
+        throw new HttpError(400, 'invalid_gif_url', 'That is not a usable gif address.');
+      }
+      if (!isGifLinkHost(target)) {
+        throw new HttpError(400, 'invalid_gif_url', 'Only gifs from known gif services can be linked.');
+      }
+
+      const gif = await (deps.verifyLinkedGif ?? verifyLinkedGif)(target.toString(), {
+        maxImageBytes: settings.maxImageBytes,
+        maxVideoBytes: settings.maxVideoBytes,
+        userAgent: KLIPY_USER_AGENT,
+      });
+      if (!gif) throw new HttpError(415, 'invalid_gif', 'That gif could not be checked.');
+      return { url: target.toString(), contentType: gif.contentType };
     },
 
     filePathFor(favorite) {

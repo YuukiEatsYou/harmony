@@ -17,7 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import sharp from 'sharp';
-import { listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
+import { Permission, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
 import { isPrivateAddress, parseEmbedMetadata } from '../src/embeds/metadata.ts';
 import { isDiscordAttachment, isGifPage, isGiphyPage, tweetStatusId, youtubeVideoId } from '../src/embeds/providers.ts';
 import { isKlipyAddress, klipySearchUrl, normalizeKlipySearch } from '../src/gifs/klipy.ts';
@@ -31,6 +31,8 @@ import { createDiscordOAuthService } from '../src/auth/discord-oauth.ts';
 import { insertChannel } from '../src/db/channels.ts';
 import { insertMessage } from '../src/db/messages.ts';
 import { listLinkedAttachments } from '../src/db/attachments.ts';
+import { createEmbedService } from '../src/embeds/service.ts';
+import { verifyLinkedGif } from '../src/embeds/linked-gif.ts';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createSettingsService } from '../src/settings/service.ts';
 import { createUserService } from '../src/users/service.ts';
@@ -80,6 +82,12 @@ const server = spawn('node', ['src/index.ts'], {
     // Short enough that a socket going silent is closed within a few seconds,
     // long enough that the heartbeating helper below never misses one.
     HARMONY_GATEWAY_HEARTBEAT_MS: String(HEARTBEAT_MS),
+    // Scheduled messages: check the clock often and accept a short lead, so a
+    // send can be watched in seconds.
+    HARMONY_SCHEDULED_TICK_MS: '250',
+    HARMONY_SCHEDULED_MIN_LEAD_MS: '1500',
+    // Lets the poll sweep notice an expired poll within a moment.
+    HARMONY_POLL_SWEEP_MS: '300',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -1121,6 +1129,38 @@ try {
     privateHistory.json?.messages?.[0]?.id === privateLink.json?.id && privateHistory.json?.messages?.[0]?.embed === null,
   );
 
+  // --- Removing embeds over HTTP: who may, and that nothing else changes ---
+  const quietLink = await req(`/channels/${general.id}/messages`, {
+    method: 'POST',
+    token: ownerToken,
+    body: { content: 'plain <https://example.com/quiet> link' },
+  });
+  await sleep(200);
+  check(
+    'an angle-bracket link is stored as written and gets no embed',
+    quietLink.json?.content === 'plain <https://example.com/quiet> link' &&
+      (await req(`/channels/${general.id}/messages?limit=1`, { token: ownerToken })).json?.messages?.[0]?.embed === null,
+  );
+  check(
+    'another member cannot remove embeds from it (403)',
+    (await req(`/messages/${quietLink.json?.id}/embeds`, { method: 'DELETE', token: bobToken })).status === 403,
+  );
+  check(
+    'a message that does not exist is 404',
+    (await req('/messages/nope/embeds', { method: 'DELETE', token: ownerToken })).status === 404,
+  );
+  const removed = await req(`/messages/${quietLink.json?.id}/embeds`, { method: 'DELETE', token: ownerToken });
+  check(
+    'the author can; the message comes back with no embed and the same text',
+    removed.status === 200 && removed.json?.embed === null && removed.json?.content === 'plain <https://example.com/quiet> link',
+  );
+  const editedQuiet = await req(`/messages/${quietLink.json?.id}`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { content: 'edited <https://example.com/quiet> link' },
+  });
+  check('and the message can still be edited', editedQuiet.status === 200 && editedQuiet.json?.embed === null);
+
   // --- Pictures fetched out of a message's own text ---
   // Driven in process with a throwaway database, because the whole point of this
   // path is a fetch, and a fetch to somewhere the guard allows is a fetch to the
@@ -1230,6 +1270,224 @@ try {
     check(
       'and the second message can find it too',
       listLinkedAttachments(pictureDb.sqlite, 'm2').length === 1,
+    );
+
+    // --- Removing a message's embeds by hand ---
+    // Off by default in this throwaway instance; the checks below need the
+    // resolver switched on or they would pass for the wrong reason.
+    pictureSettings.update({ embedsEnabled: true });
+    const sent = [];
+    const embedsHere = createEmbedService({
+      sqlite: pictureDb.sqlite,
+      settings: pictureSettings,
+      hub: { dispatch: (event, payload) => sent.push({ event, payload }) },
+      attachments: pictures,
+      renderMessage: (id) => ({ id, channelId: 'c1', author: { id: 'u1' }, attachments: [] }),
+    });
+    const owner = { user: { id: 'u1' }, permissions: 0n };
+    const stranger = { user: { id: 'u2' }, permissions: 0n };
+    insertUser(pictureDb.sqlite, { id: 'u2', username: 'other', passwordHash: 'x', isOwner: false });
+
+    let strangerRefused = false;
+    try {
+      await embedsHere.suppress(stranger, 'm1');
+    } catch (cause) {
+      strangerRefused = cause?.statusCode === 403;
+    }
+    check('someone else cannot remove a message\'s embeds', strangerRefused && listLinkedAttachments(pictureDb.sqlite, 'm1').length > 0);
+    check(
+      'a moderator with Manage Messages can',
+      (await embedsHere.suppress({ user: { id: 'u2' }, permissions: Permission.ManageMessages }, 'm2'))?.id === 'm2' &&
+        listLinkedAttachments(pictureDb.sqlite, 'm2').length === 0,
+    );
+    await embedsHere.suppress(owner, 'm1');
+    check(
+      'the author removes the pictures fetched from their links',
+      listLinkedAttachments(pictureDb.sqlite, 'm1').length === 0,
+    );
+    check(
+      'and clients are told',
+      sent.filter((entry) => entry.event === 'MESSAGE_UPDATE').length === 2,
+    );
+    check(
+      'the message is flagged so it stays that way',
+      pictureDb.sqlite.prepare('SELECT embeds_hidden FROM messages WHERE id = ?').get('m1')?.embeds_hidden === 1,
+    );
+    embedsHere.resolve('m1', 'https://example.com/cat.gif');
+    await sleep(100);
+    check(
+      'a later resolution (an edit) does not bring them back',
+      listLinkedAttachments(pictureDb.sqlite, 'm1').length === 0,
+    );
+
+    // --- Linking a gif instead of storing it (gif storage mode "link") ---
+    const verifyCalls = [];
+    const linkingEmbeds = createEmbedService({
+      sqlite: pictureDb.sqlite,
+      settings: pictureSettings,
+      hub: { dispatch: (event, payload) => sent.push({ event, payload }) },
+      attachments: pictures,
+      renderMessage: (id) => ({ id, channelId: 'c1', author: { id: 'u1' }, attachments: [] }),
+      verifyLinkedGif: async (url, limits) => {
+        verifyCalls.push({ url, limits });
+        return { contentType: 'image/gif', width: null, height: null };
+      },
+    });
+    const embedOf = (id) => parseMessageEmbed(pictureDb.sqlite.prepare('SELECT embed FROM messages WHERE id = ?').get(id)?.embed ?? null);
+    const addMessage = (id, content) =>
+      insertMessage(pictureDb.sqlite, { id, channelId: 'c1', authorId: 'u1', content, createdAt: new Date().toISOString() });
+
+    pictureSettings.update({ gifStorage: 'link' });
+    check('the setting is stored', pictureSettings.get().gifStorage === 'link' && pictureSettings.getGifStorage() === 'link');
+
+    const GIPHY = 'https://media.giphy.com/media/abc123/giphy.gif';
+    addMessage('g1', GIPHY);
+    linkingEmbeds.resolve('g1', GIPHY);
+    await sleep(150);
+    const linkedEmbed = embedOf('g1');
+    check(
+      'link mode: an allowlisted gif becomes a linked embed carrying its remote address',
+      linkedEmbed?.url === GIPHY && linkedEmbed?.gif?.contentType === 'image/gif',
+      JSON.stringify(linkedEmbed),
+    );
+    check('and nothing was downloaded or stored for it', listLinkedAttachments(pictureDb.sqlite, 'g1').length === 0);
+    check(
+      'the check got the instance upload limits',
+      verifyCalls.length === 1 && verifyCalls[0].limits.maxImageBytes === pictureSettings.get().maxImageBytes,
+    );
+    check(
+      'clients are told',
+      sent.some((entry) => entry.payload?.id === 'g1'),
+    );
+    linkingEmbeds.resolve('g1', GIPHY);
+    await sleep(100);
+    check('the same address is not checked again', verifyCalls.length === 1);
+
+    addMessage('g2', 'http://127.0.0.1:9/z.gif');
+    linkingEmbeds.resolve('g2', 'http://127.0.0.1:9/z.gif');
+    await sleep(150);
+    check(
+      'link mode: any other address is not linked, nor even checked',
+      verifyCalls.length === 1 && embedOf('g2') === null,
+    );
+
+    // A copy this instance already holds is reused rather than linked past.
+    const HELD = 'https://media.tenor.com/held/cat.gif';
+    addMessage('g3', HELD);
+    await pictures.storeLinkedImage({
+      messageId: 'g3',
+      uploaderId: 'u1',
+      sourceUrl: HELD,
+      filename: 'cat.png',
+      contentType: 'image/png',
+      data: gifBytes,
+    });
+    addMessage('g4', HELD);
+    linkingEmbeds.resolve('g4', HELD);
+    await sleep(150);
+    check(
+      'link mode: a gif already stored here is reused, not linked',
+      listLinkedAttachments(pictureDb.sqlite, 'g4').length === 1 && embedOf('g4') === null && verifyCalls.length === 1,
+    );
+
+    // A linked embed only survives parsing for an allowlisted address and type.
+    check(
+      'a stored gif record on a foreign address is ignored',
+      parseMessageEmbed(JSON.stringify({ url: 'https://example.com/a.gif', gif: { contentType: 'image/gif' } }))?.gif === undefined,
+    );
+    check(
+      'and so is one with a type that is not gif-like',
+      parseMessageEmbed(JSON.stringify({ url: GIPHY, gif: { contentType: 'text/html' } }))?.gif === undefined &&
+        parseMessageEmbed(JSON.stringify({ url: GIPHY, gif: { contentType: 'image/svg+xml' } }))?.gif === undefined,
+    );
+    check(
+      'an allowlisted one is kept, with sizes sanitized',
+      JSON.stringify(parseMessageEmbed(JSON.stringify({ url: GIPHY, gif: { contentType: 'video/mp4', width: 'x', height: 90 } }))?.gif) ===
+        JSON.stringify({ contentType: 'video/mp4', width: null, height: 90 }),
+    );
+
+    // The check itself, against a stand-in for the network.
+    const limits = { maxImageBytes: 1000, maxVideoBytes: 5000, userAgent: 'test' };
+    const fakeIO = (respond, { publicHost = true } = {}) => {
+      const calls = [];
+      return {
+        calls,
+        io: {
+          isPublicHost: async () => publicHost,
+          fetch: async (target, init) => {
+            calls.push({ target: String(target), init });
+            return respond(String(target));
+          },
+        },
+      };
+    };
+    const serve = (type, { length, body = 'GIF89a', status = 200, location } = {}) => () =>
+      new Response(body, {
+        status,
+        headers: {
+          ...(type ? { 'content-type': type } : {}),
+          ...(length !== undefined ? { 'content-length': String(length) } : {}),
+          ...(location ? { location } : {}),
+        },
+      });
+
+    const good = fakeIO(serve('image/gif', { length: 500 }));
+    check(
+      'verify: an allowlisted https gif passes',
+      (await verifyLinkedGif(GIPHY, limits, good.io))?.contentType === 'image/gif' && good.calls.length === 1,
+    );
+    check('verify: redirects are never followed', good.calls[0]?.init?.redirect === 'manual');
+    for (const [name, url] of [
+      ['a foreign host', 'https://example.com/a.gif'],
+      ['plain http', 'http://media.giphy.com/a.gif'],
+      ['a lookalike suffix', 'https://media.giphy.com.evil.test/a.gif'],
+      ['a lookalike prefix', 'https://notmedia.giphy.com/a.gif'],
+      ['credentials', 'https://u:p@media.giphy.com/a.gif'],
+      ['a port', 'https://media.giphy.com:444/a.gif'],
+      ['a bare klipy page host', 'https://klipy.com/a.gif'],
+      ['a discord attachment', 'https://cdn.discordapp.com/attachments/1/2/a.gif'],
+    ]) {
+      const probe = fakeIO(serve('image/gif', { length: 10 }));
+      check(`verify: ${name} is refused before any request`, (await verifyLinkedGif(url, limits, probe.io)) === null && probe.calls.length === 0);
+    }
+    check(
+      'verify: a klipy media subdomain is allowed',
+      (await verifyLinkedGif('https://static.klipy.com/ii/x/y.gif', limits, fakeIO(serve('image/gif', { length: 10 })).io)) !== null,
+    );
+    check(
+      'verify: a host resolving to a private address is refused',
+      (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/gif', { length: 10 }), { publicHost: false }).io)) === null,
+    );
+    check(
+      'verify: a redirect is refused, even to another allowlisted host',
+      (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('', { status: 302, location: 'https://media.tenor.com/a.gif' })).io)) === null,
+    );
+    check('verify: an error status is refused', (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/gif', { status: 404 })).io)) === null);
+    for (const type of ['text/html', 'image/svg+xml', 'image/png', 'application/octet-stream', '']) {
+      check(
+        `verify: a "${type}" response is refused`,
+        (await verifyLinkedGif(GIPHY, limits, fakeIO(serve(type, { length: 10 })).io)) === null,
+      );
+    }
+    check('verify: an animated webp passes', (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/webp', { length: 10 })).io))?.contentType === 'image/webp');
+    check('verify: an mp4 passes', (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('video/mp4', { length: 10 })).io))?.contentType === 'video/mp4');
+    check(
+      'verify: a declared size over the image limit is refused',
+      (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/gif', { length: 1001 })).io)) === null,
+    );
+    check(
+      'verify: a clip gets the video limit instead',
+      (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('video/mp4', { length: 4000 })).io)) !== null &&
+        (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('video/mp4', { length: 5001 })).io)) === null,
+    );
+    check(
+      'verify: with no declared size the body is read up to the limit',
+      (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/gif', { body: 'x'.repeat(900) })).io)) !== null &&
+        (await verifyLinkedGif(GIPHY, limits, fakeIO(serve('image/gif', { body: 'x'.repeat(1200) })).io)) === null,
+    );
+    check(
+      'verify: a failing network is a refusal, not an error',
+      (await verifyLinkedGif(GIPHY, limits, { isPublicHost: async () => true, fetch: async () => { throw new Error('down'); } })) === null,
     );
 
     pictureDb.close();
@@ -2486,6 +2744,70 @@ try {
   const withoutKey = await req('/settings', { method: 'PATCH', token: ownerToken, body: { klipyApiKey: '' } });
   check('clearing the key takes the tab away', withoutKey.json?.klipyConfigured === false);
 
+  // --- Gif storage: store a copy (default) or link to allowlisted gif hosts ---
+  const cspOf = async () => (await fetch(`${BASE}/health`)).headers.get('content-security-policy') ?? '';
+  const directive = (csp, name) => csp.split('; ').find((entry) => entry.startsWith(`${name} `)) ?? '';
+  check('gifs are stored by default', (await req('/meta')).json?.gifStorage === 'store');
+  const storeCsp = await cspOf();
+  check(
+    'so the policy lets the page load only its own images and media',
+    !directive(storeCsp, 'img-src').includes('tenor') && !directive(storeCsp, 'media-src').includes('giphy'),
+    storeCsp,
+  );
+  check(
+    'linking is refused while the instance stores (409)',
+    (await req('/gifs/link', { method: 'POST', token: ownerToken, body: { url: 'https://media.tenor.com/x/y.gif' } })).status === 409,
+  );
+  check(
+    'an unknown storage mode is refused (400)',
+    (await req('/settings', { method: 'PATCH', token: ownerToken, body: { gifStorage: 'hotlink' } })).status === 400,
+  );
+  check(
+    'a member cannot change it (403)',
+    (await req('/settings', { method: 'PATCH', token: bobToken, body: { gifStorage: 'link' } })).status === 403,
+  );
+
+  const linkOn = await req('/settings', { method: 'PATCH', token: ownerToken, body: { gifStorage: 'link' } });
+  check('an admin can switch to linking', linkOn.json?.gifStorage === 'link' && (await req('/meta')).json?.gifStorage === 'link');
+  const linkCsp = await cspOf();
+  for (const source of ['https://media.tenor.com', 'https://media1.tenor.com', 'https://media.giphy.com', 'https://*.klipy.com']) {
+    check(
+      `linking opens images and media to ${source}`,
+      directive(linkCsp, 'img-src').includes(source) && directive(linkCsp, 'media-src').includes(source),
+      linkCsp,
+    );
+  }
+  check(
+    'and nothing else in the policy changes',
+    linkCsp.replace(/(img|media)-src [^;]*/g, '') === storeCsp.replace(/(img|media)-src [^;]*/g, '') &&
+      directive(linkCsp, 'script-src') === "script-src 'self'" &&
+      directive(linkCsp, 'connect-src') === "connect-src 'self'" &&
+      !linkCsp.includes('*.giphy.com'),
+  );
+  for (const bad of [
+    'https://example.com/cat.gif',
+    'http://media.tenor.com/x/y.gif',
+    'https://media.tenor.com.evil.test/x.gif',
+    'https://evilklipy.com/x.gif',
+    'https://klipy.com/gifs/page',
+    'https://user:pw@media.tenor.com/x.gif',
+    'https://media.tenor.com:8443/x.gif',
+    'https://cdn.discordapp.com/attachments/1/2/x.gif',
+    'not a url',
+  ]) {
+    const refused = await req('/gifs/link', { method: 'POST', token: ownerToken, body: { url: bad } });
+    check(`a non-allowlisted address is refused (${bad})`, refused.status === 400, `status ${refused.status}`);
+  }
+  // An allowlisted host that cannot be verified (no gif there, or no network in
+  // the sandbox) is refused too, never recorded blindly.
+  check(
+    'an allowlisted address that is not a reachable gif is refused (415)',
+    (await req('/gifs/link', { method: 'POST', token: ownerToken, body: { url: 'https://media.tenor.com/nonexistent/none.gif' } })).status === 415,
+  );
+
+  await req('/settings', { method: 'PATCH', token: ownerToken, body: { gifStorage: 'store' } });
+  check('switching back closes the policy again', !directive(await cspOf(), 'img-src').includes('tenor'));
+
   // Only the service's own addresses are ever fetched, so the picker cannot be
   // turned into a way to make the server fetch arbitrary pages.
   check(
@@ -3469,6 +3791,122 @@ try {
   await req(`/channels/${secretChannel.json.id}`, { method: 'DELETE', token: ownerToken });
   await req(`/roles/${secretRole.json.id}`, { method: 'DELETE', token: ownerToken });
 
+  // --- Search filters: from, mentions, in, has, date bounds ---
+  const ownerName = owner.json.user.username;
+  const bobName = bob.json.user.username;
+  const flt = (query, token = ownerToken) => search({ q: 'fltx', limit: '50', ...query }, token);
+  const fltPairs = (pairs, token = ownerToken) => req(`/search?${new URLSearchParams(pairs)}`, { token });
+  const fltImage = await sharp({ create: { width: 6, height: 6, channels: 3, background: { r: 9, g: 99, b: 199 } } })
+    .png()
+    .toBuffer();
+  const fltUpload = async (token, type, name, bytes) => {
+    const form = new FormData();
+    form.append('file', new Blob([bytes], { type }), name);
+    const res = await fetch(`${BASE}/attachments`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: form,
+    });
+    return (await res.json()).id;
+  };
+  const fltPostWith = async (content, attachmentId) =>
+    req(`/channels/${searchChannelId}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content, attachmentIds: [attachmentId] },
+    });
+  const fltBefore = Date.now();
+  await postInSearch(ownerToken, 'fltx plain words');
+  await postInSearch(bobToken, `fltx link https://example.invalid/page and hello @${ownerName}`);
+  await fltPostWith('fltx picture', await fltUpload(ownerToken, 'image/png', 'p.png', fltImage));
+  await fltPostWith(
+    'fltx gif',
+    await fltUpload(ownerToken, 'image/gif', 'g.gif', await sharp(fltImage).gif().toBuffer()),
+  );
+  const fltPinned = await postInSearch(ownerToken, 'fltx pinned one');
+  await req(`/channels/${searchChannelId}/pins/${fltPinned.json.id}`, { method: 'PUT', token: ownerToken });
+  const fltAfter = Date.now() + 1;
+
+  const texts = (res) => (res.json?.messages ?? []).map((message) => message.content);
+  check('from: finds one author by username', texts(await flt({ from: bobName })).length === 1);
+  check('from: ignores case', texts(await flt({ from: bobName.toUpperCase() })).length === 1);
+  const fromMany = await fltPairs([['q', 'fltx'], ['from', bobName], ['from', ownerName], ['limit', '50']]);
+  check('several from: values mean either author', texts(fromMany).length === 5, `got ${texts(fromMany).length}`);
+  check('from: a name nobody has finds nothing', texts(await flt({ from: 'nobody-here' })).length === 0);
+  check('mentions: finds messages naming a member', texts(await flt({ mentions: ownerName })).length === 1);
+  check('mentions: leaves out messages naming nobody', texts(await flt({ mentions: bobName })).length === 0);
+  check('in: narrows to a channel by name, ignoring case', texts(await flt({ in: 'SearchRoom' })).length === 5);
+  check('in: another channel finds nothing here', texts(await flt({ in: 'general' })).length === 0);
+  const inUnknown = await flt({ in: 'no-such-room' });
+  check(
+    'in: an unknown channel is 404 no_such_channel',
+    inUnknown.status === 404 && inUnknown.json?.error?.code === 'no_such_channel',
+    JSON.stringify(inUnknown.json),
+  );
+  check('has:image finds pictures and gifs', texts(await flt({ has: 'image' })).length === 2);
+  check('has:gif finds only gifs', texts(await flt({ has: 'gif' })).join() === 'fltx gif');
+  check('has:file finds any attachment (uploads are images or videos)', texts(await flt({ has: 'file' })).length === 2);
+  check('has:video finds none here', texts(await flt({ has: 'video' })).length === 0);
+  check('has:link finds links', texts(await flt({ has: 'link' })).length === 1);
+  check('has:pin finds pinned messages', texts(await flt({ has: 'pin' })).join() === 'fltx pinned one');
+  check('has:sticker finds none here', texts(await flt({ has: 'sticker' })).length === 0);
+  check('has:embed finds none here', texts(await flt({ has: 'embed' })).length === 0);
+  const hasBoth = await fltPairs([['q', 'fltx'], ['has', 'image'], ['has', 'gif']]);
+  check('several has: values must all hold', texts(hasBoth).join() === 'fltx gif');
+  check('a bad has: value is refused (400)', (await flt({ has: 'banana' })).status === 400);
+  const onlyFilter = await fltPairs([['has', 'pin'], ['in', 'searchroom']]);
+  check('filters alone are a search', texts(onlyFilter).join() === 'fltx pinned one');
+  const dated = await fltPairs([
+    ['q', 'fltx'],
+    ['sentAfter', String(fltBefore - 1)],
+    ['sentBefore', String(fltAfter)],
+    ['limit', '50'],
+  ]);
+  check('date bounds include messages in range', texts(dated).length === 5);
+  check('sentBefore excludes later messages', texts(await flt({ sentBefore: String(fltBefore - 1) })).length === 0);
+  check('sentAfter excludes earlier messages', texts(await flt({ sentAfter: String(fltAfter + 100000) })).length === 0);
+  const newestFirst = texts(await fltPairs([['from', ownerName], ['sentAfter', String(fltBefore - 1)]]));
+  check('a bound with no text lists newest first', newestFirst[0] === 'fltx pinned one', newestFirst.join('|'));
+
+  // Filters must never reveal a channel the member cannot see.
+  const hideRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'FilterSecret' } });
+  const hideRoom = await req('/channels', {
+    method: 'POST',
+    token: ownerToken,
+    body: { name: 'hiddenroom', requiredRoleId: hideRole.json.id },
+  });
+  const hiddenPost = await req(`/channels/${hideRoom.json.id}/messages`, {
+    method: 'POST',
+    token: ownerToken,
+    body: {
+      content: `fltx secret @${bobName}`,
+      attachmentIds: [await fltUpload(ownerToken, 'image/png', 's.png', fltImage)],
+    },
+  });
+  await req(`/channels/${hideRoom.json.id}/pins/${hiddenPost.json.id}`, { method: 'PUT', token: ownerToken });
+  check('an administrator can filter by a locked channel', texts(await flt({ in: 'hiddenroom' })).length === 1);
+  const inHidden = await flt({ in: 'hiddenroom' }, bobToken);
+  const inGhost = await flt({ in: 'ghostroom' }, bobToken);
+  check(
+    'in: a hidden channel answers like a missing one',
+    inHidden.status === 404 &&
+      inGhost.status === 404 &&
+      inHidden.json?.error?.code === inGhost.json?.error?.code,
+    `${inHidden.status} ${inGhost.status}`,
+  );
+  const leaks = (res) => texts(res).some((text) => text.includes('secret'));
+  check('from: does not leak hidden-channel messages', !leaks(await flt({ from: ownerName }, bobToken)));
+  check('mentions: does not leak hidden-channel messages', !leaks(await flt({ mentions: bobName }, bobToken)));
+  check('has:image does not leak hidden-channel messages', !leaks(await flt({ has: 'image' }, bobToken)));
+  check('has:pin does not leak hidden-channel messages', !leaks(await flt({ has: 'pin' }, bobToken)));
+  check('dates alone do not leak hidden-channel messages', !leaks(await fltPairs([['sentAfter', String(fltBefore - 1)]], bobToken)));
+  check(
+    'in: a hidden channel among visible ones is still refused',
+    (await fltPairs([['in', 'searchroom'], ['in', 'hiddenroom']], bobToken)).status === 404,
+  );
+  await req(`/channels/${hideRoom.json.id}`, { method: 'DELETE', token: ownerToken });
+  await req(`/roles/${hideRole.json.id}`, { method: 'DELETE', token: ownerToken });
+
   // --- Mentions and the inbox ---
   const mentionChannel = await req('/channels', {
     method: 'POST',
@@ -4414,6 +4852,757 @@ try {
     String(savedMergeError ?? JSON.stringify(mergedSaves)),
   );
   mergeStore.close();
+
+  // --- Scheduled messages ---
+  {
+  // The server runs with a short tick and a 1.5 s minimum lead (see the spawn
+  // environment above), so delivery can be watched without waiting minutes.
+  const schedChannel = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'send-later' } })).json;
+  const inMs = (ms) => new Date(Date.now() + ms).toISOString();
+  const schedule = (token, body, channelId = schedChannel.id) =>
+    req(`/channels/${channelId}/scheduled`, { method: 'POST', token, body });
+  const scheduledOf = (token) => req('/users/@me/scheduled', { token });
+  const scheduledEntry = async (token, id) => (await scheduledOf(token)).json?.scheduled?.find((item) => item.id === id);
+  const historyOf = async (channelId = schedChannel.id) =>
+    (await req(`/channels/${channelId}/messages`, { token: ownerToken })).json?.messages ?? [];
+  const uploadFor = async (token, name) => {
+    const form = new FormData();
+    form.append('file', new Blob([emojiPng], { type: 'image/png' }), name);
+    return (await fetch(`${BASE}/attachments`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form })).json();
+  };
+  const waitFor = async (predicate, ms = 8000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (await predicate()) return true;
+      await sleep(100);
+    }
+    return false;
+  };
+  const heardAbout = (watcher, id, reason) =>
+    watcher.events.some((frame) => frame.t === 'SCHEDULED_MESSAGE_UPDATE' && frame.d?.id === id && frame.d?.reason === reason);
+
+  const schedWatcher = await openGateway({ token: bobToken });
+  const schedOther = await openGateway({ token: ownerToken });
+
+  check('nothing is scheduled at first', (await scheduledOf(bobToken)).json?.scheduled?.length === 0);
+  check('the scheduled list needs a session (401)', (await fetch(`${BASE}/users/@me/scheduled`)).status === 401);
+  check(
+    'a time too close to now is refused (400)',
+    (await schedule(bobToken, { content: 'too soon', sendAt: inMs(300) })).status === 400,
+  );
+  check(
+    'a time in the past is refused (400)',
+    (await schedule(bobToken, { content: 'past', sendAt: inMs(-60_000) })).status === 400,
+  );
+  check(
+    'a time more than a year out is refused (400)',
+    (await schedule(bobToken, { content: 'far', sendAt: inMs(400 * 86_400_000) })).status === 400,
+  );
+  check(
+    'a nonsense time is refused (400)',
+    (await schedule(bobToken, { content: 'huh', sendAt: 'tomorrow-ish' })).status === 400,
+  );
+  check(
+    'an empty message is refused (400)',
+    (await schedule(bobToken, { content: '   ', sendAt: inMs(60_000) })).status === 400,
+  );
+  check(
+    'a missing channel is refused (404)',
+    (await schedule(bobToken, { content: 'x', sendAt: inMs(60_000) }, 'no-such-channel')).status === 404,
+  );
+  check(
+    'scheduling needs a session (401)',
+    (
+      await fetch(`${BASE}/channels/${schedChannel.id}/scheduled`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'x', sendAt: inMs(60_000) }),
+      })
+    ).status === 401,
+  );
+
+  // A long-dated one, to edit, cancel and keep private.
+  const farOne = await schedule(bobToken, { content: 'next week', sendAt: inMs(7 * 86_400_000) });
+  check(
+    'a message can be scheduled',
+    farOne.status === 201 && farOne.json?.status === 'pending' && farOne.json?.content === 'next week',
+    `status ${farOne.status}`,
+  );
+  check('and is listed for its author', (await scheduledOf(bobToken)).json?.scheduled?.[0]?.id === farOne.json?.id);
+  check(
+    'the author is told on their sessions',
+    await waitFor(() => heardAbout(schedWatcher, farOne.json?.id, 'created')),
+  );
+  check('nobody else is told', !schedOther.events.some((frame) => frame.t === 'SCHEDULED_MESSAGE_UPDATE'));
+  check('another member does not see it', (await scheduledOf(ownerToken)).json?.scheduled?.length === 0);
+  check(
+    'another member cannot edit it (404)',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'PATCH', token: ownerToken, body: { content: 'mine now' } }))
+      .status === 404,
+  );
+  check(
+    'another member cannot send it (404)',
+    (await req(`/users/@me/scheduled/${farOne.json.id}/send`, { method: 'POST', token: ownerToken })).status === 404,
+  );
+  await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'DELETE', token: ownerToken });
+  check('another member cannot cancel it either', (await scheduledOf(bobToken)).json?.scheduled?.length === 1);
+  check(
+    'it does not appear in the channel before its time',
+    !(await historyOf()).some((message) => message.content === 'next week'),
+  );
+
+  const edited = await req(`/users/@me/scheduled/${farOne.json.id}`, {
+    method: 'PATCH',
+    token: bobToken,
+    body: { content: 'next week, edited', sendAt: inMs(8 * 86_400_000) },
+  });
+  check(
+    'text and time can be edited',
+    edited.status === 200 &&
+      edited.json?.content === 'next week, edited' &&
+      Date.parse(edited.json.sendAt) > Date.now() + 7.5 * 86_400_000,
+  );
+  check(
+    'an edit to a time too soon is refused (400)',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'PATCH', token: bobToken, body: { sendAt: inMs(100) } }))
+      .status === 400,
+  );
+  check(
+    'an empty edit is refused (400)',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'PATCH', token: bobToken, body: {} })).status === 400,
+  );
+  check(
+    'emptying the text is refused (400)',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'PATCH', token: bobToken, body: { content: ' ' } }))
+      .status === 400,
+  );
+  check(
+    'a message can be cancelled',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'DELETE', token: bobToken })).status === 204 &&
+      (await scheduledOf(bobToken)).json?.scheduled?.length === 0,
+  );
+  check(
+    'cancelling twice is harmless',
+    (await req(`/users/@me/scheduled/${farOne.json.id}`, { method: 'DELETE', token: bobToken })).status === 204,
+  );
+
+  // The cap.
+  const capIds = [];
+  for (let n = 0; n < 25; n++) {
+    const made = await schedule(bobToken, { content: `cap ${n}`, sendAt: inMs(86_400_000 + n * 1000) });
+    if (made.status === 201) capIds.push(made.json.id);
+  }
+  check('up to 25 can be held at once', capIds.length === 25);
+  check(
+    'a 26th is refused (400)',
+    (await schedule(bobToken, { content: 'one too many', sendAt: inMs(86_400_000) })).status === 400,
+  );
+  check(
+    'the cap is per member',
+    (await schedule(ownerToken, { content: 'owner is fine', sendAt: inMs(86_400_000) })).status === 201,
+  );
+  for (const id of capIds) await req(`/users/@me/scheduled/${id}`, { method: 'DELETE', token: bobToken });
+  for (const entry of (await scheduledOf(ownerToken)).json?.scheduled ?? []) {
+    await req(`/users/@me/scheduled/${entry.id}`, { method: 'DELETE', token: ownerToken });
+  }
+
+  // Delivery: the server sends it with nobody asking.
+  const dueSoon = await schedule(bobToken, { content: 'sent by the clock', sendAt: inMs(2200) });
+  check('a near-future message is accepted', dueSoon.status === 201);
+  check(
+    'it is delivered by the server when its time comes',
+    await waitFor(async () => (await historyOf()).some((message) => message.content === 'sent by the clock')),
+  );
+  await sleep(600);
+  const delivered = (await historyOf()).filter((message) => message.content === 'sent by the clock');
+  check(
+    'exactly once, as its author',
+    delivered.length === 1 && delivered[0].author?.id === bobId,
+    `${delivered.length} copies`,
+  );
+  check('and it leaves the scheduled list', (await scheduledOf(bobToken)).json?.scheduled?.length === 0);
+  check(
+    'the author hears that it was sent',
+    await waitFor(() => heardAbout(schedWatcher, dueSoon.json?.id, 'sent')),
+  );
+
+  // Send now, raced against itself and the timer: still once.
+  const rushed = await schedule(bobToken, { content: 'sent early', sendAt: inMs(86_400_000) });
+  const raced = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      req(`/users/@me/scheduled/${rushed.json.id}/send`, { method: 'POST', token: bobToken }),
+    ),
+  );
+  check(
+    'send now delivers it',
+    raced.some((response) => response.status === 200 && response.json?.content === 'sent early'),
+  );
+  check(
+    'racing send-now requests deliver it exactly once',
+    raced.filter((response) => response.status === 200).length === 1 &&
+      (await historyOf()).filter((message) => message.content === 'sent early').length === 1,
+  );
+  check('the losers are told it is gone (404)', raced.filter((response) => response.status === 404).length === 5);
+
+  // A reply keeps its parent; one whose parent is gone fails with a reason.
+  const parent = (
+    await req(`/channels/${schedChannel.id}/messages`, { method: 'POST', token: ownerToken, body: { content: 'question' } })
+  ).json;
+  const replying = await schedule(bobToken, { content: 'answer', replyToId: parent.id, sendAt: inMs(2200) });
+  check('a reply can be scheduled', replying.status === 201 && replying.json?.replyToId === parent.id);
+  check(
+    'a reply to a message in another channel is refused (400)',
+    (await schedule(bobToken, { content: 'x', replyToId: parent.id, sendAt: inMs(60_000) }, savedChannel.id)).status === 400,
+  );
+  check(
+    'it is delivered as a reply',
+    await waitFor(async () =>
+      (await historyOf()).some((message) => message.content === 'answer' && message.replyTo?.id === parent.id),
+    ),
+  );
+  const orphaned = await schedule(bobToken, { content: 'to nobody', replyToId: parent.id, sendAt: inMs(3000) });
+  await req(`/messages/${parent.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'a reply whose parent was deleted fails, with the reason',
+    await waitFor(async () => {
+      const entry = await scheduledEntry(bobToken, orphaned.json?.id);
+      return entry?.status === 'failed' && /repl/i.test(entry.error ?? '');
+    }),
+  );
+  check(
+    'the author is told it failed',
+    schedWatcher.events.some(
+      (frame) =>
+        frame.t === 'SCHEDULED_MESSAGE_UPDATE' &&
+        frame.d?.id === orphaned.json?.id &&
+        frame.d?.reason === 'failed' &&
+        frame.d?.scheduled?.status === 'failed',
+    ),
+  );
+  await sleep(700);
+  check(
+    'nothing was posted, and the clock does not retry a failed one',
+    !(await historyOf()).some((message) => message.content === 'to nobody'),
+  );
+  check(
+    'editing only the text leaves it failed',
+    (
+      await req(`/users/@me/scheduled/${orphaned.json.id}`, {
+        method: 'PATCH',
+        token: bobToken,
+        body: { content: 'to nobody (fixed)' },
+      })
+    ).json?.status === 'failed',
+  );
+  check(
+    'a failed one can be cancelled',
+    (await req(`/users/@me/scheduled/${orphaned.json.id}`, { method: 'DELETE', token: bobToken })).status === 204,
+  );
+
+  // Permissions are checked again at send time.
+  const lockRole = (await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'send-later-lock' } })).json;
+  const lockedRoom = (
+    await req('/channels', {
+      method: 'POST',
+      token: ownerToken,
+      body: { name: 'send-later-locked', requiredRoleId: lockRole.id },
+    })
+  ).json;
+  await req(`/members/${bobId}/roles/${lockRole.id}`, { method: 'PUT', token: ownerToken });
+  const lockedSched = await schedule(bobToken, { content: 'while I could', sendAt: inMs(2500) }, lockedRoom.id);
+  check('a member with the role can schedule into a locked channel', lockedSched.status === 201);
+  await req(`/members/${bobId}/roles/${lockRole.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'but losing access before it is due makes it fail',
+    await waitFor(async () => (await scheduledEntry(bobToken, lockedSched.json?.id))?.status === 'failed'),
+  );
+  check(
+    'and nothing was posted to the locked channel',
+    !(await historyOf(lockedRoom.id)).some((message) => message.content === 'while I could'),
+  );
+  check(
+    'a member without access cannot schedule there (403)',
+    (await schedule(bobToken, { content: 'nope', sendAt: inMs(60_000) }, lockedRoom.id)).status === 403,
+  );
+  await req(`/users/@me/scheduled/${lockedSched.json.id}`, { method: 'DELETE', token: bobToken });
+
+  const timedSched = await schedule(bobToken, { content: 'while free', sendAt: inMs(2500) });
+  await req(`/members/${bobId}/timeout`, { method: 'PUT', token: ownerToken, body: { durationMinutes: 5 } });
+  check(
+    'a member who is timed out when it is due gets a failed entry',
+    await waitFor(async () => {
+      const entry = await scheduledEntry(bobToken, timedSched.json?.id);
+      return entry?.status === 'failed' && /timed out/i.test(entry.error ?? '');
+    }),
+  );
+  await req(`/members/${bobId}/timeout`, { method: 'DELETE', token: ownerToken });
+  check(
+    'sending it by hand once the timeout is over works',
+    (await req(`/users/@me/scheduled/${timedSched.json.id}/send`, { method: 'POST', token: bobToken })).status === 200 &&
+      (await historyOf()).some((message) => message.content === 'while free'),
+  );
+
+  const everyone = (await req('/roles', { token: ownerToken })).json?.roles?.find((role) => role.isDefault);
+  const noSendSched = await schedule(bobToken, { content: 'without permission', sendAt: inMs(2500) });
+  const sendBit = 1n << 1n;
+  await req(`/roles/${everyone.id}`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { permissions: String(BigInt(everyone.permissions) & ~sendBit) },
+  });
+  check(
+    'losing Send Messages before it is due makes it fail',
+    await waitFor(async () => (await scheduledEntry(bobToken, noSendSched.json?.id))?.status === 'failed'),
+  );
+  check(
+    'scheduling needs Send Messages (403)',
+    (await schedule(bobToken, { content: 'x', sendAt: inMs(60_000) })).status === 403,
+  );
+  await req(`/roles/${everyone.id}`, { method: 'PATCH', token: ownerToken, body: { permissions: everyone.permissions } });
+  check(
+    'nothing was posted without the permission',
+    !(await historyOf()).some((message) => message.content === 'without permission'),
+  );
+  // A new time is the retry.
+  const retried = await req(`/users/@me/scheduled/${noSendSched.json.id}`, {
+    method: 'PATCH',
+    token: bobToken,
+    body: { sendAt: inMs(2200) },
+  });
+  check('a new time puts a failed one back in the queue', retried.json?.status === 'pending' && retried.json?.error === null);
+  check(
+    'and it then goes out',
+    await waitFor(async () => (await historyOf()).some((message) => message.content === 'without permission')),
+  );
+
+  // Slowmode is not bypassed: the message waits for the window instead.
+  const slowRoom = (
+    await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'send-later-slow', slowmodeSeconds: 4 } })
+  ).json;
+  await req(`/channels/${slowRoom.id}/messages`, { method: 'POST', token: bobToken, body: { content: 'just posted' } });
+  const slowQueued = await schedule(bobToken, { content: 'after the wait', sendAt: inMs(1600) }, slowRoom.id);
+  await sleep(2200);
+  check(
+    'slowmode holds a scheduled message back instead of failing it',
+    (await scheduledEntry(bobToken, slowQueued.json?.id))?.status === 'pending' &&
+      !(await historyOf(slowRoom.id)).some((message) => message.content === 'after the wait'),
+  );
+  check(
+    'and it is sent once the window has passed',
+    await waitFor(async () => (await historyOf(slowRoom.id)).some((message) => message.content === 'after the wait')),
+  );
+
+  // Attachments stay claimed for the schedule and survive retention.
+  const heldUpload = await uploadFor(bobToken, 'later.png');
+  const withFile = await schedule(bobToken, {
+    content: 'with a picture',
+    attachmentIds: [heldUpload.id],
+    sendAt: inMs(6000),
+  });
+  check(
+    'a scheduled message can carry an upload',
+    withFile.status === 201 && withFile.json?.attachments?.[0]?.id === heldUpload.id,
+  );
+  check(
+    'the same upload cannot be scheduled twice (400)',
+    (await schedule(bobToken, { content: 'again', attachmentIds: [heldUpload.id], sendAt: inMs(60_000) })).status === 400,
+  );
+  check(
+    'nor used in an ordinary message meanwhile (400)',
+    (
+      await req(`/channels/${schedChannel.id}/messages`, {
+        method: 'POST',
+        token: bobToken,
+        body: { content: 'sneaky', attachmentIds: [heldUpload.id] },
+      })
+    ).status === 400,
+  );
+  const foreignUpload = await uploadFor(ownerToken, 'theirs.png');
+  check(
+    "someone else's upload cannot be scheduled (403)",
+    (await schedule(bobToken, { content: 'x', attachmentIds: [foreignUpload.id], sendAt: inMs(60_000) })).status === 403,
+  );
+  await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: 0 } });
+  await req('/retention/run', { method: 'POST', token: ownerToken });
+  await req('/retention', { method: 'PATCH', token: ownerToken, body: { imageRetentionDays: null } });
+  check(
+    'retention spares an upload waiting for its scheduled message',
+    (await fetch(`${BASE}/attachments/${heldUpload.id}`, { headers: { authorization: `Bearer ${bobToken}` } })).status === 200,
+  );
+  check(
+    'and the message goes out with it',
+    await waitFor(async () =>
+      (await historyOf()).some(
+        (message) => message.content === 'with a picture' && message.attachments?.[0]?.id === heldUpload.id,
+      ),
+    ),
+  );
+
+  // A channel going away takes its scheduled messages with it.
+  const doomed = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'send-later-doomed' } })).json;
+  const doomedSched = await schedule(bobToken, { content: 'never', sendAt: inMs(86_400_000) }, doomed.id);
+  await req(`/channels/${doomed.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'deleting a channel drops its scheduled messages',
+    doomedSched.status === 201 &&
+      !(await scheduledOf(bobToken)).json?.scheduled?.some((item) => item.id === doomedSched.json.id),
+  );
+
+  schedWatcher.ws.close();
+  schedOther.ws.close();
+  await req(`/roles/${lockRole.id}`, { method: 'DELETE', token: ownerToken });
+
+  // Merging accounts moves the scheduled messages across.
+  const schedMergeDir = mkdtempSync(join(tmpdir(), 'harmony-scheduled-merge-'));
+  const schedMergeStore = new Database({
+    dataDir: schedMergeDir,
+    dbFile: join(schedMergeDir, 'harmony.db'),
+    uploadDir: join(schedMergeDir, 'uploads'),
+  });
+  insertUser(schedMergeStore.sqlite, { id: 'keeper', username: 'keeper', passwordHash: 'x', isOwner: false });
+  insertUser(schedMergeStore.sqlite, { id: 'leaver', username: 'leaver', passwordHash: 'x', isOwner: false });
+  schedMergeStore.sqlite
+    .prepare("INSERT INTO channels (id, name, type, position, created_at) VALUES ('sm-chan', 'general', 'text', 0, ?)")
+    .run(new Date().toISOString());
+  schedMergeStore.sqlite
+    .prepare(
+      "INSERT INTO scheduled_messages (id, user_id, channel_id, content, send_at, created_at) VALUES ('sm-1', 'leaver', 'sm-chan', 'carried', 1, 1)",
+    )
+    .run();
+  mergeUsers(schedMergeStore.sqlite, 'leaver', 'keeper');
+  check(
+    'merging accounts carries scheduled messages to the survivor',
+    schedMergeStore.sqlite.prepare("SELECT user_id FROM scheduled_messages WHERE id = 'sm-1'").get()?.user_id === 'keeper',
+  );
+  schedMergeStore.sqlite.prepare("DELETE FROM users WHERE id = 'keeper'").run();
+  check(
+    'a deleted account takes its scheduled messages along',
+    schedMergeStore.sqlite.prepare('SELECT COUNT(*) AS n FROM scheduled_messages').get()?.n === 0,
+  );
+  schedMergeStore.close();
+  rmSync(schedMergeDir, { recursive: true, force: true });
+  }
+
+  // --- Polls ---
+  const pollRoom = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'polls-room' } })).json;
+  const pollBody = (overrides = {}) => ({
+    question: 'Pizza or tacos?',
+    options: [{ text: 'Pizza', emoji: '🍕' }, { text: 'Tacos' }, { text: 'Neither' }],
+    allowMultiple: false,
+    durationHours: 24,
+    ...overrides,
+  });
+  const makePoll = (overrides = {}, token = ownerToken, channelId = pollRoom.id) =>
+    req(`/channels/${channelId}/polls`, { method: 'POST', token, body: pollBody(overrides) });
+  const voteOn = (messageId, optionIds, token = bobToken) =>
+    req(`/messages/${messageId}/poll/votes`, { method: 'PUT', token, body: { optionIds } });
+  const pollOf = async (messageId, token = bobToken, channelId = pollRoom.id) =>
+    (await req(`/channels/${channelId}/messages?limit=100`, { token })).json?.messages?.find((m) => m.id === messageId)?.poll;
+
+  const pollWatcher = await openGateway({ token: bobToken });
+  const created = await makePoll();
+  const pollMessage = created.json;
+  check(
+    'a poll is created as a message whose text is the question',
+    created.status === 200 &&
+      pollMessage?.content === 'Pizza or tacos?' &&
+      pollMessage?.poll?.options?.length === 3 &&
+      pollMessage.poll.options[0].emoji === '🍕' &&
+      pollMessage.poll.options[1].emoji === null &&
+      pollMessage.poll.options.every((o) => o.count === 0) &&
+      pollMessage.poll.totalVoters === 0 &&
+      pollMessage.poll.allowMultiple === false &&
+      pollMessage.poll.closedAt === null &&
+      typeof pollMessage.poll.closesAt === 'string' &&
+      pollMessage.poll.source === 'harmony' &&
+      pollMessage.poll.myVotes.length === 0,
+    JSON.stringify(created.json),
+  );
+  const [pizza, tacos, neither] = pollMessage.poll.options;
+  await sleep(200);
+  check(
+    'a new poll reaches the gateway as an ordinary message',
+    pollWatcher.events.some((f) => f.t === 'MESSAGE_CREATE' && f.d?.id === pollMessage.id && f.d?.poll?.options?.length === 3),
+  );
+  check(
+    'a poll appears in channel history with the viewer\'s own votes',
+    (await pollOf(pollMessage.id))?.options?.length === 3,
+  );
+
+  // Validation.
+  const invalid = async (overrides) => (await makePoll(overrides)).status;
+  check('a poll needs a question (400)', (await invalid({ question: '   ' })) === 400);
+  check('a poll needs two options (400)', (await invalid({ options: [{ text: 'Only one' }] })) === 400);
+  check(
+    'a poll takes at most ten options (400)',
+    (await invalid({ options: Array.from({ length: 11 }, (_, i) => ({ text: `o${i}` })) })) === 400,
+  );
+  check('an option cannot be blank (400)', (await invalid({ options: [{ text: 'a' }, { text: '  ' }] })) === 400);
+  check('an option is limited to 55 characters (400)', (await invalid({ options: [{ text: 'a' }, { text: 'x'.repeat(56) }] })) === 400);
+  check('a question is limited to 300 characters (400)', (await invalid({ question: 'q'.repeat(301) })) === 400);
+  check('an option emoji must be an emoji (400)', (await invalid({ options: [{ text: 'a', emoji: 'abc' }, { text: 'b' }] })) === 400);
+  check('a poll lasts at least an hour (400)', (await invalid({ durationHours: 0 })) === 400);
+  check('a poll lasts at most 32 days (400)', (await invalid({ durationHours: 769 })) === 400);
+  check('a duration must be a whole number of hours (400)', (await invalid({ durationHours: 1.5 })) === 400);
+  check('a poll can have no expiry', (await makePoll({ durationHours: null })).json?.poll?.closesAt === null);
+
+  // Voting.
+  const first = await voteOn(pollMessage.id, [pizza.id]);
+  check(
+    'a member can vote and gets the poll back with their choice',
+    first.status === 200 && first.json?.myVotes?.join() === pizza.id && first.json?.options?.[0]?.count === 1 && first.json?.totalVoters === 1,
+    JSON.stringify(first.json),
+  );
+  await sleep(200);
+  const update = pollWatcher.events.filter((f) => f.t === 'POLL_UPDATE' && f.d?.messageId === pollMessage.id).at(-1);
+  check(
+    'a vote is broadcast as counts plus who voted, not a per-viewer view',
+    update?.d?.channelId === pollRoom.id &&
+      update.d.actorId === bobId &&
+      update.d.actorVotes?.join() === pizza.id &&
+      update.d.totalVoters === 1 &&
+      update.d.options.find((o) => o.id === pizza.id)?.count === 1 &&
+      !('myVotes' in update.d),
+    JSON.stringify(update),
+  );
+  check(
+    'the owner sees the live counts without having voted',
+    (await pollOf(pollMessage.id, ownerToken))?.options?.[0]?.count === 1 &&
+      (await pollOf(pollMessage.id, ownerToken))?.myVotes?.length === 0,
+  );
+  const changed = await voteOn(pollMessage.id, [tacos.id]);
+  check(
+    'changing a vote moves it rather than adding a second',
+    changed.json?.myVotes?.join() === tacos.id &&
+      changed.json?.options?.map((o) => o.count).join() === '0,1,0' &&
+      changed.json?.totalVoters === 1,
+    JSON.stringify(changed.json),
+  );
+  check(
+    'voting the same option again changes nothing',
+    (await voteOn(pollMessage.id, [tacos.id])).json?.options?.map((o) => o.count).join() === '0,1,0',
+  );
+  check(
+    'a single-answer poll refuses two choices (400)',
+    (await voteOn(pollMessage.id, [pizza.id, tacos.id])).status === 400,
+  );
+  check(
+    'an option from another poll is refused (400)',
+    (await voteOn(pollMessage.id, [(await makePoll()).json.poll.options[0].id])).status === 400,
+  );
+  check('an unknown option is refused (400)', (await voteOn(pollMessage.id, ['nope'])).status === 400);
+  await voteOn(pollMessage.id, [neither.id], ownerToken);
+  check(
+    'two voters are counted separately',
+    (await pollOf(pollMessage.id, ownerToken))?.totalVoters === 2 &&
+      (await pollOf(pollMessage.id, ownerToken))?.options?.map((o) => o.count).join() === '0,1,1',
+  );
+  const withdrawn = await voteOn(pollMessage.id, []);
+  check(
+    'an empty choice withdraws the vote',
+    withdrawn.json?.myVotes?.length === 0 && withdrawn.json?.totalVoters === 1,
+    JSON.stringify(withdrawn.json),
+  );
+
+  // Who voted.
+  const votersOf = (messageId, optionId, token = bobToken) =>
+    req(`/messages/${messageId}/poll/voters?optionId=${optionId}`, { token });
+  const voterList = await votersOf(pollMessage.id, neither.id);
+  check(
+    'the voter list names who chose an option (polls are not anonymous)',
+    voterList.status === 200 &&
+      voterList.json?.total === 1 &&
+      voterList.json?.voters?.length === 1 &&
+      voterList.json.voters[0].user.id === ownerId,
+    JSON.stringify(voterList.json),
+  );
+  check('the voter list refuses an unknown option (404)', (await votersOf(pollMessage.id, 'nope')).status === 404);
+  check('the voter list needs a sign-in (401)', (await req(`/messages/${pollMessage.id}/poll/voters?optionId=${neither.id}`)).status === 401);
+
+  // Multiple answers.
+  const multi = (await makePoll({ question: 'Toppings?', allowMultiple: true })).json;
+  const [m1, m2, m3] = multi.poll.options;
+  const multiVote = await voteOn(multi.id, [m1.id, m3.id]);
+  check(
+    'a multiple-answer poll takes several choices',
+    multiVote.json?.myVotes?.length === 2 && multiVote.json?.totalVoters === 1 && multiVote.json?.options?.map((o) => o.count).join() === '1,0,1',
+    JSON.stringify(multiVote.json),
+  );
+  await voteOn(multi.id, [m2.id], ownerToken);
+  const multiAfter = await pollOf(multi.id, ownerToken);
+  check(
+    'with several answers the voter total is below the sum of the counts',
+    multiAfter?.totalVoters === 2 && multiAfter.options.reduce((sum, o) => sum + o.count, 0) === 3,
+  );
+  check(
+    'a repeated option in one vote counts once',
+    (await voteOn(multi.id, [m1.id, m1.id])).json?.options?.map((o) => o.count).join() === '1,1,0',
+  );
+
+  // Ending early.
+  const endable = (await makePoll({ question: 'End me?' })).json;
+  await voteOn(endable.id, [endable.poll.options[0].id]);
+  check('a member cannot end another member\'s poll (403)', (await req(`/messages/${endable.id}/poll/end`, { method: 'POST', token: bobToken })).status === 403);
+  const ended = await req(`/messages/${endable.id}/poll/end`, { method: 'POST', token: ownerToken });
+  check(
+    'the author can end a poll, and the final counts stay',
+    ended.status === 200 && typeof ended.json?.closedAt === 'string' && ended.json?.options?.[0]?.count === 1,
+    JSON.stringify(ended.json),
+  );
+  await sleep(200);
+  check(
+    'ending a poll is broadcast',
+    pollWatcher.events.some((f) => f.t === 'POLL_UPDATE' && f.d?.messageId === endable.id && f.d?.closedAt && f.d?.actorId === null),
+  );
+  check('a closed poll refuses votes (409)', (await voteOn(endable.id, [endable.poll.options[1].id])).status === 409);
+  check('a closed poll refuses withdrawals (409)', (await voteOn(endable.id, [])).status === 409);
+  check('a poll cannot be ended twice (409)', (await req(`/messages/${endable.id}/poll/end`, { method: 'POST', token: ownerToken })).status === 409);
+  check('a closed poll still lists its voters', (await votersOf(endable.id, endable.poll.options[0].id)).json?.voters?.length === 1);
+  check('a closed poll reads as closed in history', typeof (await pollOf(endable.id))?.closedAt === 'string');
+
+  // A moderator with Manage Messages may end someone else's poll.
+  const modPoll = (await makePoll({ question: 'Moderated?' }, bobToken)).json;
+  check('a member can start a poll', modPoll?.poll?.options?.length === 3 && modPoll.author.id === bobId);
+  check('the owner (Manage Messages) can end a member\'s poll', (await req(`/messages/${modPoll.id}/poll/end`, { method: 'POST', token: ownerToken })).status === 200);
+
+  // Expiry: the clock closes a poll by itself. Rewind one through the database.
+  const pollDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+  const expiring = (await makePoll({ question: 'Hurry?', durationHours: 1 })).json;
+  await voteOn(expiring.id, [expiring.poll.options[0].id]);
+  pollDb.prepare('UPDATE polls SET closes_at = ? WHERE message_id = ?').run(new Date(Date.now() - 1000).toISOString(), expiring.id);
+  pollWatcher.events.length = 0;
+  let swept = false;
+  for (let attempt = 0; attempt < 30 && !swept; attempt++) {
+    await sleep(200);
+    swept = pollWatcher.events.some((f) => f.t === 'POLL_UPDATE' && f.d?.messageId === expiring.id && f.d?.closedAt);
+  }
+  check('the timer closes an expired poll and broadcasts it', swept);
+  check('an expired poll keeps its votes', (await pollOf(expiring.id))?.options?.[0]?.count === 1);
+  const lazy = (await makePoll({ question: 'Late?', durationHours: 1 })).json;
+  pollDb.prepare('UPDATE polls SET closes_at = ? WHERE message_id = ?').run(new Date(Date.now() - 1000).toISOString(), lazy.id);
+  check(
+    'a vote cast after the time is up is refused even before the timer ran (409)',
+    (await voteOn(lazy.id, [lazy.poll.options[0].id])).status === 409,
+  );
+
+  // Editing and deleting.
+  check('a poll cannot be edited (400)', (await req(`/messages/${pollMessage.id}`, { method: 'PATCH', token: ownerToken, body: { content: 'changed' } })).status === 400);
+  const searched = await req(`/search?q=${encodeURIComponent('Pizza or tacos')}`, { token: bobToken });
+  check(
+    'a poll is found by searching its question, poll attached',
+    searched.json?.messages?.some((m) => m.id === pollMessage.id && m.poll?.options?.length === 3),
+  );
+  const replied = await req(`/channels/${pollRoom.id}/messages`, {
+    method: 'POST',
+    token: bobToken,
+    body: { content: 'good question', replyToId: pollMessage.id },
+  });
+  check('a reply quotes the question', replied.json?.replyTo?.content === 'Pizza or tacos?');
+
+  // Permissions.
+  const carol = await req('/auth/register', { method: 'POST', body: { username: 'pollwatcher', password: 'pollwatcher-pass', inviteCode: (await req('/invites', { method: 'POST', token: ownerToken, body: {} })).json?.code } });
+  const carolToken = carol.json?.token;
+  const carolId = carol.json?.user?.id;
+  check('a fresh member can vote', carolToken && (await voteOn(multi.id, [m1.id], carolToken)).status === 200);
+  check('creating a poll needs a sign-in (401)', (await req(`/channels/${pollRoom.id}/polls`, { method: 'POST', body: pollBody() })).status === 401);
+  check('creating a poll in a missing channel is refused (404)', (await makePoll({}, ownerToken, 'no-such-channel')).status === 404);
+  check('voting on a message that is not a poll is refused (404)', (await voteOn(replied.json.id, ['x'])).status === 404);
+  check('ending a message that is not a poll is refused (404)', (await req(`/messages/${replied.json.id}/poll/end`, { method: 'POST', token: ownerToken })).status === 404);
+
+  // A timed-out member can read a poll but not vote on it.
+  const timeoutPoll = (await makePoll({ question: 'Timeout?' })).json;
+  await req(`/members/${carolId}/timeout`, { method: 'PUT', token: ownerToken, body: { durationMinutes: 5 } });
+  check('a timed-out member cannot vote (403)', (await voteOn(timeoutPoll.id, [timeoutPoll.poll.options[0].id], carolToken)).status === 403);
+  check('a timed-out member can still read the poll', (await pollOf(timeoutPoll.id, carolToken))?.options?.length === 3);
+  await req(`/members/${carolId}/timeout`, { method: 'DELETE', token: ownerToken });
+  check('and votes again once the timeout lifts', (await voteOn(timeoutPoll.id, [timeoutPoll.poll.options[0].id], carolToken)).status === 200);
+
+  // Rate limit: a script flipping its vote is stopped.
+  const spam = [];
+  for (let i = 0; i < 36; i++) spam.push((await voteOn(timeoutPoll.id, [timeoutPoll.poll.options[i % 2].id], carolToken)).status);
+  check('vote flooding is rate limited (429)', spam.includes(429), spam.join());
+
+  // Hidden channels: a locked channel's polls are invisible, unvotable and silent.
+  const pollRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Poll insiders' } });
+  const hiddenRoom = (
+    await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'hidden-polls', requiredRoleId: pollRole.json.id } })
+  ).json;
+  const hiddenPoll = (await makePoll({ question: 'Secret ballot?' }, ownerToken, hiddenRoom.id)).json;
+  await voteOn(hiddenPoll.id, [hiddenPoll.poll.options[0].id], ownerToken);
+  await sleep(250);
+  check(
+    'a poll in a locked channel is not broadcast to a member without the role',
+    !pollWatcher.events.some((f) => f.d?.channelId === hiddenRoom.id || f.d?.id === hiddenPoll.id),
+  );
+  check('voting in a locked channel is refused (403)', (await voteOn(hiddenPoll.id, [hiddenPoll.poll.options[0].id])).status === 403);
+  check('a locked channel\'s voters are refused (403)', (await votersOf(hiddenPoll.id, hiddenPoll.poll.options[0].id)).status === 403);
+  check('ending in a locked channel is refused (403)', (await req(`/messages/${hiddenPoll.id}/poll/end`, { method: 'POST', token: bobToken })).status === 403);
+  check('a locked channel refuses its poll history (403)', (await req(`/channels/${hiddenRoom.id}/messages`, { token: bobToken })).status === 403);
+  check('creating a poll in a locked channel is refused (403)', (await makePoll({}, bobToken, hiddenRoom.id)).status === 403);
+  const hiddenSearch = await req(`/search?q=${encodeURIComponent('Secret ballot')}`, { token: bobToken });
+  check('a locked channel\'s poll is not searchable', (hiddenSearch.json?.messages ?? []).length === 0);
+  await req(`/members/${bobId}/roles/${pollRole.json.id}`, { method: 'PUT', token: ownerToken });
+  check('with the role the same poll is votable', (await voteOn(hiddenPoll.id, [hiddenPoll.poll.options[1].id])).status === 200);
+  await req(`/members/${bobId}/roles/${pollRole.json.id}`, { method: 'DELETE', token: ownerToken });
+
+  // Deleting the message removes the poll, and its voters.
+  check('a poll message can be deleted', (await req(`/messages/${pollMessage.id}`, { method: 'DELETE', token: ownerToken })).status === 204);
+  check('a deleted poll cannot be voted on (404)', (await voteOn(pollMessage.id, [pizza.id])).status === 404);
+  check('a deleted poll lists no voters (404)', (await votersOf(pollMessage.id, pizza.id)).status === 404);
+  check('a deleted poll drops out of history', (await pollOf(pollMessage.id)) === undefined);
+  // Hard deletion (retention, or the channel going) cascades to every child row.
+  const childRows = (table) => pollDb.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+  const pollRowsBefore = childRows('polls');
+  const votesBefore = childRows('poll_votes');
+  await req(`/channels/${pollRoom.id}`, { method: 'DELETE', token: ownerToken });
+  check(
+    'deleting the channel cascades to its polls, options and votes',
+    childRows('polls') < pollRowsBefore &&
+      childRows('poll_votes') < votesBefore &&
+      pollDb.prepare("SELECT COUNT(*) AS n FROM poll_options WHERE poll_id NOT IN (SELECT id FROM polls)").get().n === 0 &&
+      pollDb.prepare("SELECT COUNT(*) AS n FROM poll_votes WHERE poll_id NOT IN (SELECT id FROM polls)").get().n === 0,
+  );
+  pollDb.close();
+  pollWatcher.ws.close();
+
+  // Merging accounts (the Discord link) keeps one vote per person per poll.
+  const pollMergeDir = mkdtempSync(join(tmpdir(), 'harmony-poll-merge-'));
+  const pollMergeStore = new Database({
+    dataDir: pollMergeDir,
+    dbFile: join(pollMergeDir, 'harmony.db'),
+    uploadDir: join(pollMergeDir, 'uploads'),
+  });
+  const ms = pollMergeStore.sqlite;
+  insertUser(ms, { id: 'p-keeper', username: 'pkeeper', passwordHash: 'x', isOwner: false });
+  insertUser(ms, { id: 'p-leaver', username: 'pleaver', passwordHash: 'x', isOwner: false });
+  ms.prepare("INSERT INTO channels (id, name, type, position, created_at) VALUES ('p-chan', 'general', 'text', 0, ?)").run(new Date().toISOString());
+  for (const id of ['p-single', 'p-multi']) {
+    insertMessage(ms, { id, channelId: 'p-chan', authorId: 'p-keeper', content: id, createdAt: new Date().toISOString() });
+    ms.prepare("INSERT INTO polls (id, message_id, question, allow_multiple, created_at) VALUES (?, ?, 'q', ?, ?)").run(`${id}-poll`, id, id === 'p-multi' ? 1 : 0, new Date().toISOString());
+    for (const o of ['a', 'b', 'c']) ms.prepare('INSERT INTO poll_options (id, poll_id, position, text) VALUES (?, ?, ?, ?)').run(`${id}-${o}`, `${id}-poll`, o.charCodeAt(0), o);
+  }
+  const castVote = (user, poll, option) =>
+    ms.prepare('INSERT INTO poll_votes (poll_id, option_id, user_id, voted_at) VALUES (?, ?, ?, ?)').run(`${poll}-poll`, `${poll}-${option}`, user, new Date().toISOString());
+  castVote('p-keeper', 'p-single', 'a'); // survivor chose a
+  castVote('p-leaver', 'p-single', 'b'); // outgoing chose b: the survivor's choice stands
+  castVote('p-keeper', 'p-multi', 'a');
+  castVote('p-leaver', 'p-multi', 'a'); // the same option twice collapses
+  castVote('p-leaver', 'p-multi', 'c'); // a different one moves across
+  let pollMergeError = null;
+  try {
+    mergeUsers(ms, 'p-leaver', 'p-keeper');
+  } catch (error) {
+    pollMergeError = error;
+  }
+  const mergedVotes = ms.prepare('SELECT poll_id, option_id, user_id FROM poll_votes ORDER BY option_id').all();
+  check(
+    'merging accounts keeps one vote per person: the survivor wins a single-answer poll, a multi poll unions',
+    pollMergeError === null &&
+      mergedVotes.every((row) => row.user_id === 'p-keeper') &&
+      mergedVotes.map((row) => row.option_id).join() === 'p-multi-a,p-multi-c,p-single-a',
+    String(pollMergeError ?? JSON.stringify(mergedVotes)),
+  );
+  pollMergeStore.close();
 
   // --- Admin media gallery ---
   const galleryPng = await sharp({
