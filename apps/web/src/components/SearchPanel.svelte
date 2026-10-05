@@ -282,6 +282,7 @@
           <input
             bind:this={searchInput}
             bind:value={term}
+            type="search"
             oninput={onInput}
             onkeydown={onKeydown}
             onkeyup={syncCaret}

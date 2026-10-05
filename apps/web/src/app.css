@@ -3956,6 +3956,19 @@ button.roster-member:hover {
   width: 100%;
 }
 
+/*
+ * The box is a search field on purpose, so Android's autofill leaves it alone the
+ * way it does the message box (a plain text field in a form gets offered
+ * passwords, payment methods and addresses). That type brings a clear button and
+ * its own remembered history; the history stays off via autocomplete and the
+ * button is hidden, since a chip or deleting the text is the way back.
+ */
+.search-box input::-webkit-search-cancel-button,
+.search-box input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 .search-suggestions {
   position: absolute;
   top: calc(100% + 4px);
