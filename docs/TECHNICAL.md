@@ -942,6 +942,31 @@ The number is compiled into the web bundle, so an installed app that has not
 reloaded since an update reports the version it was built with. The service worker
 caches nothing, so one reload corrects it.
 
+## The update check
+
+An owner sees an **Update** tab in the admin panel. It compares the version this
+instance runs with the newest on its update branch, and offers a switch for a
+once-a-day automatic check (off by default, because it calls out to the
+internet). The check is a single GET of a constants file, read with a small regex
+for `HARMONY_VERSION`; there is no GitHub API call, so no key and no rate limit to
+manage. Which file is one constant, `HARMONY_VERSION_SOURCE_URL` in
+`packages/shared/src/constants.ts`, set to Harmony's own copy on `main`.
+
+It is a code constant rather than an environment variable on purpose. Only
+someone forking the project has any reason to change it, and a raw URL is not
+something a regular hoster should be able to break with a mistyped env value. A
+fork edits that one line to point at its own copy of the file, or sets it to an
+empty string to switch the check off entirely.
+
+The server does the work (`apps/server/src/update/service.ts`) and caches the
+last result. `GET`, `POST` (a manual check) and `PATCH` (the switch) on
+`/api/v1/update` are owner-only, like the server log. When a check finds a newer
+release it broadcasts `UPDATE_AVAILABLE` once per release, and the client turns
+that into a dismissible notice that anyone but the owner ignores. A failed check
+keeps the last known answer and records the reason, so a blip never reads as "up
+to date". The tab only prints the update commands; it does not run them, and
+nothing about the machine leaves it beyond the request itself.
+
 ## License
 
 Harmony is free software, licensed under the

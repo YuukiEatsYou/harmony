@@ -16,3 +16,4 @@ export * from './backup.ts';
 export * from './scheduled.ts';
 export * from './polls.ts';
 export * from './events.ts';
+export * from './update.ts';

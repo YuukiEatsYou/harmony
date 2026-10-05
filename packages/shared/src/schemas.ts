@@ -244,6 +244,12 @@ export const updateSettingsSchema = z.object({
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
+/** The owner's switch for the daily update check. */
+export const updateAutoCheckSchema = z.object({
+  autoCheck: z.boolean(),
+});
+export type UpdateAutoCheckInput = z.infer<typeof updateAutoCheckSchema>;
+
 /** A one-step reorder, shared by roles, channels and categories. */
 export const moveSchema = z.object({
   direction: z.enum(['up', 'down']),

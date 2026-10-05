@@ -14,6 +14,7 @@ export type AdminTabId =
   | 'bans'
   | 'audit'
   | 'server-log'
+  | 'update'
   | 'backup';
 
 /**
@@ -46,6 +47,8 @@ export const ADMIN_TABS: ReadonlyArray<{
   { id: 'audit', label: 'Log', permissions: [Permission.ManageServer] },
   // The server log can carry internals a non-owner administrator should not see.
   { id: 'server-log', label: 'Server log', permissions: [Permission.ManageServer], ownerOnly: true },
+  // The owner runs the machine, so the update check is theirs alone.
+  { id: 'update', label: 'Update', permissions: [Permission.ManageServer], ownerOnly: true },
   // The full backup inside is owner-only; the tab also holds channel exports.
   { id: 'backup', label: 'Backup', permissions: [Permission.ManageServer] },
 ];

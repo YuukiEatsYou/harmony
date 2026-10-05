@@ -116,6 +116,9 @@ export interface SettingsService {
   /** Content hash of the uploaded server icon, or null for the built-in default. */
   getIconHash(): string | null;
   setIconHash(hash: string | null): void;
+  /** Whether the server checks for updates once a day. Off unless the owner turns it on. */
+  getUpdateCheck(): boolean;
+  setUpdateCheck(enabled: boolean): void;
 }
 
 const KEY_SERVER_NAME = 'server_name';
@@ -149,6 +152,7 @@ const KEY_KLIPY_KEY = 'klipy_api_key';
 const KEY_GIF_STORAGE = 'gif_storage';
 const KEY_PREVIEW_UA = 'preview_user_agent';
 const KEY_SETUP_COMPLETED = 'setup_completed';
+const KEY_UPDATE_CHECK = 'update_check_enabled';
 
 function parseString(raw: string, fallback: string): string {
   try {
@@ -340,6 +344,16 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
 
     setIconHash(hash) {
       writeSetting(sqlite, KEY_ICON_HASH, JSON.stringify(hash));
+    },
+
+    getUpdateCheck() {
+      const raw = readAllSettings(sqlite).get(KEY_UPDATE_CHECK);
+      // Off unless it has been switched on: the check calls out to the internet.
+      return raw ? parseBoolean(raw, false) : false;
+    },
+
+    setUpdateCheck(enabled) {
+      writeSetting(sqlite, KEY_UPDATE_CHECK, JSON.stringify(enabled));
     },
 
     update(patch) {

@@ -8,6 +8,7 @@
   import { scheduled } from '../lib/scheduled.svelte';
   import { session } from '../lib/session.svelte';
   import { ui } from '../lib/ui.svelte';
+  import { update } from '../lib/update.svelte';
   import { uploads } from '../lib/upload-queue.svelte';
   import ChannelSidebar from './ChannelSidebar.svelte';
   import Composer from './Composer.svelte';
@@ -30,6 +31,8 @@
     scheduled.start();
     // Events are mirrored the same way; the server starts, ends and reminds.
     events.start();
+    // The owner's update check: the server runs it, this only shows the notice.
+    update.start();
 
     // A phone that backgrounds the app gets no events at all: the socket dies and
     // nothing scrolls past. Coming back to the foreground is the cue to reconnect
@@ -45,6 +48,7 @@
       saved.stop();
       scheduled.stop();
       events.stop();
+      update.stop();
       chat.stop();
     };
   });
@@ -74,6 +78,11 @@
   function openSavedNotice(): void {
     saved.notice = null;
     ui.openSaved();
+  }
+
+  /** Opens the admin panel straight on the Update tab. */
+  function openUpdate(): void {
+    ui.openAdmin('update');
   }
 
   /**
@@ -206,6 +215,19 @@
       <div class="reminder-notice-actions">
         <button type="button" onclick={openSavedNotice}>View</button>
         <button type="button" class="ghost" onclick={() => (saved.notice = null)}>Dismiss</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if update.notice}
+    <div class="reminder-notice" role="status">
+      <p>
+        <strong>Update available</strong>
+        Harmony {update.latest} is out; this instance runs {update.running}.
+      </p>
+      <div class="reminder-notice-actions">
+        <button type="button" onclick={openUpdate}>View</button>
+        <button type="button" class="ghost" onclick={() => update.dismiss()}>Dismiss</button>
       </div>
     </div>
   {/if}

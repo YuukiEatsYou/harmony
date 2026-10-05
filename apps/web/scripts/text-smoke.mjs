@@ -12,9 +12,11 @@ import { createRequire } from 'node:module';
 import {
   MUTE_DURATIONS,
   isMuteActive,
+  isNewerVersion,
   listEmbeddableUrls,
   matchChannelName,
   nextMuteExpiry,
+  parseVersionFile,
   resolveChannelSettings,
   rewriteChannelMentions,
 } from '@harmony/shared';
@@ -1397,6 +1399,19 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   const moved = toUpdateEventBody({ ...same, locationKind: 'channel', channelId: 'c9' }, original);
   check('changing the place kind sends the new place', moved.locationKind === 'channel' && moved.channelId === 'c9' && moved.locationText === undefined && updateEventSchema.safeParse(moved).success);
   check('an edit request passes the server schema', updateEventSchema.safeParse(patch).success);
+}
+
+// --- The update check's version comparison ---
+{
+  check('a version file is read for its version', parseVersionFile("export const HARMONY_VERSION = '1.25.0';") === '1.25.0');
+  check('a file with no version reads as none', parseVersionFile('export const OTHER = 1;') === null);
+  check('a newer patch is newer', isNewerVersion('1.24.3', '1.24.2'));
+  check('a newer minor is newer', isNewerVersion('1.25.0', '1.24.9'));
+  check('a newer major is newer', isNewerVersion('2.0.0', '1.99.99'));
+  check('the same version is not newer', !isNewerVersion('1.24.2', '1.24.2'));
+  check('an older version is not newer', !isNewerVersion('1.23.9', '1.24.0'));
+  check('a missing part pads with zeros', !isNewerVersion('1.24', '1.24.0') && isNewerVersion('1.24.1', '1.24'));
+  check('a non-numeric part counts as zero, not a false update', !isNewerVersion('1.24.x', '1.24.0'));
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);

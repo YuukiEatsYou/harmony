@@ -17,7 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import sharp from 'sharp';
-import { Permission, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
+import { Permission, HARMONY_VERSION, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
 import { isPrivateAddress, parseEmbedMetadata } from '../src/embeds/metadata.ts';
 import { isDiscordAttachment, isGifPage, isGiphyPage, tweetStatusId, youtubeVideoId } from '../src/embeds/providers.ts';
 import { isKlipyAddress, klipySearchUrl, normalizeKlipySearch } from '../src/gifs/klipy.ts';
@@ -44,6 +44,7 @@ import { upsertGifFavorite } from '../src/db/gif_favorites.ts';
 import { verifyLinkedGif } from '../src/embeds/linked-gif.ts';
 import { createAttachmentService } from '../src/attachments/service.ts';
 import { createSettingsService } from '../src/settings/service.ts';
+import { createUpdateService } from '../src/update/service.ts';
 import { createUserService } from '../src/users/service.ts';
 import { sanitizeDetail, sanitizeLogText } from '../src/log/sanitize.ts';
 
@@ -7654,6 +7655,101 @@ try {
     (await req('/users/@me/discord', { method: 'DELETE', token: bobToken })).status === 204 &&
       (await req('/auth/me', { token: bobToken })).json?.user?.discordId === null,
   );
+
+  // --- Update check ---
+  // Driven in process with a throwaway database and a fake fetch: the real check
+  // calls out to the internet, and what matters here is the parsing, the
+  // comparison and that a failure never reads as "up to date".
+  {
+    const updateDir = mkdtempSync(join(tmpdir(), 'harmony-update-'));
+    const updateDb = new Database({ dataDir: updateDir, dbFile: join(updateDir, 'update.db'), uploadDir: join(updateDir, 'uploads') });
+    const updateSettings = createSettingsService(updateDb.sqlite, { serverName: 'Test', requireInvite: false });
+
+    const versionFile = (version) => `export const HARMONY_VERSION = '${version}';\n`;
+    const respond = (body, ok = true, status = 200) => Promise.resolve({ ok, status, text: async () => body });
+    const notices = [];
+    let answer = respond(versionFile('1.26.0'));
+    const checker = createUpdateService({
+      settings: updateSettings,
+      sourceUrl: 'https://example.test/constants.ts',
+      fetchImpl: () => answer,
+      now: () => new Date('2025-01-01T00:00:00.000Z'),
+      notify: (status) => notices.push(status.latest),
+    });
+
+    const first = await checker.check();
+    check(
+      'update: a newer version on the source is offered',
+      first.enabled && first.latest === '1.26.0' && first.available && first.checkedAt === '2025-01-01T00:00:00.000Z',
+      JSON.stringify(first),
+    );
+    check('update: the newer release is announced once', notices.join() === '1.26.0');
+
+    await checker.check();
+    check('update: the same release is not announced twice', notices.length === 1);
+
+    answer = respond(versionFile(HARMONY_VERSION));
+    const upToDate = await checker.check();
+    check(
+      'update: the running version reads as up to date',
+      !upToDate.available && upToDate.latest === HARMONY_VERSION && upToDate.error === null,
+    );
+
+    answer = respond(versionFile('1.27.0'));
+    await checker.check();
+    check('update: a second new release is announced', notices.join() === '1.26.0,1.27.0');
+
+    // A failed check keeps the last known answer and records why.
+    answer = respond('nope', false, 500);
+    const failed = await checker.check();
+    check(
+      'update: a failed check keeps the last answer and records the error',
+      failed.latest === '1.27.0' && failed.available && failed.error === 'the source answered 500',
+      JSON.stringify(failed),
+    );
+
+    answer = respond('nothing here');
+    check('update: a source with no version is a failure', (await checker.check()).error === 'the source carried no version');
+
+    // With no source configured, checks are off and nothing is fetched.
+    let fetched = false;
+    const off = createUpdateService({
+      settings: updateSettings,
+      sourceUrl: null,
+      fetchImpl: () => {
+        fetched = true;
+        return respond(versionFile('9.9.9'));
+      },
+    });
+    const disabled = await off.check();
+    check('update: no configured source means the check is off', disabled.enabled === false && !fetched);
+
+    // The toggle defaults off and round-trips through the settings service.
+    check('update: the daily check is off by default', updateSettings.getUpdateCheck() === false);
+    updateSettings.setUpdateCheck(true);
+    check(
+      'update: the daily check can be switched on',
+      updateSettings.getUpdateCheck() === true && off.status().autoCheck === true,
+    );
+
+    updateDb.close();
+    rmSync(updateDir, { recursive: true, force: true });
+  }
+
+  // The routes: the owner reads and toggles the status, nobody else reaches it.
+  // The manual check is not pressed here, because on the booted instance it would
+  // go out to the real update source.
+  const updateStatus = await req('/update', { token: ownerToken });
+  check(
+    'the owner reads the update status',
+    updateStatus.status === 200 && updateStatus.json?.running === HARMONY_VERSION && updateStatus.json?.autoCheck === false,
+    JSON.stringify(updateStatus.json),
+  );
+  check('a non-owner cannot read the update status (403)', (await req('/update', { token: bobToken })).status === 403);
+  const toggled = await req('/update', { method: 'PATCH', token: ownerToken, body: { autoCheck: true } });
+  check('the owner can switch the daily check on', toggled.status === 200 && toggled.json?.autoCheck === true);
+  const untoggled = await req('/update', { method: 'PATCH', token: ownerToken, body: { autoCheck: false } });
+  check('and off again', untoggled.status === 200 && untoggled.json?.autoCheck === false);
 
   check('logout succeeds', (await req('/auth/logout', { method: 'POST', cookie: login.cookie })).status === 200);
   check('session is dead after logout (401)', (await req('/auth/me', { cookie: login.cookie })).status === 401);

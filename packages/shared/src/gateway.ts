@@ -41,6 +41,7 @@ export const GatewayEvent = {
   ServerGifsUpdate: 'SERVER_GIFS_UPDATE',
   EventUpdate: 'EVENT_UPDATE',
   EventReminder: 'EVENT_REMINDER',
+  UpdateAvailable: 'UPDATE_AVAILABLE',
 } as const;
 export type GatewayEventName = (typeof GatewayEvent)[keyof typeof GatewayEvent];
 
@@ -127,6 +128,16 @@ export interface TypingStartPayload {
 export interface PresenceUpdatePayload {
   user: User;
   online: boolean;
+}
+
+/**
+ * A newer release is on the update branch. It is broadcast to everyone, but only
+ * the owner acts on it; the versions are public information, so nothing is lost
+ * by letting the others see it and ignore it.
+ */
+export interface UpdateAvailablePayload {
+  running: string;
+  latest: string;
 }
 
 /** Envelope for every gateway frame. */

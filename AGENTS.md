@@ -123,8 +123,8 @@ npm workspaces monorepo; every package is ESM TypeScript.
   parameter properties, no namespaces. Use `import type` for type-only imports
   (`verbatimModuleSyntax` is on). `strict` and `noUncheckedIndexedAccess` are on.
 - Layered by feature: `routes/*` are HTTP handlers, the domain folders
-  (`messages/`, `channels/`, `moderation/`, `access/`, `bridge/`, `gifs/`, ...)
-  hold the logic, and `db/*` holds one raw-SQL file per table group.
+  (`messages/`, `channels/`, `moderation/`, `access/`, `bridge/`, `gifs/`,
+  `update/`, ...) hold the logic, and `db/*` holds one raw-SQL file per table group.
   `access/service.ts` is where permission checks resolve.
 - Schema changes: append a new entry to `db/migrations.ts`. Never edit a shipped
   migration.

@@ -1,5 +1,9 @@
+import type { AdminTabId } from './admin';
+
 class UiState {
   adminOpen = $state(false);
+  /** The tab to select when the admin panel next opens. */
+  adminTab = $state<AdminTabId>('settings');
   aboutOpen = $state(false);
   profileOpen = $state(false);
   searchOpen = $state(false);
@@ -82,9 +86,10 @@ class UiState {
     this.eventsOpen = false;
   }
 
-  openAdmin(): void {
+  openAdmin(tab: AdminTabId = 'settings'): void {
     this.closeDrawers();
     this.#closePanels();
+    this.adminTab = tab;
     this.adminOpen = true;
   }
 

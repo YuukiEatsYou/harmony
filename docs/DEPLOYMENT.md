@@ -370,6 +370,12 @@ systemctl restart harmony
 There are no build steps for the server itself; Node runs the TypeScript
 directly.
 
+The owner sees an **Update** tab in the admin panel. It holds a manual *Check for
+updates* button, a switch for a once-a-day automatic check (off by default, since
+it calls out to the internet), and these same instructions. There is nothing to
+configure: a fork that wants the check to point at its own releases changes one
+constant, described in `docs/TECHNICAL.md`.
+
 ## A note on the content security policy
 
 The server sends a strict `Content-Security-Policy` that allows only its own

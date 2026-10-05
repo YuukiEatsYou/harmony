@@ -7,10 +7,20 @@ export const HARMONY_NAME = 'Harmony';
  * the major number is the owner's to raise. Kept here rather than in a
  * package.json so the client, the server and the bridge all read one value.
  */
-export const HARMONY_VERSION = '1.24.2';
+export const HARMONY_VERSION = '1.25.0';
 
 /** Where the project lives, linked from the About panel. */
 export const HARMONY_REPO_URL = 'https://github.com/YuukiEatsYou/harmony';
+
+/**
+ * FORKS: change this one line to run the update check against your own releases
+ * instead of Harmony's. It should be the raw URL of a copy of this file on your
+ * update branch; the server reads HARMONY_VERSION out of it. An empty string
+ * switches update checks off. A normal instance never needs to touch it, which is
+ * why it is a constant here rather than an environment variable.
+ */
+export const HARMONY_VERSION_SOURCE_URL =
+  'https://raw.githubusercontent.com/YuukiEatsYou/harmony/main/packages/shared/src/constants.ts';
 
 /** Version prefix for all REST routes, e.g. `/api/v1`. */
 export const API_VERSION = 'v1';

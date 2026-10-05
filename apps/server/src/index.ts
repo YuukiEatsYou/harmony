@@ -5,7 +5,10 @@ import websocket from '@fastify/websocket';
 import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
+  GatewayEvent,
+  HARMONY_VERSION_SOURCE_URL,
   MAX_UPLOAD_CEILING_BYTES,
+  type UpdateAvailablePayload,
 } from '@harmony/shared';
 import { loadConfig } from './config.ts';
 import { Database } from './db/index.ts';
@@ -31,6 +34,7 @@ import { createPollService } from './polls/service.ts';
 import { createEventService } from './events/service.ts';
 import { GatewayHub } from './realtime/hub.ts';
 import { createPruner } from './retention/pruner.ts';
+import { createUpdateService } from './update/service.ts';
 import { createBridgeService } from './bridge/service.ts';
 import { createDiscordTransport } from './bridge/discordjs.ts';
 import { createChannelImportService } from './channels/import.ts';
@@ -75,6 +79,7 @@ import { registerRetentionRoutes } from './routes/retention.ts';
 import { registerBridgeRoutes } from './routes/bridge.ts';
 import { registerAuditRoutes } from './routes/audit.ts';
 import { registerServerLogRoutes } from './routes/server-log.ts';
+import { registerUpdateRoutes } from './routes/update.ts';
 import { registerBackupRoutes } from './routes/backup.ts';
 import { registerGateway } from './gateway/index.ts';
 
@@ -154,6 +159,22 @@ const pruner = createPruner({
   hub,
   log: (message, detail) => app.log.info(detail ?? {}, message),
   serverLog,
+});
+
+// Checks the version this instance runs against the newest on its update branch.
+// Off unless the owner turns the daily check on; a found release is broadcast so
+// any connected owner client can say so.
+const updateService = createUpdateService({
+  settings: settingsService,
+  // A fork edits HARMONY_VERSION_SOURCE_URL in the shared constants to point at
+  // its own file; an empty value switches the check off entirely.
+  sourceUrl: HARMONY_VERSION_SOURCE_URL.length > 0 ? HARMONY_VERSION_SOURCE_URL : null,
+  notify: (status) => {
+    if (status.latest === null) return;
+    const payload: UpdateAvailablePayload = { running: status.running, latest: status.latest };
+    hub.dispatch(GatewayEvent.UpdateAvailable, payload);
+  },
+  log: (message, detail) => app.log.info(detail ?? {}, message),
 });
 
 // Set once the bridge exists, so a pasted Discord attachment link can be renewed
@@ -257,6 +278,7 @@ registerIconRoutes(app, { icon: iconService });
 registerRetentionRoutes(app, { settings: settingsService, pruner });
 registerAuditRoutes(app, { audit: auditService });
 registerServerLogRoutes(app, { serverLog });
+registerUpdateRoutes(app, { settings: settingsService, update: updateService });
 registerBackupRoutes(app, { db, config, settings: settingsService, audit: auditService, serverLog });
 registerBridgeRoutes(app, { settings: settingsService, bridge });
 registerRoleRoutes(app, { db, hub });
@@ -296,6 +318,7 @@ registerGateway(app, {
 
 app.addHook('onClose', async () => {
   pruner.stop();
+  updateService.stop();
   scheduledService.stop();
   pollService.stop();
   eventService.stop();
@@ -330,6 +353,9 @@ try {
 pruner.start();
 pollService.start();
 eventService.start();
+
+// Schedules the daily update check when the owner has switched it on.
+updateService.start();
 
 // Deliver anything that came due while the server was down, then keep watching the clock.
 scheduledService.start();

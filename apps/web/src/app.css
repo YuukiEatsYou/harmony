@@ -3872,6 +3872,32 @@ button.roster-member:hover {
   white-space: pre-wrap;
 }
 
+/* ---- Update ---- */
+
+.update-status {
+  margin: 0.6rem 0 0.75rem;
+  font-size: 0.9rem;
+}
+
+/* A release worth installing stands out in the accent, like a link. */
+.update-available {
+  color: var(--h-accent);
+}
+
+/* The update commands, kept on their own lines so they can be copied as-is. */
+.update-command {
+  margin: 0.5rem 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-elevated);
+  border: 1px solid var(--h-border);
+  color: var(--h-text);
+  font-family: var(--h-mono);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
 /* ============================================================
    SEARCH & INBOX
    ============================================================ */
