@@ -1,3 +1,5 @@
+import type { AccountType } from './types.ts';
+
 /**
  * The file formats a channel export comes in. JSON is for other tools to read;
  * HTML is a standalone page for a person to read, with no scripts in it.
@@ -14,7 +16,7 @@ export interface ChannelExportAuthor {
   id: string;
   username: string;
   displayName: string | null;
-  isBot: boolean;
+  accountType: AccountType;
 }
 
 export interface ChannelExportAttachment {

@@ -55,7 +55,7 @@ export function countLocalReaction(sqlite: DatabaseSync, messageId: string, emoj
       `SELECT COUNT(*) AS count
          FROM reactions r
          JOIN users u ON u.id = r.user_id
-        WHERE r.message_id = ? AND r.emoji = ? AND u.is_bot = 0`,
+        WHERE r.message_id = ? AND r.emoji = ? AND u.account_type = 'user'`,
     )
     .get(messageId, emoji) as { count: number };
   return row.count;

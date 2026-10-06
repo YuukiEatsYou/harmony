@@ -234,6 +234,33 @@ export interface MemberListResponse {
 }
 
 /**
+ * A bot account the owner set up in the admin panel. The token is never part of
+ * this: it is shown once when the bot is created or its token is regenerated, and
+ * only the hash is kept.
+ */
+export interface BotSummary {
+  user: User;
+  /** The bot's own permission bitfield, as a decimal string. */
+  permissions: string;
+  /** When the bot's token was last used, or null. */
+  lastUsedAt: string | null;
+}
+
+export interface BotListResponse {
+  bots: BotSummary[];
+}
+
+/** Creating a bot returns its token once; it can be regenerated but never read back. */
+export interface BotCreateResponse {
+  bot: BotSummary;
+  token: string;
+}
+
+export interface BotTokenResponse {
+  token: string;
+}
+
+/**
  * The public member directory: every user's profile, with no roles or
  * permissions. Used to resolve `@username` mentions and to autocomplete them.
  */

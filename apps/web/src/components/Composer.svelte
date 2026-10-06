@@ -499,7 +499,7 @@
    */
   const mentionableUsers = $derived.by((): User[] => {
     if (chat.activeChannel?.discordChannelId != null) return members.list;
-    return members.list.filter((user) => !user.isBot);
+    return members.list.filter((user) => user.accountType !== 'ghost');
   });
 
   const suggestions = $derived.by((): Suggestion[] => {

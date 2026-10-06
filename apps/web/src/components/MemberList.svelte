@@ -7,6 +7,7 @@
   import { ui } from '../lib/ui.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
+  import BotBadge from './BotBadge.svelte';
 
   interface Group {
     key: string;
@@ -40,7 +41,7 @@
 
   const groups = $derived.by((): Group[] => {
     const byId = new Map(roster.roles.map((role) => [role.id, role]));
-    const humans = roster.members.filter((entry) => !entry.user.isBot);
+    const humans = roster.members.filter((entry) => entry.user.accountType !== 'ghost');
     const online = humans.filter((entry) => entry.online);
     const offline = humans.filter((entry) => !entry.online);
 
@@ -70,7 +71,7 @@
      * together at the bottom.
      */
     const bridged = chat.activeChannel?.discordChannelId != null;
-    const standIns = bridged ? roster.members.filter((entry) => entry.user.isBot) : [];
+    const standIns = bridged ? roster.members.filter((entry) => entry.user.accountType === 'ghost') : [];
     const aroundOnDiscord = standIns.filter((entry) => entry.online).sort(byName);
     const awayOnDiscord = standIns.filter((entry) => !entry.online).sort(byName);
 
@@ -117,8 +118,9 @@
             {/if}
             <span class="roster-name" style={cssColor(entry.user.roleColor)}>{nameOf(entry)}</span>
             {#if entry.user.badge}<MemberBadge badge={entry.user.badge} size={12} />{/if}
+            {#if entry.user.accountType === 'bot'}<BotBadge size={12} />{/if}
             {#if entry.user.discordId}
-              {#if entry.user.isBot}
+              {#if entry.user.accountType === 'ghost'}
                 <span class="roster-linked" title="A Discord account"><Icon name="link" size={12} /></span>
               {:else}
                 <span class="roster-linked linked-account" title="Linked to a Discord account">

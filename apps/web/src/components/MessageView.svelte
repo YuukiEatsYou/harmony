@@ -20,6 +20,7 @@
   import EmbedVideo from './EmbedVideo.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
+  import BotBadge from './BotBadge.svelte';
   import MessageContent from './MessageContent.svelte';
   import PinAction from './PinAction.svelte';
   import RemoveEmbedsAction from './RemoveEmbedsAction.svelte';
@@ -559,6 +560,9 @@
               </button>
               {#if message.author?.badge}
                 <MemberBadge badge={message.author.badge} />
+              {/if}
+              {#if message.author?.accountType === 'bot'}
+                <BotBadge size={13} />
               {/if}
               <time>{formatTime(message.createdAt)}</time>
               {#if message.editedAt}<EditHistory {message} />{/if}

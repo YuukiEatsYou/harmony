@@ -17,7 +17,7 @@
    * Discord stand-ins are left out: they are only reachable through a bridged
    * channel, which is why the member list hides them everywhere else too.
    */
-  const people = $derived(members.list.filter((user) => !user.isBot));
+  const people = $derived(members.list.filter((user) => user.accountType !== 'ghost'));
   const results = $derived(
     rankSwitcher({
       query,

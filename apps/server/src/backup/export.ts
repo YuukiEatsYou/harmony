@@ -60,7 +60,14 @@ function* exportMessages(
       const row = findUserById(sqlite, id);
       authors.set(
         id,
-        row ? { id: row.id, username: row.username, displayName: row.display_name, isBot: row.is_bot === 1 } : null,
+        row
+          ? {
+              id: row.id,
+              username: row.username,
+              displayName: row.display_name,
+              accountType: row.account_type as ChannelExportAuthor['accountType'],
+            }
+          : null,
       );
     }
     return authors.get(id) ?? null;
@@ -244,7 +251,11 @@ ${channel.topic ? `<p>${escapeHtml(channel.topic)}</p>\n` : ''}</header>
     parts.push(
       `<div class="meta"><span class="author">${escapeHtml(name)}</span>` +
         (message.author ? `<span class="username">@${escapeHtml(message.author.username)}</span>` : '') +
-        (message.author?.isBot ? '<span class="bot">Discord</span>' : '') +
+        (message.author?.accountType === 'bot'
+          ? '<span class="bot">Bot</span>'
+          : message.author?.accountType === 'ghost'
+            ? '<span class="bot">Discord</span>'
+            : '') +
         `<time datetime="${escapeHtml(message.createdAt)}">${escapeHtml(formatTime(message.createdAt))}</time>` +
         (message.editedAt
           ? `<span class="edited" title="${escapeHtml(message.editedAt)}">(edited ${escapeHtml(formatTime(message.editedAt))})</span>`

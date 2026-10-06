@@ -8,6 +8,7 @@
   import { ui } from '../lib/ui.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
+  import BotBadge from './BotBadge.svelte';
 
   /**
    * The full, fixed profile: the big surface a click on a member opens. The small
@@ -122,8 +123,9 @@
           <strong>
             {user.displayName ?? user.username}
             {#if user.badge}<MemberBadge badge={user.badge} size={15} />{/if}
+            {#if user.accountType === 'bot'}<BotBadge size={15} />{/if}
             {#if user.discordId}
-              {#if user.isBot}
+              {#if user.accountType === 'ghost'}
                 <span class="card-linked" title="A Discord account"><Icon name="link" size={13} /></span>
               {:else}
                 <span class="card-linked linked-account" title="Linked to a Discord account">
@@ -162,7 +164,7 @@
         {/if}
 
         <div class="profile-viewer-fields">
-          {#if !user.isBot}
+          {#if user.accountType !== 'ghost'}
             <div class="profile-field">
               <span class="profile-field-label">Member since</span>
               <span>{new Date(user.createdAt).toLocaleDateString()}</span>

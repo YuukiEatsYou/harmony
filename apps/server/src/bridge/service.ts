@@ -556,7 +556,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
   function resolveGhostUser(discordId: string, displayName: string, refreshName = false): UserRow {
     const existing = findUserByDiscordId(deps.sqlite, discordId);
     if (existing) {
-      if (!refreshName || existing.is_bot !== 1 || !displayName || existing.display_name === displayName) {
+      if (!refreshName || existing.account_type !== 'ghost' || !displayName || existing.display_name === displayName) {
         return existing;
       }
       updateUserProfile(deps.sqlite, existing.id, { displayName });
@@ -903,7 +903,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       const row = findMessage(deps.sqlite, info.id);
       const author = row?.author_id ? findUserById(deps.sqlite, row.author_id) : null;
       const webhook = webhookFor(channel);
-      if (webhook && author?.is_bot !== 1) {
+      if (webhook && author?.account_type !== 'ghost') {
         try {
           await active.deleteMessage({ webhook, discordMessageId: mapping.discord_message_id });
           return;

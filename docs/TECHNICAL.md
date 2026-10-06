@@ -323,6 +323,32 @@ a stand-in row is never signed into on its own, since it has no real owner. On t
 first sign-in the picture from Discord is imported as the member's avatar, unless
 they already have one, so nobody arrives as a blank face.
 
+## Bots and account types
+
+A user row is one of three things, recorded in `users.account_type`: a `user` is a person who
+signed up, a `bot` is an account the owner set up in the Bots tab, and a `ghost` is a Discord
+stand-in the bridge created and owns. This replaces the old boolean `is_bot`, which could not tell a
+stand-in from a bot and whose name was simply wrong for the stand-ins. That column is backfilled here
+and then kept in step on insert but read nowhere, so an instance rolled back to the previous code
+still starts; it can be dropped once bots have settled.
+
+A bot is an ordinary user with two differences: it has no usable password, and its authority is its
+own permission bitfield (`users.bot_permissions`) rather than the roles a person holds.
+`resolvePermissions` returns those bits for a bot, so `Administrator` implies the rest exactly as it
+does for a member. A bot shows a robot marker beside its name where a person shows an
+owner/admin/moderator badge, and it is never the owner.
+
+The token is the only way in. One per bot, generated when it is created, stored only as a SHA-256
+hash in `bot_tokens` (the same hash sessions use) alongside `last_used_at`, so the owner can see
+whether it is still active. `resolveToken` accepts it beside session tokens, so every route and the
+gateway work unchanged: a bot authenticates as its user row and is gated by its bits. There is no
+separate bot API. Regenerating replaces the stored hash, and deleting the bot cascades the row away.
+
+Bot management is owner-only, because a token is a credential that acts as the bot. A member holding
+`ManageMembers` cannot edit a bot — the generic member path refuses it, as it refuses a stand-in —
+and moderation refuses both; a bot is disabled or removed from the Bots tab instead. The token is
+shown once and never returned again.
+
 ## Emoji
 
 The picker offers two tabs. **Server** holds the instance's own uploaded emoji and

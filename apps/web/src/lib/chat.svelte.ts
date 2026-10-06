@@ -53,7 +53,7 @@ function sameFace(a: User, b: User): boolean {
     a.avatarHash === b.avatarHash &&
     a.roleColor === b.roleColor &&
     a.badge === b.badge &&
-    a.isBot === b.isBot
+    a.accountType === b.accountType
   );
 }
 

@@ -6,6 +6,7 @@
   import { roster } from '../lib/roster.svelte';
   import Icon from './Icon.svelte';
   import MemberBadge from './MemberBadge.svelte';
+  import BotBadge from './BotBadge.svelte';
 
   let card = $state<HTMLDivElement | null>(null);
   let left = $state(0);
@@ -118,8 +119,9 @@
         <strong>
           {user.displayName ?? user.username}
           {#if user.badge}<MemberBadge badge={user.badge} size={14} />{/if}
+          {#if user.accountType === 'bot'}<BotBadge size={14} />{/if}
           {#if user.discordId}
-            {#if user.isBot}
+            {#if user.accountType === 'ghost'}
               <span class="card-linked" title="A Discord account"><Icon name="link" size={13} /></span>
             {:else}
               <span class="card-linked linked-account" title="Linked to a Discord account">
@@ -132,9 +134,9 @@
       </div>
 
       <!-- A Discord stand-in was never a member here, so it has no join date. -->
-      {#if !user.isBot || user.discordId}
+      {#if user.accountType !== 'ghost' || user.discordId}
         <div class="profile-card-fields">
-          {#if !user.isBot}
+          {#if user.accountType !== 'ghost'}
             <div class="profile-field">
               <span class="profile-field-label">Member since</span>
               <span>{new Date(user.createdAt).toLocaleDateString()}</span>

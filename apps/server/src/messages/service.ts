@@ -354,8 +354,9 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
    * told about their own message, and the stand-in accounts kept for Discord
    * users are skipped: they can never sign in to read what was collected.
    *
-   * The skip is on `is_bot`, not on having a Discord id: a real member linked to a
-   * Discord account also carries one, and they are every bit as much a member.
+   * The skip is on the account type, not on having a Discord id: a real member
+   * linked to a Discord account also carries one, and they are every bit as much a
+   * member.
    */
   function recordMentions(
     messageId: string,
@@ -368,7 +369,7 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     if (replyToId) {
       const parent = findMessage(sqlite, replyToId);
       const target = parent?.author_id ? findUserById(sqlite, parent.author_id) : null;
-      if (target && target.id !== authorId && target.is_bot === 0) {
+      if (target && target.id !== authorId && target.account_type === 'user') {
         insertMention(sqlite, { messageId, userId: target.id, channelId, kind: 'reply', createdAt });
       }
     }
@@ -386,7 +387,7 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
   ): void {
     for (const username of listMentionUsernames(content)) {
       const user = findUserByUsername(sqlite, username);
-      if (!user || user.id === authorId || user.is_bot === 1) continue;
+      if (!user || user.id === authorId || user.account_type !== 'user') continue;
       insertMention(sqlite, { messageId, userId: user.id, channelId, kind: 'mention', createdAt });
     }
   }

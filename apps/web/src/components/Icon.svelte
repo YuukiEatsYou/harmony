@@ -111,5 +111,12 @@
     <path d="M5 20V11" />
     <path d="M12 20V4" />
     <path d="M19 20v-6" />
+  {:else if name === 'bot'}
+    <rect x="4.5" y="8" width="15" height="11" rx="3" />
+    <path d="M12 8V4.8" />
+    <circle cx="12" cy="3.6" r="1.2" />
+    <path d="M9.2 13h.01" stroke-width="2.4" />
+    <path d="M14.8 13h.01" stroke-width="2.4" />
+    <path d="M9.5 16.2h5" />
   {/if}
 </svg>

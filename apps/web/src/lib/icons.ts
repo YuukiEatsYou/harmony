@@ -28,4 +28,5 @@ export type IconName =
   | 'chevron-down'
   | 'more'
   | 'poll'
+  | 'bot'
   | 'calendar';

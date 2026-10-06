@@ -402,7 +402,7 @@ try {
   const history = messages.history(channelId, { limit: 50 }, userId);
   const ingested = history.messages.find((message) => message.content === 'hi harmony');
   check('discord message lands in harmony', Boolean(ingested));
-  check('ingested message is attributed to a ghost user', ingested?.author?.isBot === true);
+  check('ingested message is attributed to a ghost user', ingested?.author?.accountType === 'ghost');
   check('ghost user carries the discord display name', ingested?.author?.displayName === 'Discord Sam');
   check('discord attachment is mirrored', ingested?.attachments.length === 1);
   check(
@@ -1974,7 +1974,7 @@ try {
   const deeId = findUserByDiscordId(db.sqlite, '5001')?.id;
   check(
     'a vote on Discord is counted here under a stand-in account',
-    afterDiscordVote?.options[0].count === 1 && afterDiscordVote.totalVoters === 2 && findUserById(db.sqlite, deeId)?.is_bot === 1,
+    afterDiscordVote?.options[0].count === 1 && afterDiscordVote.totalVoters === 2 && findUserById(db.sqlite, deeId)?.account_type === 'ghost',
     JSON.stringify(afterDiscordVote),
   );
   check(
@@ -2105,7 +2105,7 @@ try {
       arrived.poll.options[0].emoji === '🎬' &&
       arrived.poll.allowMultiple === true &&
       arrived.poll.source === 'discord' &&
-      arrived.author?.isBot === true,
+      arrived.author?.accountType === 'ghost',
     JSON.stringify(arrived),
   );
   check(

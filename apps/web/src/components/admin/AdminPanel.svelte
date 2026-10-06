@@ -16,6 +16,7 @@
   import RetentionSection from './RetentionSection.svelte';
   import RolesSection from './RolesSection.svelte';
   import ServerLogSection from './ServerLogSection.svelte';
+  import BotsSection from './BotsSection.svelte';
   import SettingsSection from './SettingsSection.svelte';
   import UpdateSection from './UpdateSection.svelte';
 
@@ -67,6 +68,8 @@
         <AuditSection />
       {:else if active === 'server-log'}
         <ServerLogSection />
+      {:else if active === 'bots'}
+        <BotsSection />
       {:else if active === 'update'}
         <UpdateSection />
       {:else if active === 'backup'}

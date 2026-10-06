@@ -95,8 +95,14 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
    * anyone else's, but the profile itself is not ours to edit.
    */
   function assertEditable(row: UserRow): void {
-    if (row.is_bot === 1) {
-      throw new HttpError(400, 'externally_managed', 'Discord stand-in accounts are managed by the bridge.');
+    if (row.account_type !== 'user') {
+      throw new HttpError(
+        400,
+        'externally_managed',
+        row.account_type === 'bot'
+          ? 'Bot accounts are managed from the Bots tab, not as a member.'
+          : 'Discord stand-in accounts are managed by the bridge.',
+      );
     }
   }
 
@@ -183,7 +189,7 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
 
     const existing = findUserByDiscordId(sqlite, next);
     if (existing?.id === row.id) return row;
-    if (existing && existing.is_bot === 0) {
+    if (existing && existing.account_type === 'user') {
       throw new HttpError(409, 'discord_id_taken', 'That Discord account is already linked to another member.');
     }
     // A stand-in account for this Discord user: fold it in, then take its id.

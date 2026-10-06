@@ -7944,6 +7944,70 @@ try {
     rmSync(applyDir, { recursive: true, force: true });
   }
 
+  // Bots: owner-only accounts that act through a long-lived token and carry their
+  // own permission bitfield rather than roles.
+  const botList = await req('/bots', { token: ownerToken });
+  check('the owner lists bots', botList.status === 200 && Array.isArray(botList.json?.bots));
+  check('a non-owner cannot list bots (403)', (await req('/bots', { token: bobToken })).status === 403);
+
+  const botChannel = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'bot-room' } })).json;
+  const madeBot = await req('/bots', {
+    method: 'POST',
+    token: ownerToken,
+    body: { username: 'smokebot', displayName: 'Smoke Bot', permissions: String(Permission.ViewChannels) },
+  });
+  check(
+    'the owner creates a bot and is shown its token once',
+    madeBot.status === 200 &&
+      typeof madeBot.json?.token === 'string' &&
+      madeBot.json?.bot?.user?.accountType === 'bot',
+    JSON.stringify(madeBot.json),
+  );
+  const botId = madeBot.json?.bot?.user?.id;
+  let botToken = madeBot.json?.token;
+  check('a bot carries no owner/admin badge', madeBot.json?.bot?.user?.badge === null);
+  check(
+    'the new bot is listed',
+    (await req('/bots', { token: ownerToken })).json?.bots?.some((bot) => bot.user.id === botId) === true,
+  );
+
+  // The token authenticates as the bot, limited to the permissions it was given.
+  check('the bot token reaches the API', (await req('/channels', { token: botToken })).status === 200);
+  check(
+    'the bot is held to its permissions (403 without SendMessages)',
+    (await req(`/channels/${botChannel.id}/messages`, { method: 'POST', token: botToken, body: { content: 'hi' } }))
+      .status === 403,
+  );
+  check('a bot is never the owner, so it cannot manage bots (403)', (await req('/bots', { token: botToken })).status === 403);
+
+  // Editing the permission bitfield takes effect for the token already issued.
+  const wanted = String(Permission.ViewChannels | Permission.SendMessages);
+  const patchedBot = await req(`/bots/${botId}`, { method: 'PATCH', token: ownerToken, body: { permissions: wanted } });
+  check('the owner edits a bot permissions', patchedBot.status === 200 && patchedBot.json?.permissions === wanted);
+  check(
+    'the edited permission lets the bot post',
+    (await req(`/channels/${botChannel.id}/messages`, { method: 'POST', token: botToken, body: { content: 'from the bot' } }))
+      .status === 200,
+  );
+
+  // Regenerating replaces the token; the old one dies at once.
+  const regenerated = await req(`/bots/${botId}/token`, { method: 'POST', token: ownerToken });
+  check(
+    'regenerating returns a fresh token',
+    regenerated.status === 200 && typeof regenerated.json?.token === 'string' && regenerated.json.token !== botToken,
+  );
+  const beforeRegenerate = botToken;
+  botToken = regenerated.json.token;
+  check('the replaced bot token stops working (401)', (await req('/channels', { token: beforeRegenerate })).status === 401);
+
+  // Deleting the bot revokes its token.
+  check('the owner deletes the bot (204)', (await req(`/bots/${botId}`, { method: 'DELETE', token: ownerToken })).status === 204);
+  check('a deleted bot token is refused (401)', (await req('/channels', { token: botToken })).status === 401);
+  check(
+    'the bot is gone from the list',
+    (await req('/bots', { token: ownerToken })).json?.bots?.some((bot) => bot.user.id === botId) !== true,
+  );
+
   check('logout succeeds', (await req('/auth/logout', { method: 'POST', cookie: login.cookie })).status === 200);
   check('session is dead after logout (401)', (await req('/auth/me', { cookie: login.cookie })).status === 401);
 } catch (error) {

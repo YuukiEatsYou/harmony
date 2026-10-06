@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { SocialLinks, User, UserBadge, UserProfile } from '@harmony/shared';
+import type { AccountType, PermissionValue, SocialLinks, User, UserBadge, UserProfile } from '@harmony/shared';
 import { hasPassword, NO_PASSWORD } from '../auth/passwords.ts';
 import { getHighestRoleColor, getUserBadge } from './roles.ts';
 
@@ -23,6 +23,23 @@ export interface UserRow {
   avatar_color: number | null;
   banner_hash: string | null;
   social_links: string | null;
+  account_type: string;
+  bot_permissions: string;
+}
+
+/** A stored account type, defaulting to a person for anything unrecognized. */
+function parseAccountType(raw: string): AccountType {
+  return raw === 'bot' || raw === 'ghost' ? raw : 'user';
+}
+
+/** A stored permission bitfield as a bigint; anything unreadable is none. */
+export function parsePermissionBits(raw: string | null): PermissionValue {
+  if (!raw) return 0n;
+  try {
+    return BigInt(raw);
+  } catch {
+    return 0n;
+  }
 }
 
 export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge | null): User {
@@ -32,7 +49,7 @@ export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge 
     displayName: row.display_name,
     avatarHash: row.avatar_hash,
     roleColor,
-    isBot: row.is_bot === 1,
+    accountType: parseAccountType(row.account_type),
     isOwner: row.is_owner === 1,
     badge,
     createdAt: row.created_at,
@@ -47,7 +64,10 @@ export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge 
 
 /** A user DTO with their display color and badge resolved from their roles. */
 export function presentUser(sqlite: DatabaseSync, row: UserRow): User {
-  return toUser(row, getHighestRoleColor(sqlite, row.id), getUserBadge(sqlite, row.id, row.is_owner === 1));
+  // Only a person shows an owner/admin/moderator badge, and only the owner shows
+  // the owner one. A bot has its own icon; a stand-in belongs to Discord.
+  const badge = row.account_type === 'user' ? getUserBadge(sqlite, row.id, row.is_owner === 1) : null;
+  return toUser(row, getHighestRoleColor(sqlite, row.id), badge);
 }
 
 /** The stored social links, or an empty map when there are none or they are unreadable. */
@@ -73,9 +93,11 @@ export function presentUserProfile(row: UserRow): UserProfile {
   };
 }
 
-/** Counts real accounts; Discord stand-ins do not make an instance "started". */
+/** Counts real accounts; bots and Discord stand-ins do not make an instance "started". */
 export function countUsers(sqlite: DatabaseSync): number {
-  const row = sqlite.prepare('SELECT COUNT(*) AS count FROM users WHERE is_bot = 0').get() as { count: number };
+  const row = sqlite.prepare("SELECT COUNT(*) AS count FROM users WHERE account_type = 'user'").get() as {
+    count: number;
+  };
   return row.count;
 }
 
@@ -128,6 +150,11 @@ export function findUserByDiscordId(sqlite: DatabaseSync, discordId: string): Us
 /** Sets or clears the Discord account a member is linked to. */
 export function setUserDiscordId(sqlite: DatabaseSync, id: string, discordId: string | null): void {
   sqlite.prepare('UPDATE users SET discord_id = ? WHERE id = ?').run(discordId, id);
+}
+
+/** Renames an account. The unique index rejects a name already in use. */
+export function setUsername(sqlite: DatabaseSync, id: string, username: string): void {
+  sqlite.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, id);
 }
 
 /**
@@ -384,8 +411,8 @@ export function insertGhostUser(
 ): void {
   sqlite
     .prepare(
-      `INSERT INTO users (id, username, display_name, password_hash, is_bot, is_owner, created_at, discord_id)
-       VALUES (?, ?, ?, ?, 1, 0, ?, ?)`,
+      `INSERT INTO users (id, username, display_name, password_hash, is_bot, is_owner, created_at, discord_id, account_type)
+       VALUES (?, ?, ?, ?, 1, 0, ?, ?, 'ghost')`,
     )
     .run(input.id, input.username, input.displayName, NO_PASSWORD, input.createdAt, input.discordId);
 }
@@ -407,4 +434,33 @@ export function insertUser(
        VALUES (?, ?, ?, ?, ?)`,
     )
     .run(input.id, input.username, input.passwordHash, input.isOwner ? 1 : 0, new Date().toISOString());
+}
+
+/** Every bot the owner has set up, oldest first. */
+export function listBots(sqlite: DatabaseSync): UserRow[] {
+  return sqlite
+    .prepare("SELECT * FROM users WHERE account_type = 'bot' ORDER BY created_at")
+    .all() as unknown as UserRow[];
+}
+
+/**
+ * Creates a bot account. It never has a usable password, is never the owner, and
+ * carries its own permission bitfield rather than roles, which is what the token
+ * it is issued is allowed to do. The username unique index applies as for anyone.
+ */
+export function insertBotUser(
+  sqlite: DatabaseSync,
+  input: { id: string; username: string; permissions: string },
+): void {
+  sqlite
+    .prepare(
+      `INSERT INTO users (id, username, password_hash, is_bot, is_owner, created_at, account_type, bot_permissions)
+       VALUES (?, ?, ?, 1, 0, ?, 'bot', ?)`,
+    )
+    .run(input.id, input.username, NO_PASSWORD, new Date().toISOString(), input.permissions);
+}
+
+/** Replaces a bot's permission bitfield. */
+export function setBotPermissions(sqlite: DatabaseSync, id: string, permissions: string): void {
+  sqlite.prepare('UPDATE users SET bot_permissions = ? WHERE id = ?').run(permissions, id);
 }

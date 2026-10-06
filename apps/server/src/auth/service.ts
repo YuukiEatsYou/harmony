@@ -17,6 +17,7 @@ import {
   findUserById,
   findUserByUsername,
   insertUser,
+  parsePermissionBits,
   mergeUsers,
   presentUser,
   setUserDiscordId,
@@ -31,6 +32,7 @@ import {
   touchSession,
 } from '../db/sessions.ts';
 import { findInvite, incrementInviteUses } from '../db/invites.ts';
+import { findBotByToken, touchBotToken } from '../db/bot_tokens.ts';
 import { findBan } from '../db/bans.ts';
 import type { DiscordIdentity } from './discord-oauth.ts';
 import { DUMMY_PASSWORD_HASH, hasPassword, hashPassword, NO_PASSWORD, verifyPassword } from './passwords.ts';
@@ -111,6 +113,25 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
     return candidate;
   }
 
+  /**
+   * A token that is not a session may be a bot token. From here on a bot is just a
+   * user whose permissions are its own bitfield, so every route and the gateway
+   * treat it the same way.
+   */
+  function resolveBotToken(token: string): AuthContext | null {
+    const row = findBotByToken(sqlite, token);
+    if (!row) return null;
+    const bot = findUserById(sqlite, row.bot_id);
+    if (!bot || bot.account_type !== 'bot') return null;
+    touchBotToken(sqlite, bot.id);
+    return {
+      user: presentUser(sqlite, bot),
+      permissions: parsePermissionBits(bot.bot_permissions),
+      sessionId: `bot:${bot.id}`,
+      token,
+    };
+  }
+
   return {
     async register(input, userAgent) {
       if (findUserByUsername(sqlite, input.username)) {
@@ -168,7 +189,7 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
       const banned = new HttpError(403, 'account_banned', 'You have been banned from this server.');
 
       // A member who already carries this Discord id just signs in.
-      if (existing && existing.is_bot === 0) {
+      if (existing && existing.account_type === 'user') {
         const auth = this.sessionForUser(existing.id, userAgent);
         if (!auth) throw banned;
         return { auth, created: false };
@@ -209,7 +230,7 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
 
     resolveToken(token) {
       const session = findSessionByTokenHash(sqlite, hashSessionToken(token));
-      if (!session) return null;
+      if (!session) return resolveBotToken(token);
 
       if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
         deleteSessionById(sqlite, session.id);

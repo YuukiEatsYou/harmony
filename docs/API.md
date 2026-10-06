@@ -45,6 +45,7 @@ code wins — please open an issue.
   - [Backup and export](#backup-and-export)
   - [Server log](#server-log)
   - [Update](#update)
+  - [Bots](#bots)
   - [Invites](#invites)
   - [Server settings](#server-settings)
   - [Instance icon](#instance-icon)
@@ -105,7 +106,7 @@ status codes and their codes:
 | 400 | `validation_error`, `bad_request`, `invalid_reply`, `invalid_emoji`, `invalid_attachment`, `invalid_upload`, `default_role`, `cannot_moderate_self`, `cannot_moderate_bot` |
 | 401 | `unauthorized`, `invalid_credentials` |
 | 403 | `forbidden`, `timed_out`, `account_banned`, `target_is_admin`, `invite_required`, `invalid_invite`, `invite_expired`, `invite_exhausted`, `immutable_role`, `permission_escalation` |
-| 404 | `not_found`, `channel_not_found`, `message_not_found`, `role_not_found`, `user_not_found`, `emoji_not_found`, `sticker_not_found`, `sticker_missing`, `attachment_not_found`, `avatar_not_found`, `not_banned` |
+| 404 | `not_found`, `channel_not_found`, `message_not_found`, `role_not_found`, `user_not_found`, `bot_not_found`, `emoji_not_found`, `sticker_not_found`, `sticker_missing`, `attachment_not_found`, `avatar_not_found`, `not_banned` |
 | 409 | `username_taken`, `emoji_exists`, `discord_channel_taken` |
 | 413 | `payload_too_large` |
 | 415 | `unsupported_media_type`, `invalid_image` |
@@ -170,7 +171,7 @@ type User = {
   displayName: string | null;   // falls back to username in the UI
   avatarHash: string | null;    // see "Users and avatars"
   roleColor: number | null;     // packed RGB integer, from the highest colored role
-  isBot: boolean;               // true for Discord stand-in accounts
+  accountType: 'user' | 'bot' | 'ghost';  // a person, an owner-set-up bot, or a Discord stand-in
   isOwner: boolean;
   badge: 'owner' | 'admin' | 'moderator' | null;  // shown beside the name, see "Member badges"
   createdAt: string;
@@ -2278,7 +2279,7 @@ type ChannelExport = {
   channel: { id: string; name: string; topic: string | null };
   messages: Array<{                     // oldest first
     id: string;
-    author: { id: string; username: string; displayName: string | null; isBot: boolean } | null;
+    author: { id: string; username: string; displayName: string | null; accountType: 'user' | 'bot' | 'ghost' } | null;
     content: string;
     createdAt: string;
     editedAt: string | null;
@@ -2420,6 +2421,58 @@ the new build, and a poll then sees a new `instanceId` when it is back.
 A command that exits non-zero leaves the instance running the old build; the panel reports
 `failed: true` and the output in `log`. The log is kept in memory only, so a successful apply's log
 is gone once the process restarts.
+
+### Bots
+
+Owner-only. A bot is an account that acts through a long-lived token instead of a password, using
+the same REST API and gateway as anyone else, limited to the permissions the owner gives it. The
+token is a credential: it is shown once, at creation or when regenerated, and only its hash is kept.
+A bot is an ordinary `User` with `accountType: "bot"`; it can post, react or manage whatever its
+bitfield allows, and it carries a bot marker beside its name where a person carries a badge.
+
+```ts
+type BotSummary = {
+  user: User;              // accountType is always "bot"
+  permissions: string;     // the bot's own bitfield, decimal
+  lastUsedAt: string | null;
+};
+```
+
+#### `GET /api/v1/bots` — owner only
+
+```json
+{ "bots": [ /* BotSummary */ ] }
+```
+
+#### `POST /api/v1/bots` — owner only
+
+`{ "username": string, "displayName"?: string | null, "permissions": string }`. The permissions are a
+decimal bitfield; bits this instance does not know are dropped. Returns
+`{ "bot": BotSummary, "token": string }`, the only time the token is shown. `409 username_taken` if
+the name is already in use.
+
+#### `PATCH /api/v1/bots/:id` — owner only
+
+Any of `username`, `displayName`, `permissions`. Returns the `BotSummary`. `404 bot_not_found` for
+an id that is not a bot.
+
+#### `PUT /api/v1/bots/:id/avatar` — owner only
+
+`multipart/form-data` with a single `file` field (an image), normalized and stored like any avatar.
+Returns the `BotSummary`.
+
+#### `POST /api/v1/bots/:id/token` — owner only
+
+Issues a new token, invalidating the old one at once. Returns `{ "token": string }`, shown only here.
+
+#### `DELETE /api/v1/bots/:id` — owner only
+
+Returns `204`. The token stops working immediately.
+
+A bot token goes in the `Authorization: Bearer` header exactly like a session token, and its requests
+are answered under the bot's own permissions. It also authenticates the [gateway](#the-gateway-websocket),
+so a bot can hold a realtime connection. A token holding `Administrator` can do anything on the
+instance, so keep a token narrowly scoped and revoke it when it is no longer needed.
 
 ### Invites
 

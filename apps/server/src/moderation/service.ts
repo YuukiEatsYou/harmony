@@ -47,8 +47,8 @@ export function createModerationService(deps: ModerationDeps): ModerationService
     if (target.id === actor.user.id) {
       throw new HttpError(400, 'cannot_moderate_self', 'You cannot moderate yourself.');
     }
-    if (target.is_bot === 1) {
-      throw new HttpError(400, 'cannot_moderate_bot', 'Discord stand-in accounts cannot be moderated.');
+    if (target.account_type !== 'user') {
+      throw new HttpError(400, 'cannot_moderate_bot', 'Bots and Discord stand-in accounts cannot be moderated.');
     }
     if (hasPermission(resolvePermissions(sqlite, target), Permission.Administrator)) {
       throw new HttpError(
@@ -71,8 +71,8 @@ export function createModerationService(deps: ModerationDeps): ModerationService
     if (target.id === actor.user.id) {
       throw new HttpError(400, 'cannot_delete_self', 'You cannot delete your own account.');
     }
-    if (target.is_bot === 1) {
-      throw new HttpError(400, 'cannot_delete_bot', 'Discord stand-in accounts are managed by the bridge.');
+    if (target.account_type !== 'user') {
+      throw new HttpError(400, 'cannot_delete_bot', 'Bots and Discord stand-in accounts are managed elsewhere.');
     }
     if (target.is_owner === 1) {
       throw new HttpError(403, 'target_is_owner', 'The owner cannot be deleted.');

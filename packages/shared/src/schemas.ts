@@ -270,6 +270,29 @@ export const updateApplySchema = z.object({
 });
 export type UpdateApplyInput = z.infer<typeof updateApplySchema>;
 
+/** A permission bitfield as a decimal string, the wire form the API uses. */
+const permissionBitfieldSchema = z.string().regex(/^\d+$/, 'A decimal permission bitfield');
+
+/** Creating a bot. The owner chooses the name and what the token may do. */
+export const createBotSchema = z.object({
+  username: usernameSchema,
+  displayName: z.string().trim().max(LIMITS.displayName.max).nullable().optional(),
+  permissions: permissionBitfieldSchema,
+});
+export type CreateBotInput = z.infer<typeof createBotSchema>;
+
+/** Editing a bot. Every field is optional, but a patch carrying none is refused. */
+export const updateBotSchema = z
+  .object({
+    username: usernameSchema.optional(),
+    displayName: z.string().trim().max(LIMITS.displayName.max).nullable().optional(),
+    permissions: permissionBitfieldSchema.optional(),
+  })
+  .refine((value) => value.username !== undefined || 'displayName' in value || value.permissions !== undefined, {
+    message: 'No bot setting given',
+  });
+export type UpdateBotInput = z.infer<typeof updateBotSchema>;
+
 /** A one-step reorder, shared by roles, channels and categories. */
 export const moveSchema = z.object({
   direction: z.enum(['up', 'down']),

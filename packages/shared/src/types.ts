@@ -15,6 +15,13 @@ export type UserBadge = 'owner' | 'admin' | 'moderator';
 /** The badge a role confers, if any. Only moderator is a role's to give. */
 export type RoleBadge = 'none' | 'moderator';
 
+/**
+ * What kind of account a user row is. A `user` is a person who signed up. A
+ * `ghost` is a Discord stand-in the bridge created and owns. A `bot` is an
+ * account the owner set up in the admin panel, used through a token.
+ */
+export type AccountType = 'user' | 'bot' | 'ghost';
+
 export interface User {
   id: SnowflakeId;
   username: string;
@@ -26,7 +33,8 @@ export interface User {
    * permissions.
    */
   roleColor: number | null;
-  isBot: boolean;
+  /** Whether this is a person, a bot, or a Discord stand-in. */
+  accountType: AccountType;
   isOwner: boolean;
   /** The badge to draw beside this member's name, or null for none. */
   badge: UserBadge | null;

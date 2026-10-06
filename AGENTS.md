@@ -128,6 +128,12 @@ npm workspaces monorepo; every package is ESM TypeScript.
   `access/service.ts` is where permission checks resolve.
 - Schema changes: append a new entry to `db/migrations.ts`. Never edit a shipped
   migration.
+- Account kind is `users.account_type` (`user`, `bot` or `ghost`), never the legacy
+  `is_bot` column. `is_bot` is backfilled and kept in step on insert but read
+  nowhere, so an older binary still starts after a rollback; do not start reading
+  it. A Discord stand-in is a `ghost`; a real bot is a `bot` with its own
+  `bot_permissions` bitfield and no roles, authenticated by a token in
+  `bot_tokens`. See `bots/service.ts`.
 - Realtime: `gateway/index.ts` handles connections; `realtime/hub.ts` broadcasts
   to clients.
 - Uploads are content-addressed by SHA-256 under the data directory (default

@@ -2348,6 +2348,10 @@ button.mention:hover {
   color: #57b0e0;
 }
 
+.member-badge.badge-bot {
+  color: var(--h-accent);
+}
+
 button.roster-member {
   width: 100%;
   background: none;

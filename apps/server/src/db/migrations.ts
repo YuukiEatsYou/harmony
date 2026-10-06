@@ -978,4 +978,35 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 36,
+    name: 'bot_accounts',
+    up(db) {
+      /*
+       * What kind of account a row is: `user` is a person, `bot` is an account the
+       * owner set up to use through a token, and `ghost` is a Discord stand-in the
+       * bridge created and owns. The old `is_bot` flag could not tell a stand-in
+       * from a bot, and its name was simply wrong for the stand-ins. It is
+       * backfilled here and then kept in step on insert but never read again, so
+       * that an instance rolled back to the previous code still starts; it can be
+       * dropped once bots have proven stable. New code reads account_type only.
+       *
+       * bot_permissions is a bot's own permission bitfield, since a bot holds no
+       * roles. bot_tokens keeps one hashed token per bot, shown once when it is
+       * created or regenerated, with the last time it was used.
+       */
+      db.exec(`
+        ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'user';
+        ALTER TABLE users ADD COLUMN bot_permissions TEXT NOT NULL DEFAULT '0';
+        UPDATE users SET account_type = 'ghost' WHERE is_bot = 1;
+
+        CREATE TABLE bot_tokens (
+          bot_id       TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          token_hash   TEXT NOT NULL UNIQUE,
+          created_at   TEXT NOT NULL,
+          last_used_at TEXT
+        );
+      `);
+    },
+  },
 ];

@@ -32,8 +32,8 @@
 
   // The bridge creates a stand-in account for every Discord user it sees, which
   // would drown out real members, so they are kept in their own collapsible group.
-  const humanMembers = $derived(members.filter((member) => !member.user.isBot));
-  const bridgeMembers = $derived(members.filter((member) => member.user.isBot));
+  const humanMembers = $derived(members.filter((member) => member.user.accountType !== 'ghost'));
+  const bridgeMembers = $derived(members.filter((member) => member.user.accountType === 'ghost'));
 
   const permissions = $derived(BigInt(session.permissions || '0'));
   const canManageRoles = $derived(hasPermission(permissions, Permission.ManageRoles));
@@ -76,7 +76,7 @@
 
   /** Nobody may moderate themselves, a stand-in, or another administrator. */
   function moderatable(member: MemberSummary): boolean {
-    if (member.user.isBot) return false;
+    if (member.user.accountType !== 'user') return false;
     if (member.user.id === session.user?.id) return false;
     return !hasPermission(BigInt(member.permissions), Permission.Administrator);
   }
@@ -236,7 +236,7 @@
         {#if member.user.displayName}<span class="muted">@{member.user.username}</span>{/if}
         {#if member.user.isOwner}<span class="badge">owner</span>{/if}
         {#if member.user.discordId}<span class="badge" title="Linked to a Discord account">Discord</span>{/if}
-        {#if canEdit && !member.user.isBot}
+        {#if canEdit && member.user.accountType === 'user'}
           <button
             type="button"
             class="member-edit-toggle"
@@ -247,7 +247,7 @@
         {/if}
       </div>
 
-      {#if canEdit && !member.user.isBot && editingId === member.user.id}
+      {#if canEdit && member.user.accountType === 'user' && editingId === member.user.id}
         <form class="member-editor" onsubmit={(event) => saveEdit(event, member)}>
           <label>
             Username
