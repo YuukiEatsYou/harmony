@@ -15,3 +15,7 @@ data/
 
 # Local working notes (scratch, not part of the project).
 REVIEW_NOTES.md
+
+# Python bytecode from the example bot.
+__pycache__/
+*.pyc
