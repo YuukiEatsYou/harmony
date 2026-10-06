@@ -81,6 +81,15 @@
   let suggestionList = $state<HTMLUListElement | null>(null);
 
   /**
+   * The bot command whose completion row was accepted, if any. Two bots may offer
+   * the same name, so the typed text alone cannot say which was meant; remembering
+   * the id makes the row the member picked authoritative until the line stops
+   * naming it. Only ever set from a slash row, never cleared by an unrelated one,
+   * so mentioning someone in the arguments does not drop it.
+   */
+  let pickedCommandId = $state<string | null>(null);
+
+  /**
    * The unicode set, loaded on first use rather than shipped with the app, the
    * same way the emoji picker loads it. `:` autocomplete is the only place the
    * composer needs it, so a session that never types one never pays for it.
@@ -123,6 +132,8 @@
     icon: IconName | null;
     /** The text inserted when the row is accepted. */
     insert: string;
+    /** Set on a bot-command row: the registration this row stands for. */
+    commandId?: string;
   }
 
   /** A client-side size check, so an oversized file is refused before uploading. */
@@ -415,6 +426,12 @@
   }
 
   function onInput(): void {
+    // A remembered pick only lasts while the line still names that command. Once
+    // the command word is edited away, the typed text is all there is to go on.
+    if (pickedCommandId) {
+      const picked = commands.list.find((command) => command.id === pickedCommandId);
+      if (!picked || leadingCommandName(textInput?.value ?? '') !== picked.name) pickedCommandId = null;
+    }
     updateAutocomplete();
     // Read the element rather than `value`, so we never depend on binding order.
     maybeSendTyping(textInput?.value ?? '');
@@ -609,6 +626,7 @@
           initial: null,
           icon: 'bot' as IconName,
           insert: `/${command.name} `,
+          commandId: command.id,
         }));
       return [...builtins, ...fromBots];
     }
@@ -673,6 +691,14 @@
     row?.scrollIntoView({ block: 'nearest' });
   });
 
+  $effect(() => {
+    // A pick belongs to the draft it was made in. Switching channels swaps the
+    // textarea's contents without an input event, so drop the binding here rather
+    // than let it leak onto a different channel's draft.
+    void draftKey;
+    pickedCommandId = null;
+  });
+
   async function acceptSuggestion(suggestion: Suggestion): Promise<void> {
     const input = textInput;
     const trigger = activeTrigger;
@@ -680,6 +706,9 @@
 
     const caret = input.selectionStart ?? input.value.length;
     drafts.setText(draftKey, `${input.value.slice(0, trigger.start)}${suggestion.insert}${input.value.slice(caret)}`);
+    // A bot-command row binds to its registration; other rows leave any earlier
+    // pick alone, so mentioning someone in the arguments does not drop it.
+    if (suggestion.commandId) pickedCommandId = suggestion.commandId;
     activeTrigger = null;
 
     await tick();
@@ -784,14 +813,30 @@
     return botOnline(command.bot.id);
   }
 
+  /** The command name a line begins with, when it begins with one at all. */
+  function leadingCommandName(text: string): string | null {
+    const match = /^\/([a-z0-9_-]+)/.exec(text);
+    return match ? match[1]! : null;
+  }
+
   /** The bot command a typed line names, when exactly one online bot offers it. */
   function resolveBotCommand(text: string): { command: RegisteredCommand; args: string } | 'ambiguous' | null {
     const match = /^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(text);
     if (!match) return null;
-    const matches = commands.named(match[1] ?? '').filter(commandOnline);
+    const name = match[1] ?? '';
+    const args = (match[2] ?? '').trim();
+    // A command picked from the completion list wins outright: with two bots
+    // offering the same name the typed text cannot say which was meant, but the
+    // row the member accepted can. It holds only while the line still names it and
+    // its bot is still online.
+    const picked = pickedCommandId ? commands.list.find((command) => command.id === pickedCommandId) : undefined;
+    if (picked && picked.name === name && commandOnline(picked)) {
+      return { command: picked, args };
+    }
+    const matches = commands.named(name).filter(commandOnline);
     if (matches.length === 0) return null;
     if (matches.length > 1) return 'ambiguous';
-    return { command: matches[0]!, args: (match[2] ?? '').trim() };
+    return { command: matches[0]!, args };
   }
 
   /**
