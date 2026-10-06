@@ -600,7 +600,7 @@
       // one whose bot is online is offered: an offline bot cannot answer, and a
       // command that silently does nothing is worse than not offering it.
       const fromBots: Suggestion[] = commands.list
-        .filter((command) => command.name.startsWith(needle) && botOnline(command.bot.id))
+        .filter((command) => command.name.startsWith(needle) && commandOnline(command))
         .map((command) => ({
           key: `botcmd:${command.id}`,
           label: `/${command.name}`,
@@ -774,11 +774,21 @@
     return roster.members.some((entry) => entry.user.id === id && entry.online);
   }
 
-  /** The bot command a typed line names, when exactly one of them matches. */
+  /**
+   * Whether a registered command can actually be answered. Liveness is overlaid
+   * here rather than in the commands store so the picker and the resolver agree:
+   * a command whose bot is offline is neither offered nor resolved, so the two
+   * can never disagree about how many commands a typed name names.
+   */
+  function commandOnline(command: RegisteredCommand): boolean {
+    return botOnline(command.bot.id);
+  }
+
+  /** The bot command a typed line names, when exactly one online bot offers it. */
   function resolveBotCommand(text: string): { command: RegisteredCommand; args: string } | 'ambiguous' | null {
     const match = /^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(text);
     if (!match) return null;
-    const matches = commands.named(match[1] ?? '');
+    const matches = commands.named(match[1] ?? '').filter(commandOnline);
     if (matches.length === 0) return null;
     if (matches.length > 1) return 'ambiguous';
     return { command: matches[0]!, args: (match[2] ?? '').trim() };
@@ -824,7 +834,19 @@
     if (sent.attachments.length === 0) {
       const invocation = resolveBotCommand(typed);
       if (invocation === 'ambiguous') {
-        error = 'Several bots offer that command. Choose one from the list.';
+        // Two online bots offer the name and it was not picked from the list, so
+        // there is no way to know which was meant. Reopen the picker at the
+        // command word instead of refusing: an error the member cannot act on
+        // reads as a failure even though nothing was sent.
+        error = null;
+        const input = textInput;
+        if (input) {
+          const space = input.value.search(/\s/);
+          const position = space === -1 ? input.value.length : space;
+          input.focus();
+          input.setSelectionRange(position, position);
+        }
+        updateAutocomplete();
         return;
       }
       if (invocation) {
