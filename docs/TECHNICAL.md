@@ -271,13 +271,17 @@ they appear as the bot, and one reaction stands in for however many Harmony user
 reacted. It is removed once the last Harmony member takes theirs back; Discord
 users' own reactions, which Harmony also shows, do not keep it there.
 
-Display names and profile pictures are mirrored to Discord automatically (they
-become the webhook username and avatar). A Discord user's name and picture are
-imported into Harmony the first time they post, and a stand-in's name follows later
-changes as they post again. Since Discord fetches avatars
-directly from this instance, outbound avatars need a **Public base URL** set in
-**Admin → Bridge** — the address people use to reach the instance from the
-internet. A `localhost` address will not work. Leave it blank to send names only.
+Names and pictures are mirrored to Discord as the webhook's username and avatar. A
+member with a linked Discord account is posted under the identity the guild knows
+them by — their Discord nickname and picture — so the message reads as theirs there
+instead of showing a Harmony name and face nobody on Discord recognizes. A member
+with no link keeps their Harmony identity, and Discord fetches that avatar straight
+from this instance, so those need a **Public base URL** set in **Admin → Bridge** —
+the address people use to reach the instance from the internet. A `localhost`
+address will not work, though it only affects unlinked members. The other direction
+is automatic either way: a Discord user's name and picture are imported into Harmony
+the first time they post, and a stand-in's name follows later changes as they post
+again.
 
 ### Linking a Discord account
 
@@ -313,9 +317,11 @@ application as the bot, needs a public base URL to derive its callback, and stor
 its client secret write-only like the bot token. The flow carries a one-time
 `state` and a PKCE verifier held in memory for the few minutes it takes, so a
 forged callback cannot land and a leaked code cannot be exchanged without the
-verifier. Signing in only finds an account that already carries the Discord id; an
-id that only has a stand-in is refused, since a stand-in has no real owner and must
-never be signed into.
+verifier. Signing in finds the account that already carries the Discord id, or
+creates one on first use, adopting any stand-in for that id so its history follows;
+a stand-in row is never signed into on its own, since it has no real owner. On that
+first sign-in the picture from Discord is imported as the member's avatar, unless
+they already have one, so nobody arrives as a blank face.
 
 ## Emoji
 

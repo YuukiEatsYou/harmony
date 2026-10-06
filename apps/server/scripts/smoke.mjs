@@ -4270,7 +4270,7 @@ try {
     { sessionTtlDays: 1 },
     { get: () => ({ requireInvite }) },
   );
-  const discordIdentity = (id, username, displayName = null) => ({ id, username, displayName });
+  const discordIdentity = (id, username, displayName = null) => ({ id, username, displayName, avatarUrl: null });
   const nowIso = new Date().toISOString();
 
   const fresh = discordAuth.signInWithDiscord(discordIdentity('700000000000000001', 'New Person!', 'New P'), null, null);
@@ -4391,12 +4391,14 @@ try {
   const oauth = createDiscordOAuthService({
     getDiscordAuth: () => ({ enabled: true, clientId: '1', clientSecret: 's' }),
     discordRedirectUri: () => 'https://harmony.test/api/v1/auth/discord/callback',
+    get: () => ({ previewUserAgent: null }),
   });
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url) =>
+  const stubFetch = (user) => async (url) =>
     String(url).includes('/oauth2/token')
       ? new Response(JSON.stringify({ access_token: 'token' }))
-      : new Response(JSON.stringify({ id: '700000000000000009', username: 'someone' }));
+      : new Response(JSON.stringify(user));
+  globalThis.fetch = stubFetch({ id: '700000000000000009', username: 'someone' });
   try {
     const stateOf = (flow) => new URL(flow.url).searchParams.get('state');
     const bound = oauth.authorizeUrl('link', { userId: 'member-2' });
@@ -4405,6 +4407,23 @@ try {
       'a flow completes in the browser that started it',
       completed.identity.id === '700000000000000009' && completed.userId === 'member-2',
     );
+    check('a Discord account with no picture carries no avatar URL', completed.identity.avatarUrl === null);
+
+    // A Discord picture turns into the CDN address a new account imports as its avatar.
+    globalThis.fetch = stubFetch({ id: '700000000000000009', username: 'someone', avatar: 'abc123' });
+    const pictured = oauth.authorizeUrl('link');
+    const withPicture = await oauth.complete('code', stateOf(pictured), pictured.binding);
+    check(
+      'a Discord picture becomes a CDN avatar URL',
+      withPicture.identity.avatarUrl ===
+        'https://cdn.discordapp.com/avatars/700000000000000009/abc123.png?size=256',
+      String(withPicture.identity.avatarUrl),
+    );
+    check(
+      'the avatar fetcher refuses a non-public address',
+      (await oauth.downloadAvatar('http://127.0.0.1:9/a.png')) === null,
+    );
+
     const refusal = async (flow, binding) => {
       try {
         await oauth.complete('code', stateOf(flow), binding);

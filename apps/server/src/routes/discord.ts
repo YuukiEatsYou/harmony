@@ -144,7 +144,17 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
         request.headers['user-agent'] ?? null,
       );
       setSessionCookie(reply, deps.config, session.token);
-      if (created) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: session.user.id });
+      // Give the account the picture from Discord, unless it already has one (a
+      // stand-in's picture, or one the member chose). Best-effort: a picture must
+      // never hold up a sign-in.
+      let changed = created;
+      if (!session.user.avatarHash && result.identity.avatarUrl) {
+        const data = await deps.oauth.downloadAvatar(result.identity.avatarUrl).catch(() => null);
+        if (data && (await deps.users.setAvatarFromData(session.user.id, data).catch(() => null))) {
+          changed = true;
+        }
+      }
+      if (changed) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: session.user.id });
       return backTo(reply, { discord: created ? 'signed_up' : 'signed_in' });
     } catch (error) {
       // These are all things the person can act on, so they get their own code.

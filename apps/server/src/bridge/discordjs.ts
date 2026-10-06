@@ -35,6 +35,7 @@ import {
   type EditInput,
   type DeleteInput,
   type MirrorInput,
+  type MirrorIdentity,
   type MirrorPollInput,
   type MirrorPollResult,
   type MirrorResult,
@@ -533,6 +534,25 @@ export function createDiscordTransport(token: string, logger: BridgeLogger): Dis
         emojis.push({ id: emoji.id, name: emoji.name, animated: emoji.animated ?? false });
       }
       return emojis;
+    },
+
+    async mirrorIdentity(discordId: string): Promise<MirrorIdentity | null> {
+      const guild = client.guilds.cache.first();
+      if (guild) {
+        // A member of the guild is the common case, and discord.js keeps this cache
+        // fresh from the gateway, so no API call is needed once it is populated.
+        const member = guild.members.cache.get(discordId) ?? (await guild.members.fetch(discordId).catch(() => null));
+        if (member) {
+          return {
+            name: member.displayName,
+            avatarUrl: member.avatarURL({ size: 128 }) ?? member.user.avatarURL({ size: 128 }),
+          };
+        }
+      }
+      // Linked but not in the guild: fall back to their Discord account itself.
+      const user = client.users.cache.get(discordId) ?? (await client.users.fetch(discordId).catch(() => null));
+      if (!user) return null;
+      return { name: user.globalName ?? user.username, avatarUrl: user.avatarURL({ size: 128 }) };
     },
 
     async mirror(input: MirrorInput): Promise<MirrorResult> {

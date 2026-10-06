@@ -625,6 +625,32 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
   }
 
   /**
+   * The name and picture a Harmony message is posted under on Discord. A member
+   * with a linked Discord account is shown the way Discord knows them, so the
+   * mirrored message reads as theirs there and Discord-only members are not
+   * confused by a name and face they have never seen. Everyone else keeps their
+   * Harmony identity, as before.
+   */
+  async function outboundIdentity(message: Message): Promise<{ name: string; avatarUrl: string | null }> {
+    const fallback = { name: authorName(message), avatarUrl: avatarUrlFor(message) };
+    const discordId = message.author ? (findUserById(deps.sqlite, message.author.id)?.discord_id ?? null) : null;
+    if (!discordId || !transport) return fallback;
+    try {
+      const linked = await transport.mirrorIdentity(discordId);
+      if (!linked) return fallback;
+      // A linked member with no Discord picture keeps their Harmony one rather than
+      // the webhook's own default picture.
+      return { name: linked.name, avatarUrl: linked.avatarUrl ?? fallback.avatarUrl };
+    } catch (error) {
+      logger.debug('could not resolve a linked discord identity', {
+        discordId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return fallback;
+    }
+  }
+
+  /**
    * Cuts text into pieces Discord accepts. Harmony allows longer messages than
    * Discord does, and cutting one short would lose the rest without a word. A
    * piece breaks at a line if it can, then at a space, so a word is only split
@@ -759,12 +785,13 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       return;
     }
 
+    const identity = await outboundIdentity(message);
     const result = await sendToDiscord(
       channel,
-      authorName(message),
+      identity.name,
       content,
       files,
-      avatarUrlFor(message),
+      identity.avatarUrl,
       allowedUserMentions,
     );
     insertBridgeMessage(deps.sqlite, {

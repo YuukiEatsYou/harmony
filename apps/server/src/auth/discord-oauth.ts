@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { fetchPublicImage } from '../embeds/media.ts';
 import { HttpError } from '../http/errors.ts';
 import type { SettingsService } from '../settings/service.ts';
 
@@ -26,6 +27,8 @@ export interface DiscordIdentity {
   username: string;
   /** The name they chose to show on Discord, if any. */
   displayName: string | null;
+  /** Their Discord picture on Discord's CDN, or null when they have not set one. */
+  avatarUrl: string | null;
 }
 
 export interface DiscordOAuthService {
@@ -58,11 +61,15 @@ export interface DiscordOAuthService {
     /** For a link flow, the member who started it. */
     userId: string | null;
   }>;
+  /** Fetches a Discord picture's bytes, for importing it as a Harmony avatar. */
+  downloadAvatar(url: string): Promise<Buffer | null>;
 }
 
 const AUTHORIZE_URL = 'https://discord.com/oauth2/authorize';
 const TOKEN_URL = 'https://discord.com/api/oauth2/token';
 const USER_URL = 'https://discord.com/api/users/@me';
+/** Identifies the instance when fetching a member's Discord picture. */
+const AVATAR_USER_AGENT = 'Harmony/1.0 discord-avatar';
 /** How long a started flow stays valid before its state is forgotten. */
 export const STATE_TTL_MS = 10 * 60 * 1000;
 /** A Discord call should not be able to hang a request indefinitely. */
@@ -110,15 +117,29 @@ async function fetchIdentity(accessToken: string): Promise<DiscordIdentity> {
   if (!response || !response.ok) {
     throw new HttpError(502, 'discord_user_failed', 'Could not read your Discord account.');
   }
-  const user = (await response.json()) as { id?: unknown; username?: unknown; global_name?: unknown };
+  const user = (await response.json()) as {
+    id?: unknown;
+    username?: unknown;
+    global_name?: unknown;
+    avatar?: unknown;
+  };
   // A Discord snowflake is digits, the same shape the member link stores.
   if (typeof user.id !== 'string' || !/^\d{17,20}$/.test(user.id)) {
     throw new HttpError(502, 'discord_user_failed', 'Discord returned an unexpected account.');
   }
+  // The avatar hash names the picture; a leading `a_` marks an animated one, which
+  // Discord only serves as a gif. Discord's own CDN is public, so this is a plain
+  // URL. A member with no picture returns no hash, and we keep their avatar empty
+  // rather than importing Discord's generic default.
+  const avatar = typeof user.avatar === 'string' && user.avatar.length > 0 ? user.avatar : null;
   return {
     id: user.id,
     username: typeof user.username === 'string' ? user.username : 'a Discord user',
     displayName: typeof user.global_name === 'string' && user.global_name.trim() ? user.global_name.trim() : null,
+    avatarUrl:
+      avatar === null
+        ? null
+        : `https://cdn.discordapp.com/avatars/${user.id}/${avatar}.${avatar.startsWith('a_') ? 'gif' : 'png'}?size=256`,
   };
 }
 
@@ -222,6 +243,14 @@ export function createDiscordOAuthService(settings: SettingsService): DiscordOAu
       const accessToken = await exchangeCode(config, code, entry.verifier);
       const identity = await fetchIdentity(accessToken);
       return { intent: entry.intent, identity, inviteCode: entry.inviteCode, userId: entry.userId };
+    },
+
+    async downloadAvatar(url) {
+      const userAgent = settings.get().previewUserAgent ?? AVATAR_USER_AGENT;
+      // The same guarded fetch the link previews use: public hosts only, image
+      // types only, and a byte cap, since this reaches out to Discord for us.
+      const image = await fetchPublicImage(url, userAgent);
+      return image?.data ?? null;
     },
   };
 }

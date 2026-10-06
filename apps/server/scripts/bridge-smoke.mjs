@@ -92,6 +92,8 @@ function createFakeTransport() {
     recentMessages: [],
     downloadBytes: null,
     downloads: [],
+    // Linked-member identities the fake Discord resolves, keyed by discord id.
+    mirrorIdentities: new Map(),
     // Attachment addresses the fake bot can renew, keyed by the original.
     refreshedUrls: new Map([
       ['https://cdn.discordapp.com/attachments/111/900/x.gif', 'https://cdn.discordapp.com/attachments/111/900/x.gif?ex=ff&is=1&hm=abc'],
@@ -196,6 +198,9 @@ function createFakeTransport() {
     },
     async removeReaction(input) {
       state.reactions.push({ kind: 'remove', ...input });
+    },
+    async mirrorIdentity(discordId) {
+      return state.mirrorIdentities.get(discordId) ?? null;
     },
     async mirror(input) {
       state.mirrors.push(input);
@@ -579,6 +584,42 @@ try {
     'outbound avatar URL uses the public base URL and hash capability',
     transport.state.mirrors.at(-1)?.avatarUrl ===
       `https://chat.example.com/api/v1/users/${userId}/avatar?v=${aliceAvatarHash}`,
+    String(transport.state.mirrors.at(-1)?.avatarUrl),
+  );
+
+  // 7b2. A member with a linked Discord account is mirrored under the identity
+  // Discord knows them by, so the name and face match what the guild sees.
+  const carolId = randomUUID();
+  insertUser(db.sqlite, { id: carolId, username: 'carol', passwordHash: 'scrypt$x$y$z', isOwner: false });
+  users.linkDiscord(carolId, '9001');
+  transport.state.mirrorIdentities.set('9001', {
+    name: 'Carol (Discord)',
+    avatarUrl: 'https://cdn.discordapp.com/avatars/9001/hash.png',
+  });
+  const carolAuth = { user: { id: carolId }, permissions: 0n, sessionId: 'sc', token: 'tc' };
+  messages.create(carolAuth, channelId, 'linked identity', [], null);
+  await sleep(50);
+  check(
+    'a linked member mirrors under their discord name',
+    transport.state.mirrors.at(-1)?.username === 'Carol (Discord)',
+    String(transport.state.mirrors.at(-1)?.username),
+  );
+  check(
+    'a linked member mirrors with their discord avatar',
+    transport.state.mirrors.at(-1)?.avatarUrl === 'https://cdn.discordapp.com/avatars/9001/hash.png',
+    String(transport.state.mirrors.at(-1)?.avatarUrl),
+  );
+  // A linked member with no Discord picture keeps their Harmony one, rather than
+  // the webhook's own default picture.
+  await users.setAvatarFromData(carolId, png);
+  const carolAvatarHash = findUserById(db.sqlite, carolId)?.avatar_hash;
+  transport.state.mirrorIdentities.set('9001', { name: 'Carol (Discord)', avatarUrl: null });
+  messages.create(carolAuth, channelId, 'no discord picture', [], null);
+  await sleep(50);
+  check(
+    'a linked member with no discord picture keeps their harmony avatar',
+    transport.state.mirrors.at(-1)?.avatarUrl ===
+      `https://chat.example.com/api/v1/users/${carolId}/avatar?v=${carolAvatarHash}`,
     String(transport.state.mirrors.at(-1)?.avatarUrl),
   );
 

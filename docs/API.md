@@ -600,7 +600,8 @@ Discord's redirect target. For a `link` intent it verifies the account and conne
 ownership-proving path a manually entered id could never be — then redirects to `/?discord=linked`.
 For a `login` intent it signs in the member whose account already carries that Discord id
 (`/?discord=signed_in`). Otherwise it creates one (`/?discord=signed_up`): a username derived from the
-Discord one, the Discord display name, no password (`hasPassword: false`), never the owner. A
+Discord one, the Discord display name, their Discord picture as the avatar (unless it
+already has one), no password (`hasPassword: false`), never the owner. A
 bridge stand-in for the same Discord user is folded into the new account, keeping its history. The
 same checks as registering apply: where invites are required a missing or unusable code redirects to
 `/?discord_error=invite_required|invalid_invite|invite_expired|invite_exhausted`, and a banned
@@ -2656,6 +2657,10 @@ The token itself is never returned.
 The token and public base URL are optional; an empty-string token clears the saved one, and an
 empty public base URL disables outbound avatars. `publicBaseUrl` must be an `http(s)` address (else
 `400`). Returns `BridgeResponse`.
+
+A message from a member with a linked Discord account is mirrored under their Discord nickname and
+picture, so it reads as theirs to Discord members. The public base URL is only needed for members
+with no link, whose Harmony avatar Discord fetches from this instance.
 
 #### `GET /api/v1/bridge/channels` — `ManageServer`
 

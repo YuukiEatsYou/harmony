@@ -191,6 +191,17 @@ export interface MirrorFile {
   data: Buffer;
 }
 
+/**
+ * How a linked member should appear on Discord: the name and picture Discord
+ * users know them by, so a mirrored message reads as theirs there.
+ */
+export interface MirrorIdentity {
+  /** The guild nickname, else the display name, else the username. */
+  name: string;
+  /** Discord CDN avatar URL, or null when they have no custom picture. */
+  avatarUrl: string | null;
+}
+
 export interface MirrorInput {
   discordChannelId: string;
   /** Cached webhook for the channel, if we have already created one. */
@@ -300,6 +311,11 @@ export interface DiscordTransport {
   /** Who picked one answer, up to Discord's page of 100. Bots are left out. */
   fetchPollVoters(input: { channelId: string; discordMessageId: string; answerId: number }): Promise<DiscordPollVoter[]>;
   mirror(input: MirrorInput): Promise<MirrorResult>;
+  /**
+   * The identity to post a linked member's messages under on Discord, or null when
+   * it cannot be resolved. A member of the guild is named as the guild sees them.
+   */
+  mirrorIdentity(discordId: string): Promise<MirrorIdentity | null>;
   editMessage(input: EditInput): Promise<void>;
   deleteMessage(input: DeleteInput): Promise<void>;
   /**
