@@ -23,6 +23,7 @@ import { gifs } from './gifs.svelte';
 import { mentionsUser, mergeLatest } from './messages';
 import { members } from './members.svelte';
 import { roster } from './roster.svelte';
+import { commands } from './commands.svelte';
 import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
 import { playNotification } from './sounds';
@@ -233,6 +234,7 @@ class ChatStore {
     await gifs.loadFavorites();
     await members.load();
     await roster.load();
+    await commands.load();
     this.#gateway.connect();
   }
 
@@ -269,6 +271,7 @@ class ChatStore {
     this.#readPending.clear();
     this.#clearTyping();
     roster.reset();
+    commands.reset();
   }
 
   /**
@@ -291,6 +294,7 @@ class ChatStore {
     void channelSettings.load().catch(() => {});
     void roster.load();
     void members.load();
+    void commands.load();
     void emojis.load();
     void gifs.loadFavorites();
     void this.#refreshSession();
@@ -1107,6 +1111,11 @@ class ChatStore {
         void roster.load();
         void members.load().then(() => this.#refreshAuthors());
         break;
+      case 'COMMANDS_UPDATE':
+        // A bot changed the commands it offers, so the completion list is stale.
+        void commands.load();
+        break;
+
       case 'MEMBER_UPDATE': {
         const payload = frame.d as { userId: string };
         // The roster and mention list may have changed, and if it was us the

@@ -42,6 +42,8 @@ export const GatewayEvent = {
   EventUpdate: 'EVENT_UPDATE',
   EventReminder: 'EVENT_REMINDER',
   UpdateAvailable: 'UPDATE_AVAILABLE',
+  CommandInvoke: 'COMMAND_INVOKE',
+  CommandsUpdate: 'COMMANDS_UPDATE',
 } as const;
 export type GatewayEventName = (typeof GatewayEvent)[keyof typeof GatewayEvent];
 
@@ -145,4 +147,22 @@ export interface GatewayFrame<T = unknown> {
   op: GatewayOpCode;
   t?: GatewayEventName;
   d?: T;
+}
+
+/**
+ * A member invoked one of a bot's slash commands. It goes only to that bot's own
+ * sessions; the bot replies through the ordinary API as itself, so nothing about
+ * how it responds is special. `interactionId` is unique per invocation, so a bot
+ * holding several connections can tell a repeat from a new one.
+ */
+export interface CommandInvokePayload {
+  interactionId: string;
+  commandId: string;
+  name: string;
+  /** Whatever the member typed after the command name, trimmed. */
+  args: string;
+  channelId: string;
+  /** The member who invoked it. */
+  userId: string;
+  username: string;
 }

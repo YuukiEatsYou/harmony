@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES } from './constants.ts';
+import { BOT_COMMAND_LIMITS } from './commands.ts';
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
 import { MAX_MUTE_SECONDS, NOTIFICATION_LEVELS } from './channel-settings.ts';
@@ -292,6 +293,28 @@ export const updateBotSchema = z
     message: 'No bot setting given',
   });
 export type UpdateBotInput = z.infer<typeof updateBotSchema>;
+
+/** One command a bot registers. */
+export const botCommandSchema = z.object({
+  name: z
+    .string()
+    .regex(/^[a-z0-9_-]{1,32}$/, 'Command names use 1-32 of a-z, 0-9, dash or underscore'),
+  description: z.string().trim().min(1).max(BOT_COMMAND_LIMITS.description),
+  requiredPermissions: permissionBitfieldSchema,
+});
+
+/** A bot's whole command set, replaced in one call. */
+export const putBotCommandsSchema = z.object({
+  commands: z.array(botCommandSchema).max(BOT_COMMAND_LIMITS.perBot),
+});
+export type PutBotCommandsInput = z.infer<typeof putBotCommandsSchema>;
+
+/** Invoking a command: which one, and whatever was typed after its name. */
+export const invokeCommandSchema = z.object({
+  commandId: z.string().min(1),
+  args: z.string().max(BOT_COMMAND_LIMITS.argumentLength).optional(),
+});
+export type InvokeCommandInput = z.infer<typeof invokeCommandSchema>;
 
 /** A one-step reorder, shared by roles, channels and categories. */
 export const moveSchema = z.object({

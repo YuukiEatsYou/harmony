@@ -7,16 +7,19 @@
     formatSlowmode,
     isTimedOut,
     type Attachment,
+    type RegisteredCommand,
     type User,
   } from '@harmony/shared';
   import { ApiError, api } from '../lib/api';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
+  import { commands } from '../lib/commands.svelte';
   import { drafts, type Draft } from '../lib/drafts.svelte';
   import { emojis } from '../lib/emojis.svelte';
   import { emojiUsage } from '../lib/emoji-usage.svelte';
   import { mediaFilesFrom } from '../lib/files';
   import { members } from '../lib/members.svelte';
+  import { roster } from '../lib/roster.svelte';
   import { meta } from '../lib/meta.svelte';
   import type { IconName } from '../lib/icons';
   import { session } from '../lib/session.svelte';
@@ -425,9 +428,10 @@
   function detectTrigger(text: string, caret: number): Trigger | null {
     const before = text.slice(0, caret);
 
-    // A slash helper only exists as the first word of the message.
+    // A slash helper only exists as the first word of the message. A typed slash
+    // starts the popup when it could be a helper or a bot command.
     const slash = slashQuery(before);
-    if (slash !== null && matchSlashCommands(slash).length > 0) return { kind: 'slash', start: 0, query: slash };
+    if (slash !== null && anySlashMatch(slash)) return { kind: 'slash', start: 0, query: slash };
 
     const emoji = /(?:^|\s):([a-zA-Z0-9_]{0,32})$/.exec(before);
     if (emoji) {
@@ -583,7 +587,7 @@
     }
 
     if (trigger.kind === 'slash') {
-      return matchSlashCommands(needle).map((command) => ({
+      const builtins: Suggestion[] = matchSlashCommands(needle).map((command) => ({
         key: `slash:${command.name}`,
         label: command.usage,
         detail: command.description,
@@ -592,6 +596,21 @@
         icon: null,
         insert: `/${command.name} `,
       }));
+      // Bot commands join the same list, each naming the bot it belongs to. Only
+      // one whose bot is online is offered: an offline bot cannot answer, and a
+      // command that silently does nothing is worse than not offering it.
+      const fromBots: Suggestion[] = commands.list
+        .filter((command) => command.name.startsWith(needle) && botOnline(command.bot.id))
+        .map((command) => ({
+          key: `botcmd:${command.id}`,
+          label: `/${command.name}`,
+          detail: `${command.description} · by ${command.bot.displayName ?? command.bot.username}`,
+          imageUrl: null,
+          initial: null,
+          icon: 'bot' as IconName,
+          insert: `/${command.name} `,
+        }));
+      return [...builtins, ...fromBots];
     }
 
     if (trigger.kind === 'channel') {
@@ -744,13 +763,79 @@
    * message; if the send fails, the failed text is put back in front of it
    * rather than either one being lost.
    */
+  /** Whether a slash query could be a built-in helper or a bot command. */
+  function anySlashMatch(query: string): boolean {
+    const needle = query.toLowerCase();
+    return matchSlashCommands(needle).length > 0 || commands.list.some((command) => command.name.startsWith(needle));
+  }
+
+  /** Whether the bot that owns a command currently holds a gateway connection. */
+  function botOnline(id: string): boolean {
+    return roster.members.some((entry) => entry.user.id === id && entry.online);
+  }
+
+  /** The bot command a typed line names, when exactly one of them matches. */
+  function resolveBotCommand(text: string): { command: RegisteredCommand; args: string } | 'ambiguous' | null {
+    const match = /^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/.exec(text);
+    if (!match) return null;
+    const matches = commands.named(match[1] ?? '');
+    if (matches.length === 0) return null;
+    if (matches.length > 1) return 'ambiguous';
+    return { command: matches[0]!, args: (match[2] ?? '').trim() };
+  }
+
+  /**
+   * Runs a bot command. It never touches the message endpoint: an invocation is not
+   * chat, and the bot answers on its own. A failure puts the typed line back so it
+   * is not lost.
+   */
+  async function invokeBotCommand(key: string, command: RegisteredCommand, args: string, typed: string): Promise<void> {
+    const channelId = chat.activeChannelId;
+    if (channelId === null) return;
+    const sent = drafts.get(key);
+    busy = true;
+    error = null;
+    drafts.clear(key);
+    chat.replyTarget = null;
+    activeTrigger = null;
+    try {
+      await api(`/channels/${channelId}/commands`, {
+        method: 'POST',
+        body: JSON.stringify({ commandId: command.id, args }),
+      });
+    } catch (cause) {
+      error = cause instanceof ApiError ? cause.message : String(cause);
+      const current = drafts.get(key);
+      drafts.set(key, { text: current.text ? `${typed}\n${current.text}` : typed, attachments: sent.attachments });
+    } finally {
+      busy = false;
+    }
+  }
+
   async function send(): Promise<void> {
     const key = draftKey;
-    const content = applySlashCommand(value.trim());
     if (key === null || busy || uploading || timeoutUntil !== null || slowmodeRemaining > 0) return;
+
+    const typed = value.trim();
+    const sent = drafts.get(key);
+    // A line whose first word is a bot command is an invocation, not text, and goes
+    // to the command endpoint instead. Attachments mean the member is sending a
+    // file, so that stays an ordinary message.
+    if (sent.attachments.length === 0) {
+      const invocation = resolveBotCommand(typed);
+      if (invocation === 'ambiguous') {
+        error = 'Several bots offer that command. Choose one from the list.';
+        return;
+      }
+      if (invocation) {
+        await invokeBotCommand(key, invocation.command, invocation.args, typed);
+        return;
+      }
+    }
+
+    const content = applySlashCommand(typed);
     if (!content && pending.length === 0) return;
 
-    const sent = drafts.get(key);
     const replyTarget = chat.replyTarget;
     const channelId = chat.activeChannelId;
     const cooldownSeconds = slowmodeApplies ? slowmodeSeconds : 0;

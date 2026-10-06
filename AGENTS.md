@@ -133,7 +133,8 @@ npm workspaces monorepo; every package is ESM TypeScript.
   nowhere, so an older binary still starts after a rollback; do not start reading
   it. A Discord stand-in is a `ghost`; a real bot is a `bot` with its own
   `bot_permissions` bitfield and no roles, authenticated by a token in
-  `bot_tokens`. See `bots/service.ts`.
+  `bot_tokens`, and it may register slash commands in `bot_commands`. See
+  `bots/service.ts` and `commands/service.ts`.
 - Realtime: `gateway/index.ts` handles connections; `realtime/hub.ts` broadcasts
   to clients.
 - Uploads are content-addressed by SHA-256 under the data directory (default

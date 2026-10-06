@@ -8008,6 +8008,110 @@ try {
     (await req('/bots', { token: ownerToken })).json?.bots?.some((bot) => bot.user.id === botId) !== true,
   );
 
+  // Slash commands a bot registers, and the registry a member completes from.
+  const cmdBot = await req('/bots', {
+    method: 'POST',
+    token: ownerToken,
+    body: {
+      username: 'cmd-bot',
+      permissions: String(Permission.ViewChannels | Permission.SendMessages | Permission.ModerateMembers),
+    },
+  });
+  const cmdBotToken = cmdBot.json?.token;
+
+  const registered = await req('/bots/@me/commands', {
+    method: 'PUT',
+    token: cmdBotToken,
+    body: {
+      commands: [
+        { name: 'timeout', description: 'Times a member out', requiredPermissions: String(Permission.ModerateMembers) },
+        { name: 'ping', description: 'Replies with pong', requiredPermissions: String(Permission.ViewChannels) },
+      ],
+    },
+  });
+  check(
+    'a bot registers slash commands',
+    registered.status === 200 && registered.json?.commands?.length === 2,
+    JSON.stringify(registered.json),
+  );
+  check(
+    'a bot cannot take a built-in command name (400)',
+    (
+      await req('/bots/@me/commands', {
+        method: 'PUT',
+        token: cmdBotToken,
+        body: { commands: [{ name: 'me', description: 'no', requiredPermissions: '0' }] },
+      })
+    ).status === 400,
+  );
+  check(
+    'a repeated command name is refused (400)',
+    (
+      await req('/bots/@me/commands', {
+        method: 'PUT',
+        token: cmdBotToken,
+        body: {
+          commands: [
+            { name: 'dup', description: 'a', requiredPermissions: '0' },
+            { name: 'dup', description: 'b', requiredPermissions: '0' },
+          ],
+        },
+      })
+    ).status === 400,
+  );
+  check(
+    'a person cannot register commands for a bot (403)',
+    (
+      await req('/bots/@me/commands', {
+        method: 'PUT',
+        token: ownerToken,
+        body: { commands: [] },
+      })
+    ).status === 403,
+  );
+
+  // The owner holds every permission, so both show; a plain member does not hold
+  // ModerateMembers, so /timeout is filtered out of their list entirely.
+  const ownerCommands = await req('/commands', { token: ownerToken });
+  check(
+    'the owner sees both bot commands',
+    ownerCommands.status === 200 &&
+      ownerCommands.json?.commands?.map((command) => command.name).sort().join() === 'ping,timeout',
+    JSON.stringify(ownerCommands.json),
+  );
+  check(
+    'a command carries the bot it belongs to',
+    ownerCommands.json?.commands?.every((command) => command.bot?.username === 'cmd-bot') === true,
+  );
+  const bobCommands = await req('/commands', { token: bobToken });
+  check(
+    'a member without the permission does not see the command',
+    bobCommands.json?.commands?.some((command) => command.name === 'timeout') !== true &&
+      bobCommands.json?.commands?.some((command) => command.name === 'ping') === true,
+  );
+
+  const timeoutCommand = ownerCommands.json?.commands?.find((command) => command.name === 'timeout');
+  check(
+    'invoking a command whose bot is offline is refused (409)',
+    (
+      await req(`/channels/${botChannel.id}/commands`, {
+        method: 'POST',
+        token: ownerToken,
+        body: { commandId: timeoutCommand.id, args: '@someone 1h' },
+      })
+    ).status === 409,
+  );
+  check(
+    'invoking a command without the permission is forbidden (403)',
+    (
+      await req(`/channels/${botChannel.id}/commands`, {
+        method: 'POST',
+        token: bobToken,
+        body: { commandId: timeoutCommand.id },
+      })
+    ).status === 403,
+  );
+
   check('logout succeeds', (await req('/auth/logout', { method: 'POST', cookie: login.cookie })).status === 200);
   check('session is dead after logout (401)', (await req('/auth/me', { cookie: login.cookie })).status === 401);
 } catch (error) {

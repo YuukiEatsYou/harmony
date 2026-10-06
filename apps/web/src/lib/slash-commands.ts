@@ -50,11 +50,11 @@ export function matchSlashCommands(query: string): SlashCommand[] {
 
 /**
  * Whether the text before the caret is a command still being typed: a slash at
- * the very start of the message and letters only after it. Returns the query
- * (what follows the slash), or null when this is not a command in progress.
+ * the very start of the message and command-name characters after it. Returns the
+ * query (what follows the slash), or null when this is not a command in progress.
  */
 export function slashQuery(beforeCaret: string): string | null {
-  const match = /^\/([a-zA-Z]{0,12})$/.exec(beforeCaret);
+  const match = /^\/([a-zA-Z0-9_-]{0,32})$/.exec(beforeCaret);
   return match ? (match[1] ?? '') : null;
 }
 

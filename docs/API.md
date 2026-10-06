@@ -46,6 +46,7 @@ code wins — please open an issue.
   - [Server log](#server-log)
   - [Update](#update)
   - [Bots](#bots)
+  - [Slash commands](#slash-commands)
   - [Invites](#invites)
   - [Server settings](#server-settings)
   - [Instance icon](#instance-icon)
@@ -107,7 +108,7 @@ status codes and their codes:
 | 401 | `unauthorized`, `invalid_credentials` |
 | 403 | `forbidden`, `timed_out`, `account_banned`, `target_is_admin`, `invite_required`, `invalid_invite`, `invite_expired`, `invite_exhausted`, `immutable_role`, `permission_escalation` |
 | 404 | `not_found`, `channel_not_found`, `message_not_found`, `role_not_found`, `user_not_found`, `bot_not_found`, `emoji_not_found`, `sticker_not_found`, `sticker_missing`, `attachment_not_found`, `avatar_not_found`, `not_banned` |
-| 409 | `username_taken`, `emoji_exists`, `discord_channel_taken` |
+| 409 | `username_taken`, `emoji_exists`, `discord_channel_taken`, `bot_offline` |
 | 413 | `payload_too_large` |
 | 415 | `unsupported_media_type`, `invalid_image` |
 | 429 | `rate_limited` |
@@ -2474,6 +2475,56 @@ are answered under the bot's own permissions. It also authenticates the [gateway
 so a bot can hold a realtime connection. A token holding `Administrator` can do anything on the
 instance, so keep a token narrowly scoped and revoke it when it is no longer needed.
 
+### Slash commands
+
+Bots can offer slash commands. A bot registers its set; a member sees a command in the composer's
+`/` completion — which names the bot behind each one — only when they hold the command's permission
+*and* the bot does too, and the bot is online. Invoking is not chat: the client calls the command
+endpoint, the server hands it to the bot, and the bot answers with the ordinary API as itself. The
+built-in client-side helpers (`/me`, `/shrug`, ...) are reserved names a bot cannot take.
+
+```ts
+type RegisteredCommand = {
+  id: string;
+  name: string;
+  description: string;
+  requiredPermissions: string;   // decimal bitfield
+  bot: { id: string; username: string; displayName: string | null; avatarHash: string | null };
+};
+```
+
+#### `GET /api/v1/commands` — auth
+
+```json
+{ "commands": [ /* RegisteredCommand */ ] }
+```
+
+Only the commands the caller may invoke: the caller holds `requiredPermissions`, and so does the
+owning bot. Names may repeat across bots; the `bot` field tells them apart.
+
+#### `POST /api/v1/channels/:channelId/commands` — auth, rate limited
+
+`{ "commandId": string, "args"?: string }`. Validates the command, both permission checks, that the
+bot is online, and that the caller can see the channel, then delivers a `COMMAND_INVOKE` gateway
+event to the bot. Returns `{ "interactionId": string }`. Nothing is posted to the channel.
+
+- `400` — `args` is longer than the cap.
+- `403 forbidden` — the caller, or the bot, lacks `requiredPermissions`.
+- `404 command_not_found` — no such command.
+- `404 channel_not_found` — a channel the caller cannot see.
+- `409 bot_offline` — the bot holds no gateway connection right now.
+
+#### `GET /api/v1/bots/@me/commands` — bot only
+
+A bot reads back the commands it registered.
+
+#### `PUT /api/v1/bots/@me/commands` — bot only
+
+`{ "commands": [{ "name", "description", "requiredPermissions" }] }`, replacing the bot's whole set.
+Names use 1–32 of `a-z`, `0-9`, `-` or `_`; a reserved helper name or a repeated name is `400`
+(`reserved_command_name` / `duplicate_command_name`); at most 50 per bot. Every client is told to
+refresh its completion list. Returns the bot's own list.
+
 ### Invites
 
 #### `GET /api/v1/invites` — `ManageServer`
@@ -2833,6 +2884,8 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `EVENT_UPDATE` | `{ event: ServerEvent, reason, rsvpUserId, rsvpInterested }`, reason one of created, updated, started, ended, canceled, rsvp; a channel event to members who can see the channel, an external one to everyone. `event.interested` is always false here: for `rsvp`, `rsvpUserId` says whose interest changed and what it became |
 | `EVENT_REMINDER` | `{ event: ServerEvent }`, shortly before an event starts, to the sessions of members who are interested in it only |
 | `CHANNEL_SETTINGS_UPDATE` | `ChannelNotificationSettings`, sent only to the member it belongs to |
+| `COMMAND_INVOKE` | `CommandInvokePayload`, to the bot's own sessions only: a member invoked one of its slash commands |
+| `COMMANDS_UPDATE` | `{}`, to every connected member whenever a bot changes its slash command set; refetch `GET /commands` |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
 role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,

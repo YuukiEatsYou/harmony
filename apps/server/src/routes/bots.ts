@@ -3,6 +3,7 @@ import {
   GatewayEvent,
   createBotSchema,
   permissionsFromString,
+  putBotCommandsSchema,
   updateBotSchema,
   type BotCreateResponse,
   type BotTokenResponse,
@@ -10,6 +11,7 @@ import {
 import { requireAuth } from '../auth/plugin.ts';
 import type { AuthContext } from '../auth/service.ts';
 import { maskPermissions, type BotService } from '../bots/service.ts';
+import type { CommandService } from '../commands/service.ts';
 import { HttpError } from '../http/errors.ts';
 import { parseBody } from '../http/validation.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
@@ -17,6 +19,7 @@ import type { UserService } from '../users/service.ts';
 
 export interface BotRouteDeps {
   bots: BotService;
+  commands: CommandService;
   users: UserService;
   hub: GatewayHub;
 }
@@ -35,6 +38,33 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRouteDeps): voi
     }
     return auth;
   };
+
+  /** The bot's own token: the only caller that may register its commands. */
+  const botOnly = (request: FastifyRequest): AuthContext => {
+    const auth = requireAuth(request);
+    if (auth.user.accountType !== 'bot') {
+      throw new HttpError(403, 'bot_only', 'Only a bot can manage its own commands.');
+    }
+    return auth;
+  };
+
+  app.get('/api/v1/bots/@me/commands', async (request) => {
+    const auth = botOnly(request);
+    return deps.commands.listForBot(auth.user.id);
+  });
+
+  app.put('/api/v1/bots/@me/commands', async (request) => {
+    const auth = botOnly(request);
+    const input = parseBody(putBotCommandsSchema, request.body);
+    return deps.commands.register(
+      auth.user.id,
+      input.commands.map((command) => ({
+        name: command.name,
+        description: command.description,
+        requiredPermissions: command.requiredPermissions,
+      })),
+    );
+  });
 
   app.get('/api/v1/bots', async (request) => {
     ownerOnly(request);
@@ -106,6 +136,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRouteDeps): voi
     const { id } = request.params as { id: string };
     deps.bots.remove(id);
     deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: id });
+    deps.hub.dispatch(GatewayEvent.CommandsUpdate, {});
     return reply.status(204).send();
   });
 }

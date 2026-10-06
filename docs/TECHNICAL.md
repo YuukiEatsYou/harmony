@@ -349,6 +349,28 @@ Bot management is owner-only, because a token is a credential that acts as the b
 and moderation refuses both; a bot is disabled or removed from the Bots tab instead. The token is
 shown once and never returned again.
 
+### Slash commands
+
+A bot offers commands by sending its whole set to `PUT /api/v1/bots/@me/commands`, stored in
+`bot_commands`. Names are unique per bot but not across bots — two may both offer `/timeout` — so the
+completion list names the bot each command belongs to, and the client binds a specific command id
+when the member picks one. The built-in client-side helpers (`/me`, `/shrug`, ...) are reserved
+names, so a typed `/name` is never a helper on one instance and a command on another.
+
+The declaration's `requiredPermissions` gates who may invoke a command; the bot's own token
+permissions gate what it can do when it runs. `GET /api/v1/commands` returns only the commands where
+both hold, so the completion list arrives already filtered by permission. The composer additionally
+hides any whose bot is offline, overlaying live presence from the roster rather than trusting a
+cached flag — an offline bot cannot answer.
+
+Invoking is its own endpoint, not a message. The client calls
+`POST /api/v1/channels/:id/commands`, the server re-checks everything and dispatches `COMMAND_INVOKE`
+to the bot's own gateway sessions through `hub.dispatchToUsers`, and nothing is posted to the
+channel. The bot replies as itself with the ordinary API, so there is no interaction-response
+surface; `interactionId` exists so a bot holding several connections can dedupe. A bot that is
+offline is refused with `409` rather than the invocation quietly turning into a message. Typed
+options (a field per parameter) and ephemeral replies are deliberate follow-ups.
+
 ## Emoji
 
 The picker offers two tabs. **Server** holds the instance's own uploaded emoji and

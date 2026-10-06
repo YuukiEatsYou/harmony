@@ -1009,4 +1009,30 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 37,
+    name: 'bot_commands',
+    up(db) {
+      /*
+       * The slash commands a bot tells the server it offers. A bot replaces its whole
+       * set in one call, so a row is just what the command is and the permission a
+       * caller (and the bot) must hold to use it. Names are unique per bot but not
+       * across bots: two bots may both offer /timeout, and the completion list tells
+       * them apart by the bot they belong to. Rows go with the bot through the cascade.
+       */
+      db.exec(`
+        CREATE TABLE bot_commands (
+          id                   TEXT PRIMARY KEY,
+          bot_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name                 TEXT NOT NULL,
+          description          TEXT NOT NULL,
+          required_permissions TEXT NOT NULL,
+          position             INTEGER NOT NULL,
+          UNIQUE (bot_id, name)
+        );
+
+        CREATE INDEX idx_bot_commands_name ON bot_commands(name);
+      `);
+    },
+  },
 ];
