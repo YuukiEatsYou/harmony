@@ -14,6 +14,7 @@
   import { avatarUrl, bannerUrl, initial } from '../lib/avatar';
   import { meta } from '../lib/meta.svelte';
   import { accentGradient, hexColor, profile as profiles } from '../lib/profile.svelte';
+  import { nameColors } from '../lib/name-colors.svelte';
   import { session } from '../lib/session.svelte';
   import { ui } from '../lib/ui.svelte';
   import Icon from './Icon.svelte';
@@ -72,6 +73,8 @@
   let bio = $state('');
   let status = $state('');
   let accentColor = $state<number | null>(null);
+  /** The palette entry the member picked for their username, or null for none. */
+  let nameColorId = $state<string | null>(null);
   let socials = $state<Record<string, string>>({});
   let customizing = $state(false);
   let customError = $state<string | null>(null);
@@ -99,7 +102,9 @@
     bio = loaded.bio;
     status = loaded.status;
     accentColor = loaded.accentColor;
+    nameColorId = loaded.nameColorId;
     socials = { ...loaded.socialLinks };
+    void nameColors.load();
   }
 
   /** Switching to Customize loads the profile the first time it is opened. */
@@ -122,7 +127,7 @@
       apply(
         await api<MeResponse>('/users/@me', {
           method: 'PATCH',
-          body: JSON.stringify({ bio, status, accentColor, socialLinks: links }),
+          body: JSON.stringify({ bio, status, accentColor, socialLinks: links, nameColorId }),
         }),
       );
       await loadCustom();
@@ -514,6 +519,34 @@
             </div>
           </div>
           <p class="muted">Colors your banner and profile. Leaving it as your picture's color is the default.</p>
+
+          <p class="custom-label">Username color</p>
+          {#if nameColors.list.length === 0}
+            <p class="muted">No username colors are available on this instance.</p>
+          {:else}
+            <div class="custom-accent">
+              <button
+                type="button"
+                class="name-color-none"
+                class:active={nameColorId === null}
+                aria-pressed={nameColorId === null}
+                onclick={() => (nameColorId = null)}>None</button
+              >
+              {#each nameColors.list as entry (entry.id)}
+                <button
+                  type="button"
+                  class="custom-preset"
+                  class:active={nameColorId === entry.id}
+                  aria-pressed={nameColorId === entry.id}
+                  aria-label={entry.label ?? `Color ${hexColor(entry.color)}`}
+                  title={entry.label ?? hexColor(entry.color) ?? ''}
+                  style={`background: ${hexColor(entry.color)}`}
+                  onclick={() => (nameColorId = entry.id)}
+                ></button>
+              {/each}
+            </div>
+          {/if}
+          <p class="muted">Shown on your name, unless you hold a colored role, which takes priority.</p>
 
           <label>
             Custom status

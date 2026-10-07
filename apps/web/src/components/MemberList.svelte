@@ -2,6 +2,7 @@
   import type { MemberRosterEntry, Role } from '@harmony/shared';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
+  import { nameColorGlow, nameColorStyle } from '../lib/format';
   import { profileCard, hoverCapable } from '../lib/profile-card.svelte';
   import { roster } from '../lib/roster.svelte';
   import { ui } from '../lib/ui.svelte';
@@ -116,7 +117,7 @@
             {:else}
               <span class="avatar small fallback">{initial(entry.user)}</span>
             {/if}
-            <span class="roster-name" style={cssColor(entry.user.roleColor)}>{nameOf(entry)}</span>
+            <span class="roster-name" class:name-glow={nameColorGlow(entry.user)} style={nameColorStyle(entry.user)}>{nameOf(entry)}</span>
             {#if entry.user.badge}<MemberBadge badge={entry.user.badge} size={12} />{/if}
             {#if entry.user.accountType === 'bot'}<BotBadge size={12} />{/if}
             {#if entry.user.discordId}

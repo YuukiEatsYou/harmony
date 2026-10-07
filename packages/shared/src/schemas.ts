@@ -5,7 +5,7 @@ import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
 import { MAX_MUTE_SECONDS, NOTIFICATION_LEVELS } from './channel-settings.ts';
 import { GIF_STORAGE_MODES, type GifStorageMode } from './gif-hosts.ts';
-import { BIO_MAX, SOCIAL_VALUE_MAX, STATUS_MAX } from './profile.ts';
+import { BIO_MAX, NAME_COLOR_LABEL_MAX, SOCIAL_VALUE_MAX, STATUS_MAX } from './profile.ts';
 import { HEX_COLOR_PATTERN } from './theme.ts';
 
 export const usernameSchema = z
@@ -203,6 +203,24 @@ export const updateRoleSchema = z.object({
   badge: z.enum(['none', 'moderator']).optional(),
 });
 export type UpdateRoleInput = z.infer<typeof updateRoleSchema>;
+
+/** One color an administrator adds to the username palette. */
+export const createNameColorSchema = z.object({
+  color: z.number().int().min(0).max(0xffffff),
+  /** A name shown beside the swatch; `null` or empty for a bare color. */
+  label: z.string().trim().max(NAME_COLOR_LABEL_MAX).nullable().optional(),
+});
+export type CreateNameColorInput = z.infer<typeof createNameColorSchema>;
+
+export const updateNameColorSchema = z
+  .object({
+    color: z.number().int().min(0).max(0xffffff).optional(),
+    label: z.string().trim().max(NAME_COLOR_LABEL_MAX).nullable().optional(),
+  })
+  .refine((value) => value.color !== undefined || value.label !== undefined, {
+    message: 'Nothing to update.',
+  });
+export type UpdateNameColorInput = z.infer<typeof updateNameColorSchema>;
 
 /** A per-type upload limit in bytes: at least 1 KiB, at most the hard ceiling. */
 const uploadSize = z.number().int().min(1024).max(MAX_UPLOAD_CEILING_BYTES).optional();
@@ -505,6 +523,8 @@ export const updateProfileSchema = z
     accentColor: z.number().int().min(0).max(0xffffff).nullable().optional(),
     /** Social links, validated against the known platforms in the service. */
     socialLinks: z.record(z.string(), z.string().trim().max(SOCIAL_VALUE_MAX)).optional(),
+    /** The palette entry to draw the username in, or `null` for none. */
+    nameColorId: z.string().trim().max(64).nullable().optional(),
   })
   .refine(
     (value) =>
@@ -516,7 +536,8 @@ export const updateProfileSchema = z
       value.bio !== undefined ||
       value.status !== undefined ||
       value.accentColor !== undefined ||
-      value.socialLinks !== undefined,
+      value.socialLinks !== undefined ||
+      value.nameColorId !== undefined,
     { message: 'Nothing to update.' },
   );
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;

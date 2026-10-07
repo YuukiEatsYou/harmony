@@ -3,6 +3,7 @@ import { MEMBER_MANAGEMENT_PERMISSIONS, Permission, hasAnyPermission, type Permi
 export type AdminTabId =
   | 'settings'
   | 'roles'
+  | 'colors'
   | 'members'
   | 'channels'
   | 'emojis'
@@ -36,6 +37,7 @@ export const ADMIN_TABS: ReadonlyArray<{
 }> = [
   { id: 'settings', label: 'Settings', permissions: [Permission.ManageServer] },
   { id: 'roles', label: 'Roles', permissions: [Permission.ManageRoles] },
+  { id: 'colors', label: 'Colors', permissions: [Permission.ManageServer] },
   { id: 'members', label: 'Members', permissions: MEMBER_MANAGEMENT_PERMISSIONS },
   { id: 'channels', label: 'Channels', permissions: [Permission.ManageChannels] },
   { id: 'emojis', label: 'Emojis', permissions: [Permission.ManageEmojis] },

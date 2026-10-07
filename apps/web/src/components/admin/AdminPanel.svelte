@@ -15,6 +15,7 @@
   import MembersSection from './MembersSection.svelte';
   import RetentionSection from './RetentionSection.svelte';
   import RolesSection from './RolesSection.svelte';
+  import ColorsSection from './ColorsSection.svelte';
   import ServerLogSection from './ServerLogSection.svelte';
   import BotsSection from './BotsSection.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -48,6 +49,8 @@
         <SettingsSection />
       {:else if active === 'roles'}
         <RolesSection />
+      {:else if active === 'colors'}
+        <ColorsSection />
       {:else if active === 'members'}
         <MembersSection />
       {:else if active === 'channels'}

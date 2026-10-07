@@ -155,6 +155,25 @@ quick peek. Clicking a name, avatar or mention opens the full profile viewer: a
 fixed overlay rather than a cursor popover, so it stays put while it is read. On
 touch there is no hover card at all, and a tap opens the viewer.
 
+## Username colors
+
+An administrator keeps a palette of colors that members may pick for their
+username (`name_colors`), the Discord color-role trick without a role per color:
+it only ever changes how a name is drawn, so it grants nothing. A member picks one
+in the Customize tab, stored as a reference (`users.name_color_id`) rather than a
+copied value, so recoloring an entry recolors everyone who chose it and removing
+one drops them back to no color exactly as deleting a color role would. The
+resolved color rides on `User.nameColor`; the picker gets the entry id from the
+member's profile.
+
+A role color always wins. The server sends both `roleColor` and `nameColor` and
+the client prefers the role's, so nothing has to decide at write time whose color
+is current. To make the two easy to tell apart at a glance, a name drawn in a role
+color carries a soft glow in that same color (`name-glow`, a static text-shadow
+riding on `currentColor`); a color the member picked does not. Both a palette edit
+and a removal announce the affected members with `MEMBER_UPDATE`, since the color
+only changes for them in the DTO they are refetched with.
+
 ## Search
 
 Message search is a case-insensitive substring match (`LIKE`) over the text, rather than a full-text

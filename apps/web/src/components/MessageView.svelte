@@ -11,6 +11,7 @@
   import LinkedGif from './LinkedGif.svelte';
   import { lightbox } from '../lib/lightbox.svelte';
   import { members } from '../lib/members.svelte';
+  import { nameColorGlow, nameColorStyle } from '../lib/format';
   import { meta } from '../lib/meta.svelte';
   import { profileCard, hoverCapable } from '../lib/profile-card.svelte';
   import { session } from '../lib/session.svelte';
@@ -470,10 +471,6 @@
     {#each rows as row (row.message.id)}
       {@const message = row.message}
       {@const grouped = row.grouped}
-      {@const authorColor =
-        message.author?.roleColor == null
-          ? null
-          : `#${message.author.roleColor.toString(16).padStart(6, '0')}`}
       {@const blocks = parseMessage(
         message.content,
         emojis.lookup,
@@ -549,7 +546,8 @@
               <button
                 type="button"
                 class="author profile-trigger"
-                style={authorColor ? `color: ${authorColor}` : ''}
+                class:name-glow={nameColorGlow(message.author)}
+                style={nameColorStyle(message.author)}
                 onmouseenter={(event) => restCard(message.author, event.currentTarget)}
                 onmouseleave={() => profileCard.scheduleHide()}
                 onfocus={(event) => openCard(message.author, event.currentTarget)}

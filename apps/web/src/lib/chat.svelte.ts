@@ -24,6 +24,7 @@ import { mentionsUser, mergeLatest } from './messages';
 import { members } from './members.svelte';
 import { roster } from './roster.svelte';
 import { commands } from './commands.svelte';
+import { nameColors } from './name-colors.svelte';
 import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
 import { playNotification } from './sounds';
@@ -53,6 +54,7 @@ function sameFace(a: User, b: User): boolean {
     a.displayName === b.displayName &&
     a.avatarHash === b.avatarHash &&
     a.roleColor === b.roleColor &&
+    a.nameColor === b.nameColor &&
     a.badge === b.badge &&
     a.accountType === b.accountType
   );
@@ -272,6 +274,7 @@ class ChatStore {
     this.#clearTyping();
     roster.reset();
     commands.reset();
+    nameColors.reset();
   }
 
   /**

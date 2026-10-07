@@ -8,6 +8,7 @@
   import { session } from '../lib/session.svelte';
   import { ui } from '../lib/ui.svelte';
   import { canOpenAdminPanel } from '../lib/admin';
+  import { nameColorGlow, nameColorStyle } from '../lib/format';
   import { muteLabel, pillCount } from '../lib/unread';
   import ChannelMenu from './ChannelMenu.svelte';
   import Icon from './Icon.svelte';
@@ -16,10 +17,6 @@
   // The button appears for anyone who could use at least one tab, moderators
   // included; the panel itself hides the tabs they cannot reach.
   const canAdmin = $derived(canOpenAdminPanel(permissions));
-  const myColor = $derived.by(() => {
-    const color = session.user?.roleColor;
-    return color == null ? null : `#${color.toString(16).padStart(6, '0')}`;
-  });
   const myPicture = $derived(avatarUrl(session.user));
 
   /** Categories that demand a role; every channel inside one is locked too. */
@@ -263,7 +260,7 @@
       {:else}
         <span class="avatar small fallback">{initial(session.user)}</span>
       {/if}
-      <span class="username" style={myColor ? `color: ${myColor}` : ''}>
+      <span class="username" class:name-glow={nameColorGlow(session.user)} style={nameColorStyle(session.user)}>
         {session.user?.displayName ?? session.user?.username}
       </span>
     </button>

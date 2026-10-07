@@ -13,6 +13,8 @@ export const BIO_MAX = 256;
 export const STATUS_MAX = 128;
 /** Longest stored value for one social link, in characters. */
 export const SOCIAL_VALUE_MAX = 100;
+/** Longest label an administrator can give a palette color, in characters. */
+export const NAME_COLOR_LABEL_MAX = 32;
 
 export type SocialPlatform = 'twitter' | 'github' | 'twitch' | 'youtube' | 'steam' | 'website';
 
@@ -88,5 +90,11 @@ export interface UserProfile {
   avatarColor: number | null;
   /** The banner image's content hash, or null when the member has no banner. */
   bannerHash: string | null;
+  /**
+   * The palette entry the member picked for their username, or null for none.
+   * The color itself rides on `User.nameColor`; this is the selection, so the
+   * picker can highlight the right swatch.
+   */
+  nameColorId: string | null;
   socialLinks: SocialLinks;
 }

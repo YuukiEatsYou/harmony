@@ -59,6 +59,7 @@ import { registerDiscordRoutes } from './routes/discord.ts';
 import { registerSettingsRoutes } from './routes/settings.ts';
 import { registerIconRoutes } from './routes/icon.ts';
 import { registerRoleRoutes } from './routes/roles.ts';
+import { registerNameColorRoutes } from './routes/name-colors.ts';
 import { registerMemberRoutes } from './routes/members.ts';
 import { registerInviteRoutes } from './routes/invites.ts';
 import { registerChannelRoutes } from './routes/channels.ts';
@@ -311,6 +312,7 @@ registerUpdateRoutes(app, {
 registerBackupRoutes(app, { db, config, settings: settingsService, audit: auditService, serverLog });
 registerBridgeRoutes(app, { settings: settingsService, bridge });
 registerRoleRoutes(app, { db, hub });
+registerNameColorRoutes(app, { db, hub });
 registerMemberRoutes(app, {
   db,
   hub,

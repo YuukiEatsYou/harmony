@@ -1056,4 +1056,32 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 39,
+    name: 'name_colors',
+    up(db) {
+      /*
+       * The colors an administrator offers for members' usernames: the Discord
+       * color-role idea without a role per color. A member picks one in their
+       * profile and it only ever changes how their name is drawn, so it grants
+       * nothing, and a colored role they hold still outranks it. `position` is
+       * display order.
+       *
+       * A member's pick is a reference, not a copied color: editing an entry
+       * recolors everyone who chose it, and removing one drops them back to the
+       * default, which is what deleting a color role would do on Discord.
+       */
+      db.exec(`
+        CREATE TABLE name_colors (
+          id         TEXT PRIMARY KEY,
+          color      INTEGER NOT NULL,
+          label      TEXT,
+          position   INTEGER NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        ALTER TABLE users ADD COLUMN name_color_id TEXT REFERENCES name_colors(id) ON DELETE SET NULL;
+      `);
+    },
+  },
 ];

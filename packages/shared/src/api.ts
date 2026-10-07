@@ -8,6 +8,7 @@ import type {
   Invite,
   Mention,
   Message,
+  NameColor,
   Role,
   SavedMessage,
   User,
@@ -314,6 +315,11 @@ export interface MediaListResponse {
 
 export interface RoleListResponse {
   roles: Role[];
+}
+
+/** The palette every member picks their username color from, in display order. */
+export interface NameColorListResponse {
+  nameColors: NameColor[];
 }
 
 export interface InviteListResponse {

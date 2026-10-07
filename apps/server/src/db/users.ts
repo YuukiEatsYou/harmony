@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AccountType, PermissionValue, SocialLinks, User, UserBadge, UserProfile } from '@harmony/shared';
 import { hasPassword, NO_PASSWORD } from '../auth/passwords.ts';
 import { getHighestRoleColor, getUserBadge } from './roles.ts';
+import { findNameColor } from './name_colors.ts';
 
 export interface UserRow {
   id: string;
@@ -30,6 +31,8 @@ export interface UserRow {
   discord_avatar_rev: string | null;
   /** When the daily sweep last checked this member's Discord picture. */
   discord_avatar_checked_at: string | null;
+  /** The palette color the member picked for their username, or null for none. */
+  name_color_id: string | null;
 }
 
 /** A stored account type, defaulting to a person for anything unrecognized. */
@@ -47,13 +50,19 @@ export function parsePermissionBits(raw: string | null): PermissionValue {
   }
 }
 
-export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge | null): User {
+export function toUser(
+  row: UserRow,
+  roleColor: number | null,
+  badge: UserBadge | null,
+  nameColor: number | null,
+): User {
   return {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
     avatarHash: row.avatar_hash,
     roleColor,
+    nameColor,
     accountType: parseAccountType(row.account_type),
     isOwner: row.is_owner === 1,
     badge,
@@ -73,7 +82,11 @@ export function presentUser(sqlite: DatabaseSync, row: UserRow): User {
   // Only a person shows an owner/admin/moderator badge, and only the owner shows
   // the owner one. A bot has its own icon; a stand-in belongs to Discord.
   const badge = row.account_type === 'user' ? getUserBadge(sqlite, row.id, row.is_owner === 1) : null;
-  return toUser(row, getHighestRoleColor(sqlite, row.id), badge);
+  // The palette color is resolved here rather than stored on the row, so an
+  // administrator recoloring an entry changes everyone who picked it at once, and
+  // removing one clears it in the same breath.
+  const nameColor = row.name_color_id ? (findNameColor(sqlite, row.name_color_id)?.color ?? null) : null;
+  return toUser(row, getHighestRoleColor(sqlite, row.id), badge, nameColor);
 }
 
 /** The stored social links, or an empty map when there are none or they are unreadable. */
@@ -95,6 +108,7 @@ export function presentUserProfile(row: UserRow): UserProfile {
     accentColor: row.accent_color,
     avatarColor: row.avatar_color,
     bannerHash: row.banner_hash,
+    nameColorId: row.name_color_id,
     socialLinks: parseSocialLinks(row.social_links),
   };
 }
@@ -383,6 +397,7 @@ export function updateUserProfile(
     status?: string | null;
     accentColor?: number | null;
     bannerHash?: string | null;
+    nameColorId?: string | null;
     socialLinks?: SocialLinks;
   },
 ): void {
@@ -431,6 +446,10 @@ export function updateUserProfile(
   if (patch.bannerHash !== undefined) {
     sets.push('banner_hash = ?');
     values.push(patch.bannerHash);
+  }
+  if (patch.nameColorId !== undefined) {
+    sets.push('name_color_id = ?');
+    values.push(patch.nameColorId);
   }
   if (patch.socialLinks !== undefined) {
     const links = Object.keys(patch.socialLinks).length > 0 ? JSON.stringify(patch.socialLinks) : null;

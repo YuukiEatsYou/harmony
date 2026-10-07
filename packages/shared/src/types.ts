@@ -33,6 +33,13 @@ export interface User {
    * permissions.
    */
   roleColor: number | null;
+  /**
+   * The packed RGB color the member chose from the instance's palette, or null
+   * for none. Resolved from the palette entry they picked. Shown only when they
+   * hold no colored role, so a role color always wins; a role color also glows,
+   * the client's way of telling the two apart. Purely a display concern.
+   */
+  nameColor: number | null;
   /** Whether this is a person, a bot, or a Discord stand-in. */
   accountType: AccountType;
   isOwner: boolean;
@@ -93,6 +100,21 @@ export interface Role {
   isDefault: boolean;
   /** The badge this role confers on its members, `'none'` for most roles. */
   badge: RoleBadge;
+}
+
+/**
+ * One color an administrator offers for members' usernames, the Discord
+ * color-role idea streamlined: a member picks one in their profile instead of
+ * needing a role per color. It grants nothing. A colored role the member holds
+ * still wins over it.
+ */
+export interface NameColor {
+  id: SnowflakeId;
+  /** Packed RGB integer. */
+  color: number;
+  /** Optional name shown beside the swatch, or null for a bare color. */
+  label: string | null;
+  position: number;
 }
 
 export interface Category {

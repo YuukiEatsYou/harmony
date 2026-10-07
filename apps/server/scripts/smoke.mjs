@@ -3817,6 +3817,85 @@ try {
       (await req(`/users/${profileUserId}/profile`, { token: ownerToken })).json?.bannerHash === null,
   );
 
+  // --- Username colors ---
+  // The palette an administrator offers, and the member's pick from it.
+  const paletteEmpty = await req('/name-colors', { token: ownerToken });
+  check(
+    'the name-color palette starts empty',
+    paletteEmpty.status === 200 && paletteEmpty.json?.nameColors?.length === 0,
+  );
+  check(
+    'a member cannot add a name color (403)',
+    (await req('/name-colors', { method: 'POST', token: bobToken, body: { color: 0x57b0e0 } })).status === 403,
+  );
+
+  const createdColor = await req('/name-colors', {
+    method: 'POST',
+    token: ownerToken,
+    body: { color: 0x57b0e0, label: 'Sky' },
+  });
+  const colorId = createdColor.json?.id;
+  check(
+    'an administrator adds a name color',
+    createdColor.status === 200 &&
+      typeof colorId === 'string' &&
+      createdColor.json?.color === 0x57b0e0 &&
+      createdColor.json?.label === 'Sky',
+    JSON.stringify(createdColor.json),
+  );
+  check(
+    'the palette lists it',
+    (await req('/name-colors', { token: bobToken })).json?.nameColors?.some((entry) => entry.id === colorId) === true,
+  );
+
+  // The color is resolved from the picked entry and rides on the lean User.
+  const pickedColor = await req('/users/@me', { method: 'PATCH', token: ownerToken, body: { nameColorId: colorId } });
+  check(
+    'a member picks a name color, and no role color competes with it',
+    pickedColor.json?.user?.nameColor === 0x57b0e0 && pickedColor.json?.user?.roleColor === null,
+    JSON.stringify(pickedColor.json?.user),
+  );
+  check(
+    'the profile records the pick',
+    (await req(`/users/${profileUserId}/profile`, { token: ownerToken })).json?.nameColorId === colorId,
+  );
+  check(
+    'an unknown name color is refused (400)',
+    (await req('/users/@me', { method: 'PATCH', token: ownerToken, body: { nameColorId: 'nope' } })).status === 400,
+  );
+
+  // A colored role outranks the pick. The server sends both; the client prefers
+  // the role color, which is what the glow marks out.
+  const colorRole = await req('/roles', {
+    method: 'POST',
+    token: ownerToken,
+    body: { name: 'Sky role', color: 0xff8800 },
+  });
+  await req(`/members/${profileUserId}/roles/${colorRole.json.id}`, { method: 'PUT', token: ownerToken });
+  const withRole = await req('/auth/me', { token: ownerToken });
+  check(
+    'a role color is sent alongside the chosen one, so the client can prefer it',
+    withRole.json?.user?.roleColor === 0xff8800 && withRole.json?.user?.nameColor === 0x57b0e0,
+    JSON.stringify(withRole.json?.user),
+  );
+  await req(`/members/${profileUserId}/roles/${colorRole.json.id}`, { method: 'DELETE', token: ownerToken });
+  await req(`/roles/${colorRole.json.id}`, { method: 'DELETE', token: ownerToken });
+
+  // Removing an entry drops everyone who picked it back to no color, which is
+  // what deleting a color role would do.
+  check(
+    'the name color can be removed',
+    (await req(`/name-colors/${colorId}`, { method: 'DELETE', token: ownerToken })).status === 204,
+  );
+  check(
+    'removing a color clears the members who chose it',
+    (await req('/auth/me', { token: ownerToken })).json?.user?.nameColor === null,
+  );
+  check(
+    'the profile clears the pick too',
+    (await req(`/users/${profileUserId}/profile`, { token: ownerToken })).json?.nameColorId === null,
+  );
+
   // --- Instance icon ---
   const iconPng = await sharp({
     create: { width: 40, height: 40, channels: 4, background: { r: 88, g: 101, b: 242, alpha: 1 } },

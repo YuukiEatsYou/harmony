@@ -5,7 +5,31 @@ export function permissionLabel(name: string): string {
 
 /** Formats an RGB integer as a CSS color. */
 export function roleColor(color: number | null): string {
-  return color == null ? 'var(--h-text-muted)' : `#${color.toString(16).padStart(6, '0')}`;
+  return color == null ? 'var(--h-text-muted)' : hexColor(color);
+}
+
+/** `#rrggbb` for a packed RGB integer. */
+function hexColor(color: number): string {
+  return `#${color.toString(16).padStart(6, '0')}`;
+}
+
+/**
+ * Whether a member's name is drawn in a role color. A role color is shown with a
+ * glow, which is how the client tells it apart from a color the member picked
+ * from the palette.
+ */
+export function nameColorGlow(user: { roleColor: number | null } | null | undefined): boolean {
+  return user?.roleColor != null;
+}
+
+/**
+ * The inline style drawing a member's name in their color, or an empty string for
+ * the default. A role color wins over a chosen one, so the name shows their
+ * strongest colour and the caller adds the glow with `nameColorGlow`.
+ */
+export function nameColorStyle(user: { roleColor: number | null; nameColor: number | null } | null | undefined): string {
+  const color = user?.roleColor ?? user?.nameColor;
+  return color == null ? '' : `color: ${hexColor(color)}`;
 }
 
 /** Human-readable byte size, e.g. `1.5 GB`. */

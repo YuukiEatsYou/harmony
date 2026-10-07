@@ -38,6 +38,7 @@ code wins — please open an issue.
   - [Custom emoji](#custom-emoji)
   - [Stickers](#stickers)
   - [Users and avatars](#users-and-avatars)
+  - [Username colors](#username-colors)
   - [Channel notification settings](#channel-notification-settings)
   - [Roles](#roles)
   - [Members](#members)
@@ -172,6 +173,7 @@ type User = {
   displayName: string | null;   // falls back to username in the UI
   avatarHash: string | null;    // see "Users and avatars"
   roleColor: number | null;     // packed RGB integer, from the highest colored role
+  nameColor: number | null;     // packed RGB from the palette entry the member picked, or null; see "Username colors"
   accountType: 'user' | 'bot' | 'ghost';  // a person, an owner-set-up bot, or a Discord stand-in
   isOwner: boolean;
   badge: 'owner' | 'admin' | 'moderator' | null;  // shown beside the name, see "Member badges"
@@ -1831,6 +1833,7 @@ such sticker, `404 sticker_missing` when its image is gone from storage.
   "bio": "Hi, I build things.",
   "status": "shipping v1.26",
   "accentColor": 16743424,
+  "nameColorId": "3f9c1a…",
   "socialLinks": { "github": "octocat", "website": "https://example.com" }
 }
 ```
@@ -1845,6 +1848,10 @@ other messages in the channel being read.
 account. While it is on the picture is Discord's to set, so `PUT` and `DELETE` on the avatar are
 refused with `409 avatar_synced`; switching it on catches up immediately. It means nothing without a
 `discordId`, and never applies to a stand-in, which follows Discord unconditionally.
+
+`nameColorId` picks one of the colors an administrator offers (see [Username colors](#username-colors)),
+or `null` for none; an id that is not in the palette is refused with `400 unknown_name_color`. It only
+ever affects how the name is drawn, and a colored role the member holds still wins.
 
 The remaining fields are the member's profile customization, shown in the profile viewer. `bio` (up to
 256 characters) and `status` (up to 128) are plain text. `accentColor` is a packed RGB integer, or
@@ -1927,6 +1934,7 @@ capability rule as the avatar route. Returns `404 banner_not_found` when the use
   "accentColor": 16743424,
   "avatarColor": 16743424,
   "bannerHash": "9f2c…",
+  "nameColorId": "3f9c1a…",
   "socialLinks": { "github": "octocat", "website": "https://example.com" }
 }
 ```
@@ -1935,8 +1943,48 @@ The profile fields a member set about themselves. They are fetched on their own 
 the lean `User` object, which rides along on every message and roster entry and so stays small.
 `accentColor` is the member's chosen color, `avatarColor` is the one averaged from their picture (both
 packed RGB, either nullable); a client leads with the accent when there is one and the picture's color
-otherwise. `bannerHash` is the banner's content hash, served through the route above. `socialLinks`
-is only ever the platforms that were stored.
+otherwise. `bannerHash` is the banner's content hash, served through the route above. `nameColorId`
+is the palette entry the member picked, or `null`; the color it resolves to rides on `User.nameColor`.
+`socialLinks` is only ever the platforms that were stored.
+
+### Username colors
+
+The palette an administrator offers for members' usernames, the Discord color-role idea streamlined:
+a member picks one instead of needing a role per color. A color grants nothing, and a colored role
+the member holds still outranks it. The client draws a role color with a soft glow, which is how the
+two are told apart.
+
+#### `GET /api/v1/name-colors` — `ViewChannels`
+
+```json
+{ "nameColors": [{ "id": "3f9c1a…", "color": 5742816, "label": "Sky", "position": 0 }] }
+```
+
+Every color on offer, in display order. Any member can read it, since the profile picker needs it.
+`label` is a name shown beside the swatch, or `null` for a bare color.
+
+#### `POST /api/v1/name-colors` — `ManageServer`
+
+```json
+{ "color": 5742816, "label": "Sky" }
+```
+
+Adds a color. `color` is a packed RGB integer; `label` is optional. Returns the created `NameColor`.
+
+#### `PATCH /api/v1/name-colors/:id` — `ManageServer`
+
+```json
+{ "color": 5742816, "label": null }
+```
+
+Edits a color or its label; both fields are optional. Recoloring an entry changes what everyone who
+picked it shows, and each of those members is announced with `MEMBER_UPDATE`. Returns the updated
+`NameColor`, or `404 name_color_not_found`.
+
+#### `DELETE /api/v1/name-colors/:id` — `ManageServer`
+
+Removes a color, returning `204`. Members who had picked it fall back to no color, the same as
+deleting a color role, and are announced with `MEMBER_UPDATE`.
 
 ### Channel notification settings
 

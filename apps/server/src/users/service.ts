@@ -29,6 +29,7 @@ import {
   type UserRow,
 } from '../db/users.ts';
 import { HttpError } from '../http/errors.ts';
+import { findNameColor } from '../db/name_colors.ts';
 import { createBlobStore } from '../storage/blobs.ts';
 
 export interface UserService {
@@ -44,6 +45,7 @@ export interface UserService {
       status?: string;
       accentColor?: number | null;
       socialLinks?: Record<string, string>;
+      nameColorId?: string | null;
     },
   ): UserRow;
   /**
@@ -225,6 +227,7 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
         status?: string | null;
         accentColor?: number | null;
         socialLinks?: SocialLinks;
+        nameColorId?: string | null;
       } = {};
       if (patch.displayName !== undefined) {
         // Empty means "go back to the username".
@@ -239,6 +242,16 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
       if (patch.status !== undefined) clean.status = trimToNull(patch.status.slice(0, STATUS_MAX));
       if (patch.accentColor !== undefined) clean.accentColor = patch.accentColor;
       if (patch.socialLinks !== undefined) clean.socialLinks = cleanSocialLinks(patch.socialLinks);
+      if (patch.nameColorId !== undefined) {
+        // A color has to be one the administrators actually offer; empty means none.
+        if (!patch.nameColorId) {
+          clean.nameColorId = null;
+        } else if (findNameColor(sqlite, patch.nameColorId)) {
+          clean.nameColorId = patch.nameColorId;
+        } else {
+          throw new HttpError(400, 'unknown_name_color', 'That color is not available.');
+        }
+      }
       updateUserProfile(sqlite, row.id, clean);
       return require(userId);
     },
