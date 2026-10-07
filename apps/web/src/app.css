@@ -3469,6 +3469,25 @@ button.roster-member:hover {
   border-right: 1px solid var(--h-border);
 }
 
+/*
+ * The tab list scrolls on its own, so the heading and Close stay put however many
+ * tabs there are. Without it the list grows past the panel, which is overflow
+ * hidden, and the Close is pushed off the bottom edge.
+ */
+.admin-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 0.3rem;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The scroll area clips at its edges, so a tab's focus ring is drawn inside it. */
+.admin-tab:focus-visible {
+  outline-offset: -2px;
+}
+
 .admin-nav h2 {
   margin: 0 0 0.9rem;
   padding: 0 0.5rem;

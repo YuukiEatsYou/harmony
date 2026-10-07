@@ -36,11 +36,13 @@
   <div class="admin">
     <nav class="admin-nav">
       <h2>Admin</h2>
-      {#each visibleTabs as tab (tab.id)}
-        <button class="admin-tab" class:active={active === tab.id} type="button" onclick={() => (selected = tab.id)}>
-          {tab.label}
-        </button>
-      {/each}
+      <div class="admin-tabs">
+        {#each visibleTabs as tab (tab.id)}
+          <button class="admin-tab" class:active={active === tab.id} type="button" onclick={() => (selected = tab.id)}>
+            {tab.label}
+          </button>
+        {/each}
+      </div>
       <button class="admin-close" type="button" onclick={() => ui.closeAdmin()}>Close</button>
     </nav>
 
