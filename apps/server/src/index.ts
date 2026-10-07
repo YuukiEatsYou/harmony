@@ -294,6 +294,7 @@ registerDiscordRoutes(app, {
   auth: authService,
   users: userService,
   hub,
+  bridge,
 });
 registerSettingsRoutes(app, { settings: settingsService, db });
 registerIconRoutes(app, { icon: iconService });
@@ -335,7 +336,7 @@ registerGifRoutes(app, { service: gifService, sources: gifSources, settings: set
 registerServerGifRoutes(app, { service: serverGifService });
 registerEmojiRoutes(app, { service: emojiService, importer: emojiImport, hub });
 registerStickerRoutes(app, { service: stickerService });
-registerUserRoutes(app, { db, users: userService, hub });
+registerUserRoutes(app, { db, users: userService, hub, bridge });
 registerBotRoutes(app, { bots: botService, commands: commandService, users: userService, hub });
 registerCommandRoutes(app, { commands: commandService, hub });
 registerChannelSettingsRoutes(app, { db, hub });
@@ -392,3 +393,14 @@ scheduledService.start();
 
 // Connect the Discord bot if the bridge was left enabled.
 await bridge.applySettings();
+
+// The Discord picture sync: an immediate catch-up, then an hourly look that only
+// touches members whose last check is over a day old. Kept off the bridge's own
+// connect path so a reconnect does not re-run the sweep; the per-member stamp is
+// what actually holds it to once a day.
+const runAvatarSync = (): void => {
+  void bridge.syncDueDiscordAvatars().catch((error) => app.log.error(error));
+};
+const avatarSyncTimer = setInterval(runAvatarSync, 60 * 60 * 1000);
+avatarSyncTimer.unref();
+runAvatarSync();

@@ -492,6 +492,11 @@ export const updateProfileSchema = z
     notifyMajor: z.boolean().optional(),
     /** Whether any other message plays the quieter sound. */
     notifyMinor: z.boolean().optional(),
+    /**
+     * Whether the profile picture follows the linked Discord account. Turning it
+     * on is a request to sync now, which the profile route carries out.
+     */
+    syncDiscordAvatar: z.boolean().optional(),
     /** A short "about me", plain text. */
     bio: z.string().trim().max(BIO_MAX).optional(),
     /** A one-line custom status, plain text. */
@@ -507,6 +512,7 @@ export const updateProfileSchema = z
       value.showTyping !== undefined ||
       value.notifyMajor !== undefined ||
       value.notifyMinor !== undefined ||
+      value.syncDiscordAvatar !== undefined ||
       value.bio !== undefined ||
       value.status !== undefined ||
       value.accentColor !== undefined ||

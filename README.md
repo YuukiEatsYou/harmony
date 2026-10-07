@@ -23,8 +23,9 @@ mining, no terms of service but your own.
 
 **Because migrating doesn't mean leaving.** A built-in bridge mirrors messages
 both ways with Discord, so your community can keep talking where it is while you
-settle in — or phase it out gradually. The setup wizard imports your channels and
-custom emoji for you.
+settle in — or phase it out gradually. Link your Discord account and your picture
+can stay in step with it, and the setup wizard imports your channels and custom
+emoji for you.
 
 **Because it's small on purpose.** A single process and a single file. It
 comfortably fits on a Raspberry Pi or the cheapest VPS, and there is no scaling to

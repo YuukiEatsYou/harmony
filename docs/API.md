@@ -181,6 +181,7 @@ type User = {
   notifyMajor: boolean;         // in-app sound for a message that mentions this user
   notifyMinor: boolean;         // in-app sound for other messages
   discordId: string | null;     // the Discord account this user is linked to, or that a stand-in represents
+  syncDiscordAvatar: boolean;   // whether the picture follows the linked Discord account; see "Users and avatars"
   hasPassword: boolean;         // false for an account created through Discord sign-in until a password is set
 };
 
@@ -1826,6 +1827,7 @@ such sticker, `404 sticker_missing` when its image is gone from storage.
   "showTyping": true,
   "notifyMajor": true,
   "notifyMinor": false,
+  "syncDiscordAvatar": true,
   "bio": "Hi, I build things.",
   "status": "shipping v1.26",
   "accentColor": 16743424,
@@ -1838,6 +1840,11 @@ or `""` clears it. `showTyping` turns typing indicators off entirely for the use
 nor see them. `notifyMajor` and `notifyMinor` cover the client's two notification sounds, both on by
 default: the first for a message that mentions the user, by reply or by name, and the second for
 other messages in the channel being read.
+
+`syncDiscordAvatar` (on by default) keeps the member's picture the same as their linked Discord
+account. While it is on the picture is Discord's to set, so `PUT` and `DELETE` on the avatar are
+refused with `409 avatar_synced`; switching it on catches up immediately. It means nothing without a
+`discordId`, and never applies to a stand-in, which follows Discord unconditionally.
 
 The remaining fields are the member's profile customization, shown in the profile viewer. `bio` (up to
 256 characters) and `status` (up to 128) are plain text. `accentColor` is a packed RGB integer, or
@@ -1867,11 +1874,20 @@ device making the change stays signed in. Returns `{ "ok": true }`.
 #### `PUT /api/v1/users/@me/avatar` — auth
 
 `multipart/form-data` with a single `file` field (an image). The picture is normalized server-side
-to a 256×256 WebP. Returns `MeResponse`.
+to a 256×256 WebP. Returns `MeResponse`. Refused with `409 avatar_synced` while the account is linked
+to Discord with picture syncing on, since the next sync would replace anything set here.
 
 #### `DELETE /api/v1/users/@me/avatar` — auth
 
-Clears your picture and returns `MeResponse`.
+Clears your picture and returns `MeResponse`. Refused with `409 avatar_synced` while picture syncing
+is on, the same as the upload above.
+
+#### `POST /api/v1/users/@me/discord/sync` — auth
+
+Fetches your current Discord picture and applies it now. Used by the **Sync now** button; the daily
+sweep and every bridged message normally keep it current on their own. Returns `400 not_linked` when
+no Discord account is linked, and `503 bridge_unavailable` when the bridge is not connected. On
+success returns `MeResponse`, with the picture cleared if Discord has none for you.
 
 #### `GET /api/v1/users/:id/avatar`
 

@@ -138,7 +138,10 @@ The profile color defaults to the picture: on upload the avatar is re-encoded, a
 the average color of its visible pixels is stored in `avatar_color` (the same
 measurement the instance icon uses, skipping transparent pixels so a logo on
 nothing does not read as black). A member may override it with `accent_color`, or
-clear that to fall back to the picture again.
+clear that to fall back to the picture again. A member whose picture follows their
+linked Discord account does not set it here at all: the avatar routes refuse with
+`avatar_synced` while syncing is on (see *The Discord bridge*), so the controls are
+hidden in the profile panel rather than offered and then rejected.
 
 Social links are stored as the bare value and only ever become a link through a
 fixed base URL per platform, so a handle can never point somewhere else; the
@@ -278,10 +281,22 @@ instead of showing a Harmony name and face nobody on Discord recognizes. A membe
 with no link keeps their Harmony identity, and Discord fetches that avatar straight
 from this instance, so those need a **Public base URL** set in **Admin → Bridge** —
 the address people use to reach the instance from the internet. A `localhost`
-address will not work, though it only affects unlinked members. The other direction
-is automatic either way: a Discord user's name and picture are imported into Harmony
-the first time they post, and a stand-in's name follows later changes as they post
-again.
+address will not work, though it only affects unlinked members.
+
+Pictures are kept in step in the other direction too. A Discord message carries its
+author's current avatar URL, whose path holds the picture's revision (the CDN hash),
+so a bridged message can tell "their picture changed" from "unchanged" for free and
+download only on a real change. A stand-in follows Discord on every message. A
+linked member follows it while **Sync profile picture with Discord** is on — on by
+default — and while it is on the picture is Discord's to set, so an upload here is
+refused rather than quietly overwritten later. Because the message path only sees
+members who post, a daily sweep asks Discord directly (through the same
+`mirrorIdentity` call the outbound mirror uses) for everyone linked whose last check
+is over a day old; the last check is stamped on `users`, so restarts do not
+re-fetch. Switching syncing on, and linking an account, each run one check straight
+away. A picture Discord has actually dropped is cleared, but only by the
+sweep and the button, never from a single message: a null there can just mean the
+member was not resolved.
 
 ### Linking a Discord account
 

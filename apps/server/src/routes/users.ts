@@ -17,12 +17,15 @@ import { findUserById, presentUser, presentUserProfile, type UserRow } from '../
 import { HttpError } from '../http/errors.ts';
 import { parseBody } from '../http/validation.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
+import type { BridgeService } from '../bridge/service.ts';
 import type { UserService } from '../users/service.ts';
 
 export interface UserRouteDeps {
   db: Database;
   users: UserService;
   hub: GatewayHub;
+  /** Used to pull a member's picture from Discord on demand. */
+  bridge: BridgeService;
 }
 
 export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): void {
@@ -43,12 +46,36 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
     deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId });
   }
 
+  /**
+   * While a member's picture follows Discord it is not theirs to set here: a
+   * change would be overwritten by the next message. Refused with a code the
+   * client turns into "turn syncing off first" rather than silently ignored.
+   */
+  function requireOwnAvatarEditable(userId: string): UserRow {
+    const row = findUserById(deps.db.sqlite, userId);
+    if (!row) throw new HttpError(404, 'user_not_found', 'That user does not exist.');
+    if (row.discord_id && row.sync_discord_avatar === 1) {
+      throw new HttpError(
+        409,
+        'avatar_synced',
+        'Your picture follows your Discord account. Turn syncing off to set one here.',
+      );
+    }
+    return row;
+  }
+
   app.patch('/api/v1/users/@me', async (request) => {
     const auth = requireAuth(request);
     const input = parseBody(updateProfileSchema, request.body);
-    const response = present(deps.users.updateProfile(auth.user.id, input));
+    let row = deps.users.updateProfile(auth.user.id, input);
+    // Switching the Discord picture sync on is a request to catch up now rather
+    // than wait for the next message or the daily sweep. Best-effort: a bridge
+    // that is down must not fail the setting change itself.
+    if (input.syncDiscordAvatar === true && row.discord_id && deps.bridge.avatarSyncReady()) {
+      row = (await deps.bridge.syncDiscordAvatarFor(auth.user.id).catch(() => null)) ?? row;
+    }
     announce(auth.user.id);
-    return response;
+    return present(row);
   });
 
   /**
@@ -73,6 +100,7 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
 
   app.put('/api/v1/users/@me/avatar', async (request) => {
     const auth = requireAuth(request);
+    requireOwnAvatarEditable(auth.user.id);
 
     if (!request.isMultipart()) {
       throw new HttpError(415, 'unsupported_media_type', 'Expected a multipart/form-data upload.');
@@ -94,9 +122,29 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
 
   app.delete('/api/v1/users/@me/avatar', async (request) => {
     const auth = requireAuth(request);
-    const response = present(deps.users.clearAvatar(auth.user.id));
-    announce(auth.user.id);
+    const row = requireOwnAvatarEditable(auth.user.id);
+    const response = present(deps.users.clearAvatar(row.id));
+    announce(row.id);
     return response;
+  });
+
+  /**
+   * Pulls the member's Discord picture over right now. Only meaningful while
+   * syncing is on and an account is linked, but harmless otherwise: the daily
+   * sweep and every bridged message keep it current on their own.
+   */
+  app.post('/api/v1/users/@me/discord/sync', async (request) => {
+    const auth = requireAuth(request);
+    const row = findUserById(deps.db.sqlite, auth.user.id);
+    if (!row?.discord_id) {
+      throw new HttpError(400, 'not_linked', 'Connect your Discord account first.');
+    }
+    if (!deps.bridge.avatarSyncReady()) {
+      throw new HttpError(503, 'bridge_unavailable', 'The Discord bridge is not connected right now.');
+    }
+    const updated = await deps.bridge.syncDiscordAvatarFor(auth.user.id);
+    announce(auth.user.id);
+    return present(updated ?? row);
   });
 
   app.put('/api/v1/users/@me/banner', async (request) => {

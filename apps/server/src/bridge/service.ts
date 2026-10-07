@@ -52,7 +52,9 @@ import {
   findUserById,
   findUserByUsername,
   insertGhostUser,
+  listUsersDueForDiscordAvatarSync,
   presentUser,
+  setDiscordAvatarSync,
   updateUserProfile,
   type UserRow,
 } from '../db/users.ts';
@@ -88,6 +90,36 @@ import {
 
 /** Discord lets a channel hold this many pins; Harmony's own cap matches it. */
 const DISCORD_MAX_PINS = 50;
+
+/**
+ * The revision inside a Discord avatar URL: the hash before the extension, with
+ * the `a_` prefix Discord puts on an animated picture. A real hash is a long run
+ * of hex, which keeps Discord's single-digit default avatars from matching.
+ *
+ * A guild avatar and a global one both end in `/{hash}.{ext}`, so this reads the
+ * last segment before the extension without caring which it is.
+ */
+const DISCORD_AVATAR_HASH = /\/((?:a_)?[a-f0-9]{16,})\.(?:png|gif|webp|jpe?g)(?:\?|$)/;
+
+/**
+ * A token that changes exactly when a member's Discord picture does, used to tell
+ * "unchanged" from "changed" without asking Discord. The CDN hash is preferred;
+ * anything not shaped like a Discord avatar URL falls back to the URL itself, so
+ * an unrecognized address still detects a change rather than syncing forever.
+ * Null only when there is no picture at all.
+ */
+function discordAvatarRevision(url: string | null): string | null {
+  if (!url) return null;
+  return DISCORD_AVATAR_HASH.exec(url)?.[1] ?? url;
+}
+
+/**
+ * How old a check must be before the sweep looks again. The stamp is written a
+ * little inside the interval, so an hourly tick that fires marginally early still
+ * counts as a full day having passed rather than skipping to the next one.
+ */
+const DISCORD_AVATAR_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DISCORD_AVATAR_SYNC_STALE_MS = DISCORD_AVATAR_SYNC_INTERVAL_MS - 60 * 60 * 1000;
 
 /** Discord's default upload ceiling for a non-boosted server. */
 const DISCORD_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -136,6 +168,16 @@ export interface BridgeService {
    * telling us right now.
    */
   onlineDiscordIds(): Set<string>;
+  /** Whether the bridge is connected, so a member's picture could be synced right now. */
+  avatarSyncReady(): boolean;
+  /**
+   * Brings one linked member's picture in step with Discord. Used when syncing is
+   * turned on, when an account is linked, and by the button. Returns the updated
+   * row, or null when there was nothing to do.
+   */
+  syncDiscordAvatarFor(userId: string): Promise<UserRow | null>;
+  /** The daily sweep over every linked member whose picture is due a check. */
+  syncDueDiscordAvatars(): Promise<number>;
   shutdown(): Promise<void>;
 }
 
@@ -1025,25 +1067,108 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
   }
 
   /**
-   * Imports a Discord author's picture the first time we see one, so bridged
-   * users show their real avatar. Skipped once they have one, to avoid
-   * re-downloading on every message.
+   * Whether an account's picture follows Discord. A stand-in always does, being
+   * Discord's own; a linked member follows it unless they turned syncing off; a
+   * bot never does.
    */
-  async function mirrorGhostAvatar(
+  function followsDiscordAvatar(author: UserRow): boolean {
+    if (author.account_type === 'ghost') return true;
+    return author.account_type === 'user' && author.sync_discord_avatar === 1;
+  }
+
+  /**
+   * Brings an account's picture in step with the Discord picture a message
+   * carries, at no cost when nothing changed: the CDN URL holds the revision, so
+   * only a real change is downloaded. A message with no picture never clears one,
+   * since a null can just mean the member was not resolved; a picture Discord has
+   * actually dropped is left to the sweep, which asks Discord outright.
+   */
+  async function syncAuthorAvatar(
     active: DiscordTransport,
     author: UserRow,
-    message: DiscordIncomingMessage,
+    avatarUrl: string | null,
   ): Promise<void> {
-    if (author.avatar_hash || !message.authorAvatarUrl) return;
+    if (!followsDiscordAvatar(author) || !avatarUrl) return;
+    const rev = discordAvatarRevision(avatarUrl);
+    if (rev === null || rev === author.discord_avatar_rev) return;
     try {
-      const data = await active.download(message.authorAvatarUrl);
-      await deps.users.setAvatarFromData(author.id, data);
+      const data = await active.download(avatarUrl);
+      const updated = await deps.users.applyDiscordAvatar(author.id, data, rev);
+      if (updated) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: author.id });
     } catch (error) {
-      logger.debug('could not mirror a discord avatar', {
-        authorId: message.authorId,
+      logger.debug('could not sync a discord avatar', {
+        authorId: author.discord_id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * Brings one linked member's picture in step by asking Discord for their
+   * current identity. Used when syncing is switched on, when an account is linked
+   * and by the sweep below. Returns the updated row, or null when there was
+   * nothing to do (no link, syncing off, the bridge down, or Discord could not be
+   * reached for them).
+   */
+  async function syncDiscordAvatarFor(userId: string): Promise<UserRow | null> {
+    const active = transport;
+    const row = findUserById(deps.sqlite, userId);
+    if (!active || !row || row.account_type !== 'user' || !row.discord_id || row.sync_discord_avatar !== 1) {
+      return null;
+    }
+
+    const identity = await active.mirrorIdentity(row.discord_id).catch(() => null);
+    // Unresolvable: leave the stamp alone so the next sweep tries again soon.
+    if (!identity) return null;
+
+    // No picture on Discord: ours would be a stale copy, so drop it and
+    // remember there is none.
+    if (!identity.avatarUrl) {
+      const cleared = await deps.users.applyDiscordAvatar(row.id, null, null);
+      if (cleared && row.avatar_hash !== null) {
+        deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: row.id });
+      }
+      return cleared;
+    }
+
+    const rev = discordAvatarRevision(identity.avatarUrl)!;
+    // Unchanged: stamp the check so the sweep does not fetch it again today.
+    if (rev === row.discord_avatar_rev) {
+      setDiscordAvatarSync(deps.sqlite, row.id, rev, new Date().toISOString());
+      return row;
+    }
+
+    const data = await active.download(identity.avatarUrl).catch(() => null);
+    if (!data) return null;
+    const updated = await deps.users.applyDiscordAvatar(row.id, data, rev);
+    if (updated) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: row.id });
+    return updated;
+  }
+
+  /**
+   * The daily sweep: brings every linked member whose picture follows Discord and
+   * has not been checked lately in step. This runs whether or not anyone is
+   * posting, which is the only way a quiet member's change is ever noticed.
+   * Returns how many were looked at.
+   */
+  async function syncDueDiscordAvatars(): Promise<number> {
+    if (!transport) return 0;
+    const before = new Date(Date.now() - DISCORD_AVATAR_SYNC_STALE_MS).toISOString();
+    const due = listUsersDueForDiscordAvatarSync(deps.sqlite, before);
+    let checked = 0;
+    for (const row of due) {
+      try {
+        await syncDiscordAvatarFor(row.id);
+        checked += 1;
+      } catch (error) {
+        logger.debug('a discord avatar sweep entry failed', {
+          userId: row.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (checked > 0) logger.debug('discord avatar sweep', { checked });
+    return checked;
   }
 
   /**
@@ -1077,7 +1202,7 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     if (!channel) return false;
 
     const author = resolveGhostUser(message.authorId, message.authorName, true);
-    await mirrorGhostAvatar(active, author, message);
+    await syncAuthorAvatar(active, author, message.authorAvatarUrl);
 
     // A native Discord poll arrives as a poll message of its own.
     if (message.poll) return ingestPoll(active, message, channel, author, silent);
@@ -1684,6 +1809,14 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
     onlineDiscordIds() {
       return new Set(discordOnline);
     },
+
+    avatarSyncReady() {
+      return transport !== null;
+    },
+
+    syncDiscordAvatarFor,
+
+    syncDueDiscordAvatars,
 
     async testMirror(channelId) {
       const channel = findChannel(deps.sqlite, channelId);

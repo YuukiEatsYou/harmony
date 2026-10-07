@@ -59,6 +59,13 @@ export interface User {
    */
   discordId: string | null;
   /**
+   * Whether this member's profile picture follows their linked Discord account.
+   * On by default. While it is on, the picture is Discord's to set and cannot be
+   * changed here; turning it on syncs straight away. Always true without a link,
+   * where it means nothing.
+   */
+  syncDiscordAvatar: boolean;
+  /**
    * False for an account created by signing in with Discord, which has no
    * password until the member sets one.
    */

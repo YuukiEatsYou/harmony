@@ -623,6 +623,60 @@ try {
     String(transport.state.mirrors.at(-1)?.avatarUrl),
   );
 
+  // 7b3. A linked member's picture follows Discord: pulled when it changes,
+  // skipped when it has not, cleared when Discord drops it, and left alone when
+  // the member has turned syncing off.
+  const daveId = randomUUID();
+  insertUser(db.sqlite, { id: daveId, username: 'dave', passwordHash: 'scrypt$x$y$z', isOwner: false });
+  users.linkDiscord(daveId, '9100');
+  transport.state.downloadBytes = png;
+  const daveOne = 'https://cdn.discordapp.com/avatars/9100/11111111111111111111111111111111.png';
+  transport.state.mirrorIdentities.set('9100', { name: 'Dave', avatarUrl: daveOne });
+  await bridge.syncDiscordAvatarFor(daveId);
+  check(
+    'a linked member picture is pulled from discord',
+    typeof findUserById(db.sqlite, daveId)?.avatar_hash === 'string',
+  );
+
+  const beforeUnchanged = transport.state.downloads.length;
+  await bridge.syncDiscordAvatarFor(daveId);
+  check('an unchanged discord picture is not fetched again', transport.state.downloads.length === beforeUnchanged);
+
+  transport.state.mirrorIdentities.set('9100', {
+    name: 'Dave',
+    avatarUrl: 'https://cdn.discordapp.com/avatars/9100/22222222222222222222222222222222.png',
+  });
+  await bridge.syncDiscordAvatarFor(daveId);
+  check('a changed discord picture is fetched', transport.state.downloads.length === beforeUnchanged + 1);
+
+  transport.state.mirrorIdentities.set('9100', { name: 'Dave', avatarUrl: null });
+  await bridge.syncDiscordAvatarFor(daveId);
+  check('a picture discord no longer has is cleared', findUserById(db.sqlite, daveId)?.avatar_hash === null);
+
+  users.updateProfile(daveId, { syncDiscordAvatar: false });
+  transport.state.mirrorIdentities.set('9100', { name: 'Dave', avatarUrl: daveOne });
+  const beforeOff = transport.state.downloads.length;
+  await bridge.syncDiscordAvatarFor(daveId);
+  check(
+    'a member with syncing off is left alone',
+    findUserById(db.sqlite, daveId)?.avatar_hash === null && transport.state.downloads.length === beforeOff,
+  );
+
+  // The sweep catches a member who has never been checked, which is the only way
+  // a quiet member's change is ever noticed.
+  const erinId = randomUUID();
+  insertUser(db.sqlite, { id: erinId, username: 'erin', passwordHash: 'scrypt$x$y$z', isOwner: false });
+  users.linkDiscord(erinId, '9200');
+  transport.state.mirrorIdentities.set('9200', {
+    name: 'Erin',
+    avatarUrl: 'https://cdn.discordapp.com/avatars/9200/33333333333333333333333333333333.png',
+  });
+  await bridge.syncDueDiscordAvatars();
+  check(
+    'the sweep pulls a picture for a member who has never been checked',
+    typeof findUserById(db.sqlite, erinId)?.avatar_hash === 'string',
+  );
+
   // 7c. A Harmony reply is mirrored out as a quoted line, since Discord
   // webhooks cannot post real replies.
   const original = messages.create(auth, channelId, 'the original', [], null);

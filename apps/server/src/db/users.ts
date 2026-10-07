@@ -25,6 +25,11 @@ export interface UserRow {
   social_links: string | null;
   account_type: string;
   bot_permissions: string;
+  sync_discord_avatar: number;
+  /** The Discord picture revision last imported, or null when nothing has been. */
+  discord_avatar_rev: string | null;
+  /** When the daily sweep last checked this member's Discord picture. */
+  discord_avatar_checked_at: string | null;
 }
 
 /** A stored account type, defaulting to a person for anything unrecognized. */
@@ -58,6 +63,7 @@ export function toUser(row: UserRow, roleColor: number | null, badge: UserBadge 
     notifyMajor: row.notify_major === 1,
     notifyMinor: row.notify_minor === 1,
     discordId: row.discord_id,
+    syncDiscordAvatar: row.sync_discord_avatar === 1,
     hasPassword: hasPassword(row.password_hash),
   };
 }
@@ -150,6 +156,37 @@ export function findUserByDiscordId(sqlite: DatabaseSync, discordId: string): Us
 /** Sets or clears the Discord account a member is linked to. */
 export function setUserDiscordId(sqlite: DatabaseSync, id: string, discordId: string | null): void {
   sqlite.prepare('UPDATE users SET discord_id = ? WHERE id = ?').run(discordId, id);
+}
+
+/** Records the outcome of a Discord picture sync: the revision now in place, and when. */
+export function setDiscordAvatarSync(
+  sqlite: DatabaseSync,
+  id: string,
+  rev: string | null,
+  checkedAt: string,
+): void {
+  sqlite
+    .prepare('UPDATE users SET discord_avatar_rev = ?, discord_avatar_checked_at = ? WHERE id = ?')
+    .run(rev, checkedAt, id);
+}
+
+/**
+ * Linked members whose picture follows Discord and has not been looked at since
+ * `before`, a stamped member before an unstamped one. Stand-ins and bots are left
+ * out: a stand-in has no toggle and is kept in step per message, and a bot has no
+ * Discord picture at all.
+ */
+export function listUsersDueForDiscordAvatarSync(sqlite: DatabaseSync, before: string): UserRow[] {
+  return sqlite
+    .prepare(
+      `SELECT * FROM users
+        WHERE account_type = 'user'
+          AND discord_id IS NOT NULL
+          AND sync_discord_avatar = 1
+          AND (discord_avatar_checked_at IS NULL OR discord_avatar_checked_at < ?)
+        ORDER BY discord_avatar_checked_at IS NULL DESC, discord_avatar_checked_at`,
+    )
+    .all(before) as unknown as UserRow[];
 }
 
 /** Renames an account. The unique index rejects a name already in use. */
@@ -341,6 +378,7 @@ export function updateUserProfile(
     showTyping?: boolean;
     notifyMajor?: boolean;
     notifyMinor?: boolean;
+    syncDiscordAvatar?: boolean;
     bio?: string | null;
     status?: string | null;
     accentColor?: number | null;
@@ -373,6 +411,10 @@ export function updateUserProfile(
   if (patch.notifyMinor !== undefined) {
     sets.push('notify_minor = ?');
     values.push(patch.notifyMinor ? 1 : 0);
+  }
+  if (patch.syncDiscordAvatar !== undefined) {
+    sets.push('sync_discord_avatar = ?');
+    values.push(patch.syncDiscordAvatar ? 1 : 0);
   }
   if (patch.bio !== undefined) {
     sets.push('bio = ?');

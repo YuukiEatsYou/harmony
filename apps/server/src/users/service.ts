@@ -22,6 +22,7 @@ import {
   findUserByDiscordId,
   findUserByUsername,
   mergeUsers,
+  setDiscordAvatarSync,
   setUserDiscordId,
   updateUserAccount,
   updateUserProfile,
@@ -38,6 +39,7 @@ export interface UserService {
       showTyping?: boolean;
       notifyMajor?: boolean;
       notifyMinor?: boolean;
+      syncDiscordAvatar?: boolean;
       bio?: string;
       status?: string;
       accentColor?: number | null;
@@ -70,6 +72,14 @@ export interface UserService {
    * the data is unusable.
    */
   setAvatarFromData(userId: string, data: Buffer): Promise<UserRow | null>;
+  /**
+   * Applies a picture synced from Discord: stores the image, or clears the
+   * picture when Discord has none, and records the Discord revision behind it so
+   * the next check can tell whether it changed. Deliberately skips the
+   * stand-in guard, since the bridge drives this for ghost accounts too. Returns
+   * null when the bytes are unusable, leaving the account untouched.
+   */
+  applyDiscordAvatar(userId: string, data: Buffer | null, rev: string | null): Promise<UserRow | null>;
   clearAvatar(userId: string): UserRow;
   /** Stores a normalized banner from an uploaded image. */
   updateBanner(userId: string, file: { contentType: string; data: Buffer }): Promise<UserRow>;
@@ -210,6 +220,7 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
         showTyping?: boolean;
         notifyMajor?: boolean;
         notifyMinor?: boolean;
+        syncDiscordAvatar?: boolean;
         bio?: string | null;
         status?: string | null;
         accentColor?: number | null;
@@ -223,6 +234,7 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
       if (patch.showTyping !== undefined) clean.showTyping = patch.showTyping;
       if (patch.notifyMajor !== undefined) clean.notifyMajor = patch.notifyMajor;
       if (patch.notifyMinor !== undefined) clean.notifyMinor = patch.notifyMinor;
+      if (patch.syncDiscordAvatar !== undefined) clean.syncDiscordAvatar = patch.syncDiscordAvatar;
       if (patch.bio !== undefined) clean.bio = trimToNull(patch.bio.slice(0, BIO_MAX));
       if (patch.status !== undefined) clean.status = trimToNull(patch.status.slice(0, STATUS_MAX));
       if (patch.accentColor !== undefined) clean.accentColor = patch.accentColor;
@@ -310,6 +322,26 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
         avatarHash: blobs.save(normalized),
         avatarColor: await averageColor(normalized),
       });
+      return require(userId);
+    },
+
+    async applyDiscordAvatar(userId, data, rev) {
+      const row = findUserById(sqlite, userId);
+      if (!row) return null;
+
+      if (data) {
+        const normalized = await normalizeAvatar(data);
+        if (!normalized) return null;
+        updateUserProfile(sqlite, row.id, {
+          avatarHash: blobs.save(normalized),
+          avatarColor: await averageColor(normalized),
+        });
+      } else {
+        // Discord has no picture for them, so ours would be a stale copy.
+        updateUserProfile(sqlite, row.id, { avatarHash: null, avatarColor: null });
+      }
+
+      setDiscordAvatarSync(sqlite, row.id, rev, new Date().toISOString());
       return require(userId);
     },
 

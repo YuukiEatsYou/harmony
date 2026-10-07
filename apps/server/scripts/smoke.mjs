@@ -3673,6 +3673,76 @@ try {
     ).status === 404,
   );
 
+  // --- Discord picture sync ---
+  // No Discord is configured in the smoke, so the bridge is down. The toggle and
+  // the guards still have to hold; the actual fetching is covered by the bridge
+  // smoke, where a fake Discord stands in.
+  const syncMe = await req('/auth/me', { token: ownerToken });
+  check('discord picture sync is on by default', syncMe.json?.user?.syncDiscordAvatar === true);
+
+  const syncOff = await req('/users/@me', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { syncDiscordAvatar: false },
+  });
+  check('discord picture sync can be turned off', syncOff.json?.user?.syncDiscordAvatar === false);
+  const syncOn = await req('/users/@me', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { syncDiscordAvatar: true },
+  });
+  check('discord picture sync can be turned back on', syncOn.json?.user?.syncDiscordAvatar === true);
+
+  check(
+    'syncing with no discord link is refused (400)',
+    (await req('/users/@me/discord/sync', { method: 'POST', token: ownerToken })).status === 400,
+  );
+
+  // While a picture follows Discord it is not the member's to set here, so a
+  // direct change is refused rather than quietly overwritten by the next message.
+  check(
+    'an administrator links a discord account',
+    (
+      await req(`/members/${avatarUser.user.id}`, {
+        method: 'PATCH',
+        token: ownerToken,
+        body: { discordId: '123456789012345678' },
+      })
+    ).status === 200,
+  );
+  check(
+    'a picture change is refused while syncing (409)',
+    (
+      await fetch(`${BASE}/users/@me/avatar`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${ownerToken}` },
+        body: avatarForm,
+      })
+    ).status === 409,
+  );
+  check(
+    'syncing with the bridge down is unavailable (503)',
+    (await req('/users/@me/discord/sync', { method: 'POST', token: ownerToken })).status === 503,
+  );
+
+  // Turning syncing off hands the picture back, so a change goes through again.
+  await req('/users/@me', { method: 'PATCH', token: ownerToken, body: { syncDiscordAvatar: false } });
+  check(
+    'with syncing off a picture change is allowed',
+    (
+      await fetch(`${BASE}/users/@me/avatar`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${ownerToken}` },
+        body: avatarForm,
+      })
+    ).status === 200,
+  );
+
+  // Leave the account as it was found for the checks that follow.
+  await req(`/members/${avatarUser.user.id}`, { method: 'PATCH', token: ownerToken, body: { discordId: null } });
+  await req('/users/@me', { method: 'PATCH', token: ownerToken, body: { syncDiscordAvatar: true } });
+  await req('/users/@me/avatar', { method: 'DELETE', token: ownerToken });
+
   // --- Profile customization ---
   const profileUserId = avatarUser.user.id;
   const freshProfile = await req(`/users/${profileUserId}/profile`, { token: ownerToken });

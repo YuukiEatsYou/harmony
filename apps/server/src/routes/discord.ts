@@ -10,6 +10,7 @@ import type { DiscordOAuthService } from '../auth/discord-oauth.ts';
 import type { AuthService } from '../auth/service.ts';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
 import type { Database } from '../db/index.ts';
+import { findUserById } from '../db/users.ts';
 import { STATE_TTL_MS } from '../auth/discord-oauth.ts';
 import {
   clearDiscordFlowCookie,
@@ -21,6 +22,7 @@ import { HttpError } from '../http/errors.ts';
 import { createRateLimiter } from '../http/rate-limit.ts';
 import { parseBody } from '../http/validation.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
+import type { BridgeService } from '../bridge/service.ts';
 import type { SettingsService } from '../settings/service.ts';
 import type { UserService } from '../users/service.ts';
 
@@ -32,6 +34,8 @@ export interface DiscordRouteDeps {
   auth: AuthService;
   users: UserService;
   hub: GatewayHub;
+  /** Used to pull a freshly linked member's picture over straight away. */
+  bridge: BridgeService;
 }
 
 export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDeps): void {
@@ -131,6 +135,13 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
         return backTo(reply, { discord_error: code });
       }
       deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: auth.user.id });
+      // A linked picture follows Discord by default, so catch it up now rather than
+      // leave a blank face until the next message or the daily sweep. Best-effort:
+      // a bridge that is down must not hold up the redirect.
+      const linked = findUserById(deps.db.sqlite, auth.user.id);
+      if (linked?.sync_discord_avatar === 1 && deps.bridge.avatarSyncReady()) {
+        await deps.bridge.syncDiscordAvatarFor(auth.user.id).catch(() => null);
+      }
       return backTo(reply, { discord: 'linked' });
     }
 

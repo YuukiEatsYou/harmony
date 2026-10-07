@@ -24,6 +24,7 @@
   let showTyping = $state(session.user?.showTyping ?? true);
   let notifyMajor = $state(session.user?.notifyMajor ?? true);
   let notifyMinor = $state(session.user?.notifyMinor ?? true);
+  let syncDiscordAvatar = $state(session.user?.syncDiscordAvatar ?? true);
   let fileInput = $state<HTMLInputElement | null>(null);
   let error = $state<string | null>(null);
   let message = $state<string | null>(null);
@@ -45,6 +46,13 @@
   let discordMessage = $state<string | null>(null);
 
   const picture = $derived(avatarUrl(session.user));
+
+  /**
+   * True while the picture is Discord's to set: linked, and syncing left on. Then
+   * the upload controls are hidden, since any picture set here would be replaced
+   * by the next sync.
+   */
+  const pictureSynced = $derived(Boolean(session.user?.discordId) && syncDiscordAvatar);
 
   type Tab = 'profile' | 'customize' | 'notifications' | 'password';
   let tab = $state<Tab>('profile');
@@ -175,6 +183,7 @@
     showTyping = data.user.showTyping;
     notifyMajor = data.user.notifyMajor;
     notifyMinor = data.user.notifyMinor;
+    syncDiscordAvatar = data.user.syncDiscordAvatar;
   }
 
   function fail(cause: unknown): void {
@@ -271,6 +280,46 @@
     }
   }
 
+  /**
+   * Turns the Discord picture sync on or off. Switching it on catches up at once,
+   * so the preview can change under the member's cursor.
+   */
+  async function saveSync(next: boolean): Promise<void> {
+    discordBusy = true;
+    discordError = null;
+    discordMessage = null;
+    try {
+      apply(
+        await api<MeResponse>('/users/@me', {
+          method: 'PATCH',
+          body: JSON.stringify({ syncDiscordAvatar: next }),
+        }),
+      );
+      discordMessage = next ? 'Syncing your picture with Discord.' : 'Discord syncing off. You can set your own picture now.';
+    } catch (cause) {
+      discordError = cause instanceof ApiError ? cause.message : String(cause);
+      // The change did not stick, so put the checkbox back where it was.
+      syncDiscordAvatar = session.user?.syncDiscordAvatar ?? syncDiscordAvatar;
+    } finally {
+      discordBusy = false;
+    }
+  }
+
+  /** Pulls the current Discord picture across on demand. */
+  async function syncDiscordNow(): Promise<void> {
+    discordBusy = true;
+    discordError = null;
+    discordMessage = null;
+    try {
+      apply(await api<MeResponse>('/users/@me/discord/sync', { method: 'POST' }));
+      discordMessage = 'Checked with Discord.';
+    } catch (cause) {
+      discordError = cause instanceof ApiError ? cause.message : String(cause);
+    } finally {
+      discordBusy = false;
+    }
+  }
+
   async function changePassword(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     passwordError = null;
@@ -325,19 +374,23 @@
             <span class="avatar large fallback">{initial(session.user)}</span>
           {/if}
 
-          <div class="editor-actions">
-            <button type="button" onclick={() => fileInput?.click()} disabled={busy}>Change picture</button>
-            {#if picture}
-              <button type="button" class="danger" onclick={removeAvatar} disabled={busy}>Remove</button>
-            {/if}
-            <input
-              class="file-input"
-              type="file"
-              accept={acceptAttribute}
-              bind:this={fileInput}
-              onchange={uploadAvatar}
-            />
-          </div>
+          {#if pictureSynced}
+            <p class="muted">Your picture follows your Discord account. Turn syncing off below to set one here.</p>
+          {:else}
+            <div class="editor-actions">
+              <button type="button" onclick={() => fileInput?.click()} disabled={busy}>Change picture</button>
+              {#if picture}
+                <button type="button" class="danger" onclick={removeAvatar} disabled={busy}>Remove</button>
+              {/if}
+              <input
+                class="file-input"
+                type="file"
+                accept={acceptAttribute}
+                bind:this={fileInput}
+                onchange={uploadAvatar}
+              />
+            </div>
+          {/if}
         </div>
 
         <form onsubmit={saveName}>
@@ -375,7 +428,23 @@
                 disconnect it.
               </p>
             {/if}
+            <label class="checkbox">
+              <input
+                type="checkbox"
+                checked={syncDiscordAvatar}
+                disabled={discordBusy}
+                onchange={(event) => void saveSync(event.currentTarget.checked)}
+              />
+              Sync profile picture with Discord
+            </label>
+            <p class="muted">
+              Keep the same picture here as on Discord. It is checked once a day and whenever you
+              send a bridged message.
+            </p>
             <div class="editor-actions">
+              {#if syncDiscordAvatar}
+                <button type="button" onclick={syncDiscordNow} disabled={discordBusy}>Sync now</button>
+              {/if}
               <button
                 type="button"
                 class="danger"

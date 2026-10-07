@@ -1035,4 +1035,25 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 38,
+    name: 'discord_avatar_sync',
+    up(db) {
+      /*
+       * Whether a member's picture follows their linked Discord account, on by
+       * default, alongside the Discord picture revision last imported and when the
+       * daily sweep last checked it. The revision is the CDN hash, or the whole
+       * URL for an address whose shape we do not recognize; a bridged message
+       * compares it to tell "their picture changed" from "unchanged" without
+       * asking Discord, and the stamp keeps the sweep from re-fetching a member it
+       * saw recently. Both are meaningful only for a linked `user` account: a
+       * stand-in has no toggle and follows Discord regardless.
+       */
+      db.exec(`
+        ALTER TABLE users ADD COLUMN sync_discord_avatar INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE users ADD COLUMN discord_avatar_rev TEXT;
+        ALTER TABLE users ADD COLUMN discord_avatar_checked_at TEXT;
+      `);
+    },
+  },
 ];
