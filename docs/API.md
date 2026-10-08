@@ -790,12 +790,15 @@ reaches another.
 A member may also share their screen. Every connection carries a receive-only video line for the
 member's own screen beside the microphone line, and a send-only video slot per other member, so
 starting or stopping a share negotiates nothing: the client attaches its screen to the line that is
-already there and the relay copies packets into the slots, or stops. The relay is the same selective
-forwarder, so it re-encodes nothing; a viewer only gets a picture at a keyframe, so the server
-forwards a viewer's picture-loss request to the sharer and asks for one itself when a viewer joins
-mid-share. The bound a screen is captured at is the `screenShareHeight` and `screenShareFrameRate`
-settings, published in `GET /api/v1/meta`; the relay never transcodes, so a higher bound is more
-bandwidth for the sharer and every viewer.
+already there and the relay copies packets into the slots, or stops. A share is announced to the room
+as a `sharing` flag on the member's voice state, but watching is opt-in: the relay only forwards a
+share to the members that named the sharer in their `watching` set (see the `PATCH` below), so a
+screen costs no bandwidth until somebody asks for it. The relay is the same selective forwarder, so
+it re-encodes nothing; a viewer only gets a picture at a keyframe, so the server forwards a viewer's
+picture-loss request to the sharer and asks for one itself when a viewer opts in. The bound a screen
+is captured at is the `screenShareHeight` and `screenShareFrameRate` settings, published in
+`GET /api/v1/meta`; the relay never transcodes, so a higher bound is more bandwidth for the sharer
+and every viewer.
 
 #### `GET /api/v1/voice` — `ViewChannels`
 
@@ -816,7 +819,7 @@ the join, and fires `VOICE_STATE_UPDATE` to everyone who can see the channel. Re
 `409 voice_full`.
 
 ```json
-{ "channelId": "…", "members": [{ "channelId": "…", "user": { /* User */ }, "muted": false, "deafened": false }] }
+{ "channelId": "…", "members": [{ "channelId": "…", "user": { /* User */ }, "muted": false, "deafened": false, "sharing": false }] }
 ```
 
 #### `POST /api/v1/channels/:channelId/voice/answer` — auth
@@ -831,11 +834,16 @@ when the caller is not in that channel.
 #### `PATCH /api/v1/channels/:channelId/voice` — auth
 
 ```json
-{ "muted": true, "deafened": false }
+{ "muted": true, "deafened": false, "sharing": false, "watching": ["…"] }
 ```
 
-Sets the caller's own mute and deafen flags; either may be omitted. Returns the updated room and
-fires `VOICE_STATE_UPDATE`. `409 not_in_voice` if the caller is not in that channel.
+Sets the caller's own mute, deafen, screen-sharing and screen-watching state; every field may be
+omitted. `sharing` tells the room this member's screen is live (the client sets it when its capture
+starts or stops). `watching` is the full set of member ids whose screens this client wants, replacing
+whatever it had before: the relay forwards a share only to the members that named its owner, which is
+the whole bandwidth opt-in. Ids that are not another member in the same channel are ignored. Returns
+the updated room and fires `VOICE_STATE_UPDATE`. `409 not_in_voice` if the caller is not in that
+channel.
 
 #### `DELETE /api/v1/channels/:channelId/voice` — auth
 
@@ -3034,7 +3042,6 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `COMMANDS_UPDATE` | `{}`, to every connected member whenever a bot changes its slash command set; refetch `GET /commands` |
 | `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 | `VOICE_SIGNAL` | `VoiceSignalPayload`, to the member's own sessions only: an SDP offer for their voice connection |
-| `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
 role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,

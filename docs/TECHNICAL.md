@@ -213,18 +213,23 @@ member joins, a receive-only video line for that member's own screen beside the
 microphone line, and a send-only video slot per other member for that member's
 screen. Nothing is negotiated when a share starts or stops: the client attaches
 its screen to the line that is already there with `replaceTrack`, and the relay
-begins or stops copying packets, so renegotiation stays on join and leave. werift
-offers VP8 for video, which every desktop browser can produce from
-getDisplayMedia. Video needs one thing audio does not: a viewer only gets a
-picture at a keyframe, so the relay forwards a viewer's picture-loss request to
-the sharer and asks for one itself when a viewer attaches mid-share. One subtlety
-is worth remembering: a browser answers a transceiver it creates for a
-receive-only offer with its own default direction, which negotiates the line
-inactive, so the client flips that line to send-only before answering. The screen
-is captured at a bound the owner sets (`screenShareHeight`, `screenShareFrameRate`,
-published in `GET /meta`); the relay never re-encodes, so a higher bound is more
-bandwidth for the sharer and every viewer.
-rather than reworked in.
+begins or stops copying packets, so renegotiation stays on join and leave.
+Watching a screen is opt-in. A share is announced to the room as a `sharing` flag
+on the member's voice state, but the relay only forwards a producer's screen to
+the consumers that named them in their `watching` set (sent through
+`PATCH /channels/:id/voice`), so a screen costs no bandwidth until somebody asks
+for it; opting in asks the producer for a keyframe so the picture starts at once,
+and opting out stops the forwarding. werift offers VP8 for video, which every
+desktop browser can produce from getDisplayMedia. Video needs one thing audio does
+not: a viewer only gets a picture at a keyframe, so the relay forwards a viewer's
+picture-loss request to the sharer. One subtlety is worth remembering: a browser
+answers a transceiver it creates for a receive-only offer with its own default
+direction, which negotiates the line inactive, so the client flips that line to
+send-only before answering. The screen is captured at a bound the owner sets
+(`screenShareHeight`, `screenShareFrameRate`, published in `GET /meta`); the relay
+never re-encodes, so a higher bound is more bandwidth for the sharer and every
+viewer. A watched screen shows in a floating window the viewer can drag by its
+header and resize from the corner.
 
 ## Search
 

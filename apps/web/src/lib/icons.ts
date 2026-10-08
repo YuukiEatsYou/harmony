@@ -36,4 +36,5 @@ export type IconName =
   | 'headphones'
   | 'phone-off'
   | 'screen'
+  | 'play'
   | 'expand';

@@ -202,7 +202,7 @@
         {/if}
         <span class="voice-member-name">{entry.user.displayName ?? entry.user.username}</span>
         <span class="voice-member-tail">
-          {#if voice.screens[entry.user.id]}
+          {#if entry.sharing}
             <span class="voice-member-sharing" title="Sharing their screen"><Icon name="screen" size={12} /></span>
           {/if}
           {#if entry.muted}
@@ -325,17 +325,20 @@
           {:else if voice.connectionState === 'failed'}Connection failed
           {:else if voice.connectionState === 'disconnected'}Reconnecting…
           {:else}Voice connected{/if}
-          {#if !voice.connecting && voice.connectionState !== 'failed'}
-            <span class="voice-signal" title="Live audio: microphone sending, incoming audio">
-              <span class="voice-signal-icon" class:on={voice.sending}>
-                <Icon name={voice.muted ? 'mic-off' : 'mic'} size={12} />
-              </span>
-              <span class="voice-signal-icon" class:on={voice.receiving}>
-                <Icon name="volume" size={12} />
-              </span>
-            </span>
-          {/if}
         </span>
+        {#if voice.sharing}
+          <span class="voice-bar-sharing"><Icon name="screen" size={12} /> Sharing your screen</span>
+        {/if}
+        {#if !voice.connecting && voice.connectionState !== 'failed'}
+          <span class="voice-signal" title="Live audio: microphone sending, incoming audio">
+            <span class="voice-signal-icon" class:on={voice.sending}>
+              <Icon name={voice.muted ? 'mic-off' : 'mic'} size={12} />
+            </span>
+            <span class="voice-signal-icon" class:on={voice.receiving}>
+              <Icon name="volume" size={12} />
+            </span>
+          </span>
+        {/if}
         {#if voice.error}<span class="voice-bar-error">{voice.error}</span>{/if}
       </div>
       <button
@@ -362,7 +365,7 @@
       <button
         type="button"
         class="voice-bar-button"
-        class:on={voice.sharing}
+        class:sharing={voice.sharing}
         title={voice.sharing ? 'Stop sharing' : 'Share screen'}
         aria-label={voice.sharing ? 'Stop sharing your screen' : 'Share your screen'}
         onclick={() => (voice.sharing ? voice.stopScreen() : voice.shareScreen())}

@@ -159,6 +159,8 @@ export interface VoiceState {
   muted: boolean;
   /** The member stopped hearing everyone, which also mutes them, as on Discord. */
   deafened: boolean;
+  /** The member is sharing their screen. */
+  sharing: boolean;
 }
 
 export interface Attachment {

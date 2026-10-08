@@ -73,6 +73,16 @@ interface RemoteAudio {
   gain: GainNode;
 }
 
+/** One shared screen as the UI sees it: whose it is, and whether we watch it. */
+export interface ScreenTile {
+  userId: string;
+  name: string;
+  /** Whether this client has opted in to watch the stream. */
+  watching: boolean;
+  /** The picture, once the relay has actually delivered one. */
+  stream: MediaStream | null;
+}
+
 class VoiceStore {
   /** The channel this member is connected to, or null. */
   channelId = $state<string | null>(null);
@@ -99,8 +109,6 @@ class VoiceStore {
   receiving = $state(false);
   /** Whether this member is sharing their screen right now. */
   sharing = $state(false);
-  /** Remote screens, keyed by the member sharing them. */
-  screens = $state<Record<string, MediaStream>>({});
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
@@ -118,6 +126,10 @@ class VoiceStore {
   /** The member's own screen capture, while it is being shared. */
   #display: MediaStream | null = null;
   #screenSender: RTCRtpSender | null = null;
+  /** Pictures received for each member, whether or not they still share. */
+  #receivedScreens = $state<Record<string, MediaStream>>({});
+  /** Members whose screens this client has opted in to watch. */
+  #watching = $state<Record<string, boolean>>({});
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -414,6 +426,9 @@ class VoiceStore {
         this.#offer = null;
         await this.#answer(buffered);
       }
+      // A rebuilt call recreates the membership server-side with default flags, so
+      // the member's mute, deafen and watched screens are re-sent once it is up.
+      this.#sync();
     } catch (cause) {
       this.error = describeFailure(cause);
       await this.#disconnect();
@@ -427,6 +442,7 @@ class VoiceStore {
   async leave(): Promise<void> {
     this.#intended = null;
     this.#recoverAttempts = 0;
+    this.#watching = {};
     this.#cancelRecover();
     await this.#disconnect();
   }
@@ -437,7 +453,7 @@ class VoiceStore {
     const channelId = this.channelId;
     this.channelId = null;
     this.members = [];
-    this.screens = {};
+    this.#receivedScreens = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
@@ -513,20 +529,63 @@ class VoiceStore {
   }
 
   /**
+   * The screens to show, one per sharing member other than yourself. This is the
+   * roster's say-so, not the received track's: the relay only forwards a screen to
+   * the viewers that opted in, so a sharing member appears as a watch prompt until
+   * this client asks for it, and the tile disappears the moment their share stops
+   * rather than freezing on its last frame.
+   */
+  get screenTiles(): ScreenTile[] {
+    const me = session.user?.id ?? null;
+    const tiles: ScreenTile[] = [];
+    for (const entry of this.members) {
+      const id = entry.user.id;
+      if (!entry.sharing || id === me) continue;
+      tiles.push({
+        userId: id,
+        name: entry.user.displayName ?? entry.user.username,
+        watching: this.#watching[id] === true,
+        stream: this.#receivedScreens[id] ?? null,
+      });
+    }
+    return tiles;
+  }
+
+  /**
+   * Starts watching a member's screen. The relay forwards nothing until this is
+   * sent, which is what keeps the stream off the wire for everyone who never opted
+   * in; the server asks the producer for a keyframe, so the picture starts at once.
+   */
+  watchScreen(userId: string): void {
+    if (this.#watching[userId]) return;
+    this.#watching = { ...this.#watching, [userId]: true };
+    this.#sync();
+  }
+
+  /** Stops watching a member's screen, which stops the relay forwarding it. */
+  unwatchScreen(userId: string): void {
+    if (!this.#watching[userId]) return;
+    const next = { ...this.#watching };
+    delete next[userId];
+    this.#watching = next;
+    this.#sync();
+  }
+
+  /**
    * Registers a member's screen for the UI. A remote video line exists from the
-   * moment a call starts, so a track here is not the same as a live share: the
+   * moment a call starts, so a received track is not the same as a live share: the
    * track stays muted until the relay actually sends a picture, and mute and
-   * unmute are what tell an active share from an idle line.
+   * unmute are what tell an idle line from a live one.
    */
   #attachScreen(userId: string, stream: MediaStream, track: MediaStreamTrack): void {
     const show = (): void => {
-      this.screens = { ...this.screens, [userId]: stream };
+      this.#receivedScreens = { ...this.#receivedScreens, [userId]: stream };
     };
     const hide = (): void => {
-      if (this.screens[userId] !== stream) return;
-      const next = { ...this.screens };
+      if (this.#receivedScreens[userId] !== stream) return;
+      const next = { ...this.#receivedScreens };
       delete next[userId];
-      this.screens = next;
+      this.#receivedScreens = next;
     };
     if (!track.muted) show();
     track.addEventListener('unmute', show);
@@ -569,6 +628,7 @@ class VoiceStore {
       await transceiver.sender.replaceTrack(track);
       this.#screenSender = transceiver.sender;
       this.sharing = true;
+      this.#sync();
       // The browser's own Stop sharing button ends the track; follow it.
       track.addEventListener('ended', () => void this.stopScreen());
     } catch (cause) {
@@ -585,6 +645,7 @@ class VoiceStore {
   async stopScreen(): Promise<void> {
     if (!this.sharing && !this.#display) return;
     this.sharing = false;
+    this.#sync();
     for (const track of this.#display?.getTracks() ?? []) track.stop();
     this.#display = null;
     const sender = this.#screenSender;
@@ -607,7 +668,12 @@ class VoiceStore {
     if (!this.channelId) return;
     void api(`/channels/${this.channelId}/voice`, {
       method: 'PATCH',
-      body: JSON.stringify({ muted: this.muted, deafened: this.deafened }),
+      body: JSON.stringify({
+        muted: this.muted,
+        deafened: this.deafened,
+        sharing: this.sharing,
+        watching: Object.keys(this.#watching),
+      }),
     }).catch(() => undefined);
   }
 
@@ -621,7 +687,8 @@ class VoiceStore {
     this.#display = null;
     this.#screenSender = null;
     this.sharing = false;
-    this.screens = {};
+    this.#receivedScreens = {};
+    this.#watching = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;

@@ -144,6 +144,8 @@
     <path d="M12 16v4" />
     <path d="M12 12.5v-5" />
     <path d="M9.5 10 12 7.5 14.5 10" />
+  {:else if name === 'play'}
+    <path d="M8 5.5v13l10-6.5z" />
   {:else if name === 'expand'}
     <path d="M9 4H4v5" />
     <path d="M15 4h5v5" />

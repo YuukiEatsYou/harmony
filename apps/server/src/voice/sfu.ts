@@ -42,6 +42,13 @@ export interface Sfu {
   answer(userId: string, sdp: string): Promise<void>;
   /** Removes a member, closing their connection and re-offering the others. */
   leave(userId: string): Promise<void>;
+  /**
+   * Starts or stops forwarding one producer's screen to one consumer. A screen is
+   * only relayed to the consumers that asked for it, so a member who never opts in
+   * costs no bandwidth; asking for one that is live requests a keyframe so the
+   * picture starts immediately.
+   */
+  watch(userId: string, producerId: string, watching: boolean): void;
   /** Closes every connection; on shutdown. */
   close(): void;
 }
@@ -77,6 +84,8 @@ interface Peer {
   pipes: Map<string, Array<() => void>>;
   /** Screen pipes per producer, including the keyframe requests they carry. */
   videoPipes: Map<string, Array<() => void>>;
+  /** Producers whose screens this member has opted in to watch, by member id. */
+  watching: Set<string>;
   /** Serialises re-offers: only one may be outstanding on a connection. */
   queue: Promise<void>;
   /** True while an offer is out and unanswered; a further change waits for it. */
@@ -148,23 +157,26 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   }
 
   /**
-   * Starts piping a producer's screen into a consumer's outbound slot, and wires
-   * the consumer's picture-loss requests through to the producer so a viewer that
-   * joins mid-stream, or drops frames, gets a keyframe instead of a frozen tile.
+   * Starts piping a producer's screen into a consumer's outbound slot. Nothing is
+   * written until the consumer opts in to watch, so a screen costs a viewer no
+   * bandwidth until they ask for it; the pipe is still subscribed, which is what
+   * lets the relay learn the producer's SSRC even with no viewer.
    */
-  function pipeVideo(producer: Peer, consumer: Peer, slot: MediaStreamTrack, ask: () => void): void {
+  function pipeVideo(producer: Peer, consumer: Peer, slot: MediaStreamTrack): void {
     if (!producer.videoInbound || consumer.videoPipes.has(producer.userId)) return;
-    const scripts: Array<() => void> = [];
     const rtp = producer.videoInbound.onReceiveRtp.subscribe((packet) => {
       // The SSRC is only known once the producer has sent something, and it is
       // what a keyframe request has to name.
-      if (producer.videoSsrc === null) producer.videoSsrc = packet.header.ssrc;
-      if (!consumer.closed) slot.writeRtp(packet);
+      const first = producer.videoSsrc === null;
+      if (first) producer.videoSsrc = packet.header.ssrc;
+      if (consumer.closed || !consumer.watching.has(producer.userId)) return;
+      // The first forwarded packet is rarely a keyframe, so ask for one now.
+      if (first) requestKeyframe(producer);
+      slot.writeRtp(packet);
     });
-    scripts.push(() => rtp.unSubscribe());
-    consumer.videoPipes.set(producer.userId, scripts);
-    // A viewer that has just attached hears nothing until a keyframe arrives.
-    ask();
+    consumer.videoPipes.set(producer.userId, [() => rtp.unSubscribe()]);
+    // A viewer that opted in before the picture arrived needs a keyframe to start.
+    if (consumer.watching.has(producer.userId)) requestKeyframe(producer);
   }
 
   /** A consumer's outbound slot carrying a producer's microphone, made on demand. */
@@ -194,7 +206,9 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     source.id = producer.userId;
     const transceiver = consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
     consumer.videoOutbound.set(producer.userId, slot);
-    pipeVideo(producer, consumer, slot, () => requestKeyframe(producer));
+    pipeVideo(producer, consumer, slot);
+    // A viewer that has just started, or dropped frames, asks the producer for a
+    // keyframe through the consumer's own line rather than a frozen tile.
     transceiver.sender.onPictureLossIndication.subscribe(() => requestKeyframe(producer));
   }
 
@@ -209,7 +223,11 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     }
   }
 
-  /** Drops a consumer's slots and pipes for a producer, used when one leaves. */
+  /**
+   * Drops a consumer's slots and pipes for a producer, used when one leaves. The
+   * consumer's opt-in is kept, so a producer that rejoins is streamed again without
+   * the viewer having to ask a second time.
+   */
   function disconnect(consumer: Peer, producerId: string): void {
     consumer.outbound.delete(producerId);
     for (const unsubscribe of consumer.pipes.get(producerId) ?? []) unsubscribe();
@@ -236,6 +254,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
         videoOutbound: new Map(),
         pipes: new Map(),
         videoPipes: new Map(),
+        watching: new Set(),
         queue: Promise.resolve(),
         awaitingAnswer: false,
         needsOffer: false,
@@ -251,7 +270,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
           for (const consumer of room(channelId)) {
             if (consumer === peer) continue;
             const slot = consumer.videoOutbound.get(userId);
-            if (slot) pipeVideo(peer, consumer, slot, () => requestKeyframe(peer));
+            if (slot) pipeVideo(peer, consumer, slot);
           }
           return;
         }
@@ -295,6 +314,16 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       } catch {
         // Closing a connection that already failed is nothing to report.
       }
+    },
+
+    watch(userId, producerId, watching) {
+      const consumer = peers.get(userId);
+      if (!consumer || consumer.closed) return;
+      if (watching) consumer.watching.add(producerId);
+      else consumer.watching.delete(producerId);
+      // A viewer that just opted in sees nothing until the producer sends a keyframe.
+      const producer = peers.get(producerId);
+      if (watching && producer) requestKeyframe(producer);
     },
 
     close() {

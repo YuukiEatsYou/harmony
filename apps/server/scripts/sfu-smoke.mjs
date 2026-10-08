@@ -79,32 +79,39 @@ async function main() {
     c.pc.connectionState,
   ].join(','));
 
-  // Two microphones and one screen, each pushing a steady stream.
+  // Two microphones push a steady stream, and A also pushes a screen. Nobody has
+  // opted in to watch yet, so the screen must not reach anyone.
   let seq = 1000;
   let timestamp = 0;
   let vseq = 5000;
   let vtimestamp = 0;
-  for (let i = 0; i < 40; i += 1) {
-    for (const sender of [a, b]) {
-      sender.mic.writeRtp(
+
+  /** One batch of audio from both senders plus one screen frame from A. */
+  async function push(frames) {
+    for (let i = 0; i < frames; i += 1) {
+      for (const sender of [a, b]) {
+        sender.mic.writeRtp(
+          new RtpPacket(
+            new RtpHeader({ version: 2, payloadType: 111, sequenceNumber: seq, timestamp, ssrc: sender.mic.ssrc ?? 1 }),
+            Buffer.alloc(40, 7),
+          ),
+        );
+      }
+      a.cam.writeRtp(
         new RtpPacket(
-          new RtpHeader({ version: 2, payloadType: 111, sequenceNumber: seq, timestamp, ssrc: sender.mic.ssrc ?? 1 }),
-          Buffer.alloc(40, 7),
+          new RtpHeader({ version: 2, payloadType: 96, sequenceNumber: vseq, timestamp: vtimestamp, ssrc: a.cam.ssrc ?? 2 }),
+          Buffer.alloc(120, 9),
         ),
       );
+      seq += 1;
+      timestamp += 960;
+      vseq += 1;
+      vtimestamp += 3000;
+      await sleep(20);
     }
-    a.cam.writeRtp(
-      new RtpPacket(
-        new RtpHeader({ version: 2, payloadType: 96, sequenceNumber: vseq, timestamp: vtimestamp, ssrc: a.cam.ssrc ?? 2 }),
-        Buffer.alloc(120, 9),
-      ),
-    );
-    seq += 1;
-    timestamp += 960;
-    vseq += 1;
-    vtimestamp += 3000;
-    await sleep(20);
   }
+
+  await push(40);
   await sleep(1000);
 
   const audible = (client) => client.tracks.filter((track) => track.kind === 'audio' && track.received > 0);
@@ -116,9 +123,27 @@ async function main() {
   // slot exists before B's audio does). B is the only other sender in this room,
   // so A must have exactly one audible track: the one that path builds.
   check('an earlier member hears a later sender', audible(a).length === 1, JSON.stringify(a.tracks));
-  // Only A shares a screen, so C sees exactly one, and A never sees its own.
-  check('a receiver sees the shared screen', visible(c).length === 1, JSON.stringify(c.tracks));
+  // A screen is opt-in: with nobody watching, the relay forwards it to no one.
+  check(
+    'a screen is not relayed until a viewer opts in',
+    visible(b).length === 0 && visible(c).length === 0,
+    JSON.stringify(c.tracks),
+  );
   check('a sharer is not sent its own screen', visible(a).length === 0, JSON.stringify(a.tracks));
+
+  // C opts in: A's screen is now forwarded, to C alone.
+  sfu.watch('C', 'A', true);
+  await push(40);
+  await sleep(1000);
+  check('the viewer sees the shared screen', visible(c).length === 1, JSON.stringify(c.tracks));
+  check('a non-viewer still receives no screen', visible(b).length === 0, JSON.stringify(b.tracks));
+
+  // C stops watching: the relay must stop forwarding, which is the bandwidth saving.
+  const watched = visible(c)[0]?.received ?? 0;
+  sfu.watch('C', 'A', false);
+  await push(20);
+  await sleep(500);
+  check('opting out stops the screen', (visible(c)[0]?.received ?? 0) === watched, `${watched} -> ${visible(c)[0]?.received ?? 0}`);
   // The relayed tracks name their producer via the SDP msid, which is how a
   // browser client tells whose audio each track is (a speaking ring needs that).
   check(

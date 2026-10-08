@@ -47,15 +47,29 @@ export const createChannelSchema = z.object({
 });
 export type CreateChannelInput = z.infer<typeof createChannelSchema>;
 
-/** Muting or deafening yourself in the voice channel you are in. */
+/** Muting, deafening or screen sharing in the voice channel you are in. */
 export const voiceStatePatchSchema = z
   .object({
     muted: z.boolean().optional(),
     deafened: z.boolean().optional(),
+    sharing: z.boolean().optional(),
+    /**
+     * The members whose screens this client wants to watch. Full replacement: an
+     * empty list stops every stream. The relay only forwards a screen to the
+     * viewers that named it, so this is the whole opt-in. Ids outside the caller's
+     * own room are ignored server-side, and the ceiling is generous next to the
+     * room-size limit.
+     */
+    watching: z.array(z.string().min(1).max(64)).max(64).optional(),
   })
-  .refine((value) => value.muted !== undefined || value.deafened !== undefined, {
-    message: 'Nothing to update.',
-  });
+  .refine(
+    (value) =>
+      value.muted !== undefined ||
+      value.deafened !== undefined ||
+      value.sharing !== undefined ||
+      value.watching !== undefined,
+    { message: 'Nothing to update.' },
+  );
 export type VoiceStatePatchInput = z.infer<typeof voiceStatePatchSchema>;
 
 /** The client's SDP answer to a voice offer. Generous ceiling; it is one document. */

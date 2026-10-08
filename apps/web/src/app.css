@@ -981,16 +981,24 @@ button.server-name:hover:not(:disabled) {
 }
 
 .voice-bar-status {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
   color: var(--h-text-muted);
   font-size: 0.74rem;
 }
 
+/* Shown while this member shares, so it is more than a button's color. */
+.voice-bar-sharing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--h-ok);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
 /* Live audio readout: one glyph for the microphone, one for incoming audio.
    Either dark means that direction is carrying nothing, which is exactly the
-   thing a silently broken call hides. */
+   thing a silently broken call hides. On its own line, so it never crowds the
+   buttons. */
 .voice-signal {
   display: inline-flex;
   gap: 0.25rem;
@@ -1038,6 +1046,13 @@ button.server-name:hover:not(:disabled) {
   background: var(--h-accent-subtle);
 }
 
+/* A filled button while sharing, so it reads as active whatever the palette. */
+.voice-bar-button.sharing {
+  border-color: var(--h-accent);
+  background: var(--h-accent);
+  color: var(--h-on-accent);
+}
+
 /* Your own mic button lights up while it is picking you up, so a live
    microphone is obvious without leaning on the level meter alone. Muting or
    deafening disables the track, which silences the meter, so this never
@@ -1047,24 +1062,31 @@ button.server-name:hover:not(:disabled) {
   outline-offset: 1px;
 }
 
-/* Shared screens, floating over the content while somebody is sharing. */
+/* A shared screen floats in its own window over the chat. It opens bottom-right and
+   small so it stays out of the conversation, and the viewer can drag it by its
+   header and resize it from the corner like any other floating panel. */
 .screen-share {
   display: flex;
   position: fixed;
-  top: 3.25rem;
-  left: 50%;
+  right: 1rem;
+  bottom: 1rem;
   z-index: 50;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 0.5rem;
-  max-width: min(960px, 94vw);
-  max-height: calc(100vh - 6rem);
-  transform: translateX(-50%);
+  width: 380px;
+  height: 240px;
+  min-width: 220px;
+  min-height: 140px;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 2rem);
 }
 
 .screen-tile {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
   border: 1px solid var(--h-border-strong);
   border-radius: var(--h-radius);
   background: var(--h-bg-deep);
@@ -1073,6 +1095,7 @@ button.server-name:hover:not(:disabled) {
 
 .screen-tile-head {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
@@ -1082,6 +1105,34 @@ button.server-name:hover:not(:disabled) {
   font-size: 0.78rem;
 }
 
+/* The header's grip: a real button, so it is focusable and drops no affordances,
+   that only exists to move the window. */
+.screen-tile-grip {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: grab;
+  touch-action: none;
+}
+
+.screen-tile-grip:active {
+  cursor: grabbing;
+}
+
+.screen-tile-grip:hover:not(:disabled) {
+  background: none;
+  box-shadow: none;
+}
+
 .screen-tile-name {
   display: inline-flex;
   align-items: center;
@@ -1089,6 +1140,12 @@ button.server-name:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.screen-tile-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 0.15rem;
 }
 
 .screen-tile-action {
@@ -1113,10 +1170,77 @@ button.server-name:hover:not(:disabled) {
 
 .screen-tile video {
   display: block;
+  flex: 1 1 auto;
   width: 100%;
-  max-width: 440px;
-  max-height: 60vh;
+  min-height: 0;
+  object-fit: contain;
   background: #000;
+}
+
+/* Shown until the viewer opts in, or while a watched picture is starting. */
+.screen-tile-empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background: var(--h-bg-deep);
+}
+
+.screen-tile-hint {
+  margin: 0;
+  color: var(--h-text-muted);
+  font-size: 0.8rem;
+}
+
+.screen-watch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--h-border-strong);
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg-elevated);
+  color: var(--h-text);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.screen-watch:hover:not(:disabled) {
+  border-color: var(--h-accent);
+  background: var(--h-accent);
+  color: var(--h-on-accent);
+}
+
+/* A corner grip, drawn with two borders so it needs no icon. */
+.screen-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.screen-resize::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--h-text-muted);
+  border-bottom: 2px solid var(--h-text-muted);
+  border-radius: 0 0 2px 0;
+  opacity: 0.7;
+}
+
+.screen-resize:hover::after {
+  opacity: 1;
 }
 
 .voice-bar-button.danger:hover:not(:disabled) {
