@@ -329,6 +329,14 @@ export interface VoiceRoomResponse {
   members: VoiceState[];
 }
 
+/**
+ * Every voice channel that currently has members, for a client that has just
+ * loaded: the roster otherwise only arrives as changes are broadcast.
+ */
+export interface VoiceRoomsResponse {
+  channels: Array<{ channelId: string; members: VoiceState[] }>;
+}
+
 export interface InviteListResponse {
   invites: Invite[];
 }

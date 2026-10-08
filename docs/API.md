@@ -787,6 +787,17 @@ relay. When someone joins or leaves, every other member is re-offered once. The 
 mixes or re-encodes: it forwards each member's encoded audio to the others, so no member's IP ever
 reaches another.
 
+#### `GET /api/v1/voice` — `ViewChannels`
+
+```json
+{ "channels": [{ "channelId": "…", "members": [ /* VoiceState */ ] }] }
+```
+
+Every voice channel that currently has members, and who. A client fetches this
+once on load, since `VOICE_STATE_UPDATE` only arrives as changes are made; without
+it a client that loads while somebody is already talking would show an empty room.
+Only channels the caller can see are included.
+
 #### `POST /api/v1/channels/:channelId/voice` — `ConnectVoice`
 
 Joins the channel, or moves the caller there. Returns `VoiceRoomResponse`, the room's members after

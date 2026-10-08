@@ -238,6 +238,7 @@ class ChatStore {
     await members.load();
     await roster.load();
     await commands.load();
+    await voice.load().catch(() => {});
     this.#gateway.connect();
   }
 

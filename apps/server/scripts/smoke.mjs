@@ -891,6 +891,12 @@ try {
       (frame) => frame.t === 'VOICE_STATE_UPDATE' && frame.d?.channelId === voiceId && frame.d?.members?.length === 1,
     ),
   );
+  check(
+    'a freshly loaded client can fetch who is in voice',
+    (await req('/voice', { token: bobToken })).json?.channels?.some(
+      (entry) => entry.channelId === voiceId && entry.members?.length === 1,
+    ) === true,
+  );
 
   const muted = await req(`/channels/${voiceId}/voice`, {
     method: 'PATCH',

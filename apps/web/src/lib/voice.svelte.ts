@@ -1,5 +1,6 @@
 import type {
   VoiceRoomResponse,
+  VoiceRoomsResponse,
   VoiceSignalPayload,
   VoiceState,
   VoiceStateUpdatePayload,
@@ -45,6 +46,22 @@ class VoiceStore {
     } else if (frame.t === 'VOICE_SIGNAL') {
       const payload = frame.d as VoiceSignalPayload;
       if (payload.channelId === this.channelId) void this.#answer(payload.sdp);
+    }
+  }
+
+  /**
+   * Fetches who is in each voice channel now. Called once on load, since the
+   * per-channel events only arrive as changes are made; without it a client that
+   * loads while somebody is already talking would show an empty room.
+   */
+  async load(): Promise<void> {
+    try {
+      const data = await api<VoiceRoomsResponse>('/voice');
+      const rosters: Record<string, VoiceState[]> = {};
+      for (const entry of data.channels) rosters[entry.channelId] = entry.members;
+      this.rosters = rosters;
+    } catch {
+      // A failed load leaves the sidebar without rosters until the next event.
     }
   }
 

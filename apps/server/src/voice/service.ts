@@ -34,6 +34,8 @@ export interface VoiceService {
   answer(userId: string, sdp: string): Promise<void>;
   /** The members in one channel, for a REST response. */
   room(channelId: string): VoiceState[];
+  /** Every non-empty room the member may see, for a freshly loaded client. */
+  snapshot(userId: string): Array<{ channelId: string; members: VoiceState[] }>;
   /** The voice channel a member is in, or null. */
   channelOf(userId: string): string | null;
   /** Drops a member who has gone fully offline, i.e. has no other live connection. */
@@ -121,6 +123,16 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
   return {
     room,
     channelOf: (userId) => members.get(userId)?.channelId ?? null,
+    snapshot(userId) {
+      const access = channelAccessFor(sqlite, userId);
+      const result: Array<{ channelId: string; members: VoiceState[] }> = [];
+      for (const channelId of rooms.keys()) {
+        if (!canAccessChannel(sqlite, access, channelId)) continue;
+        const occupants = room(channelId);
+        if (occupants.length > 0) result.push({ channelId, members: occupants });
+      }
+      return result;
+    },
     leave,
     handleOffline: (userId) => {
       void leave(userId);

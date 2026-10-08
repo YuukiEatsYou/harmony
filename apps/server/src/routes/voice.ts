@@ -1,5 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import { Permission, voiceAnswerSchema, voiceStatePatchSchema, type VoiceRoomResponse } from '@harmony/shared';
+import {
+  Permission,
+  voiceAnswerSchema,
+  voiceStatePatchSchema,
+  type VoiceRoomResponse,
+  type VoiceRoomsResponse,
+} from '@harmony/shared';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
 import { HttpError } from '../http/errors.ts';
 import { parseBody } from '../http/validation.ts';
@@ -21,6 +27,16 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
   function room(channelId: string): VoiceRoomResponse {
     return { channelId, members: voice.room(channelId) };
   }
+
+  /**
+   * Which voice channels have members right now. A client fetches this once on
+   * load, since the per-channel events only arrive as changes are made.
+   */
+  app.get('/api/v1/voice', async (request) => {
+    const auth = requirePermission(request, Permission.ViewChannels);
+    const body: VoiceRoomsResponse = { channels: voice.snapshot(auth.user.id) };
+    return body;
+  });
 
   app.post('/api/v1/channels/:channelId/voice', async (request) => {
     const auth = requirePermission(request, Permission.ConnectVoice);
