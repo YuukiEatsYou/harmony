@@ -22,6 +22,7 @@
     "start": "npm run start --workspace @harmony/server",
     "smoke": "npm run smoke --workspace @harmony/server",
     "smoke:bridge": "npm run smoke:bridge --workspace @harmony/server",
+    "smoke:sfu": "npm run smoke:sfu --workspace @harmony/server",
     "smoke:text": "npm run smoke:text --workspace @harmony/web",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
