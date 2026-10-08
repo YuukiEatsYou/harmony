@@ -969,8 +969,29 @@ button.server-name:hover:not(:disabled) {
 }
 
 .voice-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   color: var(--h-text-muted);
   font-size: 0.74rem;
+}
+
+/* Live audio readout: one glyph for the microphone, one for incoming audio.
+   Either dark means that direction is carrying nothing, which is exactly the
+   thing a silently broken call hides. */
+.voice-signal {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.voice-signal-icon {
+  display: inline-flex;
+  color: var(--h-text-faint);
+  transition: color var(--h-duration) var(--h-ease);
+}
+
+.voice-signal-icon.on {
+  color: var(--h-ok);
 }
 
 .voice-bar-error {
@@ -1018,6 +1039,46 @@ button.server-name:hover:not(:disabled) {
   border-color: var(--h-error);
   background: var(--h-error);
   color: #fff;
+}
+
+/* The voice bar's failed-join state: the same bar, but it must be allowed to
+   wrap, since a permission message is longer than the one line the connected
+   status is. */
+.voice-bar.error {
+  border-top-color: var(--h-error);
+  align-items: flex-start;
+}
+
+.voice-bar.error .voice-bar-error {
+  white-space: normal;
+  overflow: visible;
+  line-height: 1.35;
+}
+
+/* A small pulsing dot on a voice channel while its join is in flight, so a tap
+   that opens a permission prompt does not look like it did nothing. Opacity
+   only, so it stays on the compositor. */
+.voice-joining {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--h-radius-full);
+  background: var(--h-accent);
+  animation: voice-joining-pulse 1s var(--h-ease) infinite;
+}
+
+@keyframes voice-joining-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.channel.connecting {
+  color: var(--h-text-muted);
 }
 
 /* The Admin and Log out links beside the member's own name. */

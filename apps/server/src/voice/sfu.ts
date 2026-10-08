@@ -40,6 +40,12 @@ export interface SfuOptions {
   portRange?: [number, number];
   /** A public IP to advertise as a host candidate when the host is behind NAT. */
   publicIp?: string | null;
+  /**
+   * Where connection-level events go. The relay is deliberately silent, which is
+   * fine until audio does not arrive and there is nothing to look at; this is the
+   * seam an operator can watch.
+   */
+  log?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
 interface Peer {
@@ -64,6 +70,7 @@ interface Peer {
 /** A member with a live connection. `channelId` is validated by the caller. */
 export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   const peers = new Map<string, Peer>();
+  const log = options.log ?? ((): void => {});
 
   /** The config every connection is made with. */
   const peerConfig = {
@@ -123,7 +130,14 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     // roster order is not reliable enough to guess it from.
     const source = new MediaStream([slot]);
     source.id = producer.userId;
-    consumer.pc.addTrack(slot, source);
+    // A dedicated send-only line. Not addTrack: addTrack reuses the member's own
+    // receive-only microphone line when the slot is the first thing the connection
+    // sends, fusing both directions onto one sendrecv m-line. That is legal SDP and
+    // werift tolerates it, but Chromium hands the received audio nowhere on such a
+    // line while Firefox plays it, which is exactly the one-way call users hit. A
+    // receive-only microphone line plus one send-only line per forwarded stream is
+    // what an SFU is supposed to offer.
+    consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
   }
@@ -147,6 +161,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   return {
     async join(userId, channelId) {
       if (peers.has(userId)) await this.leave(userId);
+      log('voice_sfu_join', { userId, channelId, room: room(channelId).map((peer) => peer.userId) });
 
       const pc = new RTCPeerConnection(peerConfig);
       const peer: Peer = {
@@ -193,6 +208,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     async leave(userId) {
       const peer = peers.get(userId);
       if (!peer) return;
+      log('voice_sfu_leave', { userId });
       peer.closed = true;
       peers.delete(userId);
       for (const subscriptions of peer.pipes.values()) for (const unsubscribe of subscriptions) unsubscribe();

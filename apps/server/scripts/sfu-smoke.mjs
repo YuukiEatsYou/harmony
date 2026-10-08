@@ -95,12 +95,28 @@ async function main() {
 
   check('a receiver hears both senders', c.tracks.filter((track) => track.received > 0).length === 2, JSON.stringify(c.tracks));
   check('a sender hears the other sender', b.tracks.some((track) => track.received > 0));
+  // A joined before B, so A's copy of B is wired up on the late-arrival path (the
+  // slot exists before B's audio does). B is the only other sender in this room,
+  // so A must have exactly one audible track: the one that path builds.
+  check(
+    'an earlier member hears a later sender',
+    a.tracks.filter((track) => track.received > 0).length === 1,
+    JSON.stringify(a.tracks),
+  );
   // The relayed tracks name their producer via the SDP msid, which is how a
   // browser client tells whose audio each track is (a speaking ring needs that).
   check(
     'each relayed track names its producer',
     /a=msid:A /.test(offers.get('C') ?? '') && /a=msid:B /.test(offers.get('C') ?? ''),
     (offers.get('C') ?? '').split('\n').filter((line) => line.includes('msid')).join(' | '),
+  );
+  // A forwarded stream must never ride the member's own receive line. addTrack
+  // fuses them into one sendrecv m-line, which Chromium will not play back; the
+  // microphone line stays recvonly and every relayed stream gets its own sendonly.
+  check(
+    'no line carries both directions',
+    !/a=sendrecv/.test(offers.get('C') ?? ''),
+    (offers.get('C') ?? '').split('\n').filter((line) => line === 'a=sendrecv' || line === 'a=sendonly' || line === 'a=recvonly').join(' | '),
   );
 
   // A sender leaves; the room re-offers and must converge again.

@@ -30,8 +30,33 @@ const speakingLevel = 0.015;
 /** How often the speaking indicators are recomputed. */
 const speakingPollMs = 120;
 
+/**
+ * Turns a failed join into something worth reading. A DOMException name is
+ * meaningless to anyone who is not a browser engineer, and the microphone ones
+ * have a fix (a permission toggle) a message should name.
+ */
+function describeFailure(cause: unknown): string {
+  if (cause instanceof DOMException) {
+    switch (cause.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return 'Microphone access was blocked. Allow the microphone for this site, then try again.';
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        return 'No microphone was found on this device.';
+      case 'NotReadableError':
+        return 'The microphone is in use by another app on this device.';
+      default:
+        return cause.message || cause.name;
+    }
+  }
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 interface RemoteAudio {
-  source: MediaStreamAudioSourceNode;
+  /** The element that actually pulls and decodes the remote track. */
+  element: HTMLAudioElement;
+  source: MediaElementAudioSourceNode;
   analyser: AnalyserNode;
   gain: GainNode;
 }
@@ -46,9 +71,20 @@ class VoiceStore {
   /** Member ids currently talking, for the speaking indicators. */
   speaking = $state<Record<string, boolean>>({});
   connecting = $state(false);
+  /** The channel a join is working on, so its row can show that it is trying. */
+  joining = $state<string | null>(null);
   muted = $state(false);
   deafened = $state(false);
   error = $state<string | null>(null);
+  /** The connection's own state, so a dropped call reads as more than silence. */
+  connectionState = $state<RTCPeerConnectionState | null>(null);
+  /**
+   * Whether audio is actually moving, sampled from getStats(). A call can be
+   * "connected" and still carry nothing, which between two different networks is
+   * the usual failure, so the bar says so rather than pretending all is well.
+   */
+  sending = $state(false);
+  receiving = $state(false);
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
@@ -59,6 +95,10 @@ class VoiceStore {
   /** One analyser per speaker, the local microphone included. */
   #analysers = new Map<string, AnalyserNode>();
   #pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Samples RTP counters, to tell a live call from a merely connected one. */
+  #statsTimer: ReturnType<typeof setInterval> | null = null;
+  #inBytes = 0;
+  #outBytes = 0;
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -130,23 +170,39 @@ class VoiceStore {
         });
       }
     } catch (cause) {
-      this.error = cause instanceof Error ? cause.message : String(cause);
+      this.error = describeFailure(cause);
     }
   }
 
-  /** Wires one incoming track up for playback and for the speaking indicator. */
-  #attachRemote(userId: string, track: MediaStreamTrack): void {
+  /**
+   * Wires one incoming stream up for playback and for the speaking indicator.
+   *
+   * Playback has to run through a media element. A Web Audio
+   * MediaStreamAudioSourceNode pulls a local microphone without complaint, but
+   * Chromium will not pull a remote WebRTC track through one: the connection
+   * reports the packets received and then discards them, so the call is silent
+   * and the meter never moves, while Firefox plays the same stream. A media
+   * element does pull the track, so the audio goes through a hidden one and Web
+   * Audio taps it with createMediaElementSource, which also feeds the analyser.
+   */
+  #attachRemote(userId: string, stream: MediaStream): void {
     const ctx = this.#ctx;
     const master = this.#master;
     if (!ctx || !master || this.#remote.has(userId)) return;
-    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const element = document.createElement('audio');
+    element.autoplay = true;
+    element.srcObject = stream;
+    element.style.display = 'none';
+    document.body.appendChild(element);
+    void element.play().catch(() => undefined);
+    const source = ctx.createMediaElementSource(element);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     const gain = ctx.createGain();
     source.connect(analyser);
     analyser.connect(gain);
     gain.connect(master);
-    this.#remote.set(userId, { source, analyser, gain });
+    this.#remote.set(userId, { element, source, analyser, gain });
     this.#analysers.set(userId, analyser);
   }
 
@@ -157,6 +213,34 @@ class VoiceStore {
     let sum = 0;
     for (const value of data) sum += value * value;
     return Math.sqrt(sum / data.length);
+  }
+
+  /**
+   * Reads the connection's RTP counters to see whether audio is flowing. The
+   * counters only ever climb, so a sample that is higher than the last one means
+   * packets moved in that direction since then. Silence suppresses them to
+   * nearly nothing, which is fine: this is about a dead path, not a quiet one.
+   */
+  async #sample(): Promise<void> {
+    const pc = this.#pc;
+    if (!pc) return;
+    let inbound: number | null = null;
+    let outbound: number | null = null;
+    try {
+      const report = await pc.getStats();
+      report.forEach((entry) => {
+        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number };
+        if (stat.kind !== 'audio') return;
+        if (stat.type === 'inbound-rtp') inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
+        else if (stat.type === 'outbound-rtp') outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
+      });
+    } catch {
+      return;
+    }
+    this.sending = outbound !== null && outbound > this.#outBytes;
+    this.receiving = inbound !== null && inbound > this.#inBytes;
+    if (inbound !== null) this.#inBytes = inbound;
+    if (outbound !== null) this.#outBytes = outbound;
   }
 
   /** Recomputes who is talking, and only touches state when it changes. */
@@ -174,10 +258,16 @@ class VoiceStore {
       clearInterval(this.#pollTimer);
       this.#pollTimer = null;
     }
+    if (this.#statsTimer) {
+      clearInterval(this.#statsTimer);
+      this.#statsTimer = null;
+    }
     for (const node of this.#remote.values()) {
       node.source.disconnect();
       node.analyser.disconnect();
       node.gain.disconnect();
+      node.element.srcObject = null;
+      node.element.remove();
     }
     this.#remote.clear();
     this.#analysers.clear();
@@ -188,15 +278,37 @@ class VoiceStore {
     this.#mic = null;
     this.#lastMembers = new Set();
     this.#rosterReady = false;
+    this.connectionState = null;
+    this.sending = false;
+    this.receiving = false;
+    this.#inBytes = 0;
+    this.#outBytes = 0;
   }
 
   /** Joins a channel, or moves there from another one. */
   async join(channelId: string): Promise<void> {
-    if (this.channelId === channelId || this.connecting) return;
+    if (this.channelId === channelId || this.joining) return;
+    /*
+     * The audio context is made and resumed here, inside the click that started
+     * this, before anything is awaited. iOS only lets a context start from a
+     * gesture, and the microphone prompt is a dialog the gesture does not
+     * survive, so a context created after it comes up suspended and never plays
+     * a packet.
+     */
+    const ctx = this.#ctx ?? new AudioContext();
+    this.#ctx = ctx;
+    void ctx.resume().catch(() => undefined);
     await this.leave();
     this.connecting = true;
+    this.joining = channelId;
     this.error = null;
     try {
+      // A phone on a plain-HTTP address, or a browser that never exposes the
+      // microphone, has no mediaDevices at all; say so rather than crashing on
+      // a property of undefined.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('This browser cannot reach the microphone. Voice needs HTTPS or localhost.');
+      }
       const mic = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
@@ -205,9 +317,6 @@ class VoiceStore {
       // Everything remote plays through the master gain, so deafening is one
       // change; the local microphone runs through an analyser only, into a silent
       // sink so the meter is pulled without echoing you back.
-      const ctx = this.#ctx ?? new AudioContext();
-      this.#ctx = ctx;
-      void ctx.resume().catch(() => undefined);
       const master = ctx.createGain();
       master.gain.value = this.deafened ? 0 : 1;
       master.connect(ctx.destination);
@@ -224,12 +333,21 @@ class VoiceStore {
       if (me) this.#analysers.set(me, micAnalyser);
       this.#pollTimer = setInterval(() => this.#poll(), speakingPollMs);
 
+      this.#inBytes = 0;
+      this.#outBytes = 0;
+      this.#statsTimer = setInterval(() => void this.#sample(), 1000);
+
       const pc = new RTCPeerConnection({ iceServers: [] });
       this.#pc = pc;
+      pc.onconnectionstatechange = () => {
+        this.connectionState = pc.connectionState;
+      };
       pc.ontrack = (event) => {
-        // The relay names each track's producer in its stream id.
+        // The relay names each track's producer in its stream id, which is the
+        // member the audio belongs to.
         const userId = event.streams[0]?.id ?? 'unknown';
-        this.#attachRemote(userId, event.track);
+        const stream = event.streams[0] ?? new MediaStream([event.track]);
+        this.#attachRemote(userId, stream);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
 
@@ -249,10 +367,11 @@ class VoiceStore {
         await this.#answer(buffered);
       }
     } catch (cause) {
-      this.error = cause instanceof Error ? cause.message : String(cause);
+      this.error = describeFailure(cause);
       await this.leave();
     } finally {
       this.connecting = false;
+      this.joining = null;
     }
   }
 
@@ -283,6 +402,11 @@ class VoiceStore {
     this.#sync();
   }
 
+  /** Clears a failed-join message once it has been read. */
+  clearError(): void {
+    this.error = null;
+  }
+
   /** Discord's rule: a deafened member is also muted, without touching their setting. */
   #applyMic(): void {
     const live = !this.muted && !this.deafened;
@@ -306,6 +430,7 @@ class VoiceStore {
     this.channelId = null;
     this.members = [];
     this.rosters = {};
+    this.joining = null;
     this.muted = false;
     this.deafened = false;
     this.error = null;

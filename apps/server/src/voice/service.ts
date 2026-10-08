@@ -12,6 +12,7 @@ import { resolvePermissions } from '../auth/permissions.ts';
 import { findChannel } from '../db/channels.ts';
 import { findUserById, presentUser } from '../db/users.ts';
 import { HttpError } from '../http/errors.ts';
+import type { ServerLogService } from '../log/service.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import { createSfu } from './sfu.ts';
@@ -51,6 +52,8 @@ export interface VoiceDeps {
   /** UDP range the media relay binds, and a public IP to advertise behind NAT. */
   portRange?: [number, number];
   publicIp?: string | null;
+  /** Where the relay's connection events are recorded, so a silent call can be read. */
+  serverLog?: ServerLogService;
 }
 
 /**
@@ -79,7 +82,11 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
         hub.dispatchToUsers(GatewayEvent.VoiceSignal, payload, new Set([userId]));
       },
     },
-    { portRange: deps.portRange, publicIp: deps.publicIp },
+    {
+      portRange: deps.portRange,
+      publicIp: deps.publicIp,
+      log: (event, detail) => deps.serverLog?.info(event, event, detail),
+    },
   );
 
   function room(channelId: string): VoiceState[] {
