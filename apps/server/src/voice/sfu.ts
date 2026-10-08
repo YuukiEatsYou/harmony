@@ -2,17 +2,28 @@ import { MediaStream, MediaStreamTrack, RTCPeerConnection } from 'werift';
 
 /**
  * The server end of a voice room, as a selective forwarder. It terminates one
- * WebRTC connection per member and relays each member's encoded audio to the
- * others. It never decodes, mixes or re-encodes: an Opus payload arrives on one
- * connection and is written, unchanged, to the outbound slots of the others. So
- * no member's IP is ever exposed to another, and the server's work is packet
- * forwarding and DTLS, not audio.
+ * WebRTC connection per member and relays each member's encoded media to the
+ * others. It never decodes, mixes or re-encodes: an Opus or VP8 payload arrives
+ * on one connection and is written, unchanged, to the outbound slots of the
+ * others. So no member's IP is ever exposed to another, and the server's work is
+ * packet forwarding and DTLS, not media.
+ *
+ * Each member's connection carries, from the moment they join, a receive-only
+ * line for their own microphone and one for their screen, plus a send-only slot
+ * per other member for that member's microphone and screen. Nothing is negotiated
+ * when somebody starts or stops sharing: the client attaches its screen track to
+ * the send-only line that is already there, and the relay simply starts or stops
+ * copying packets into the slot. Renegotiation happens only when the room's
+ * membership changes.
+ *
+ * Video needs one extra thing audio does not: a consumer that has just started
+ * receiving, or lost packets, only gets a picture at the next keyframe, so the
+ * SFU forwards a consumer's picture-loss request to the producer.
  *
  * Negotiation is non-trickle: `setLocalDescription` gathers candidates before it
  * resolves, so an offer carries them and no candidate relay is needed. Only the
  * server offers, so there is no glare, and a per-connection queue keeps one
- * offer outstanding at a time. A member joining or leaving adds or drops an
- * audio slot on the others' connections, which is one re-offer each.
+ * offer outstanding at a time.
  *
  * The caller owns the room: it checks permissions and the size limit, and tells
  * the SFU when a member joins or leaves. The SFU trusts its room membership.
@@ -42,7 +53,7 @@ export interface SfuOptions {
   publicIp?: string | null;
   /**
    * Where connection-level events go. The relay is deliberately silent, which is
-   * fine until audio does not arrive and there is nothing to look at; this is the
+   * fine until media does not arrive and there is nothing to look at; this is the
    * seam an operator can watch.
    */
   log?: (event: string, detail?: Record<string, unknown>) => void;
@@ -52,12 +63,20 @@ interface Peer {
   userId: string;
   channelId: string;
   pc: RTCPeerConnection;
-  /** This member's own audio, once it has arrived. */
+  /** This member's own microphone, once it has arrived. */
   inbound: MediaStreamTrack | null;
-  /** Outbound slot per other member, keyed by that member's id. */
+  /** This member's own screen, once it has arrived. */
+  videoInbound: MediaStreamTrack | null;
+  /** The member's screen SSRC, learned from its first packet, to ask for keyframes. */
+  videoSsrc: number | null;
+  /** Outbound audio slot per other member, keyed by that member's id. */
   outbound: Map<string, MediaStreamTrack>;
+  /** Outbound screen slot per other member, keyed by that member's id. */
+  videoOutbound: Map<string, MediaStreamTrack>;
   /** Forwarding pipes per producer, keyed by that member's id, so one leaves cleanly. */
   pipes: Map<string, Array<() => void>>;
+  /** Screen pipes per producer, including the keyframe requests they carry. */
+  videoPipes: Map<string, Array<() => void>>;
   /** Serialises re-offers: only one may be outstanding on a connection. */
   queue: Promise<void>;
   /** True while an offer is out and unanswered; a further change waits for it. */
@@ -108,10 +127,17 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     for (const peer of room(channelId)) reoffer(peer);
   }
 
+  /** Asks a producer's client for a fresh keyframe, once its screen SSRC is known. */
+  function requestKeyframe(producer: Peer): void {
+    if (producer.videoSsrc === null) return;
+    const receiver = producer.pc.getReceivers().find((entry) => entry.kind === 'video');
+    void receiver?.sendRtcpPLI(producer.videoSsrc).catch(() => undefined);
+  }
+
   /**
-   * Starts piping a producer's audio into one of a consumer's outbound slots.
-   * No-op when that pipe already exists, so it is safe to call again whenever
-   * the producer's track finally arrives.
+   * Starts piping a producer's microphone into one of a consumer's outbound slots.
+   * No-op when that pipe already exists, so it is safe to call again whenever the
+   * producer's track finally arrives.
    */
   function pipe(producer: Peer, consumer: Peer, slot: MediaStreamTrack): void {
     if (!producer.inbound || consumer.pipes.has(producer.userId)) return;
@@ -121,7 +147,27 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     consumer.pipes.set(producer.userId, [() => subscription.unSubscribe()]);
   }
 
-  /** A consumer's outbound slot carrying a producer's audio, made on demand. */
+  /**
+   * Starts piping a producer's screen into a consumer's outbound slot, and wires
+   * the consumer's picture-loss requests through to the producer so a viewer that
+   * joins mid-stream, or drops frames, gets a keyframe instead of a frozen tile.
+   */
+  function pipeVideo(producer: Peer, consumer: Peer, slot: MediaStreamTrack, ask: () => void): void {
+    if (!producer.videoInbound || consumer.videoPipes.has(producer.userId)) return;
+    const scripts: Array<() => void> = [];
+    const rtp = producer.videoInbound.onReceiveRtp.subscribe((packet) => {
+      // The SSRC is only known once the producer has sent something, and it is
+      // what a keyframe request has to name.
+      if (producer.videoSsrc === null) producer.videoSsrc = packet.header.ssrc;
+      if (!consumer.closed) slot.writeRtp(packet);
+    });
+    scripts.push(() => rtp.unSubscribe());
+    consumer.videoPipes.set(producer.userId, scripts);
+    // A viewer that has just attached hears nothing until a keyframe arrives.
+    ask();
+  }
+
+  /** A consumer's outbound slot carrying a producer's microphone, made on demand. */
   function connect(producer: Peer, consumer: Peer): void {
     if (consumer.outbound.has(producer.userId)) return;
     const slot = new MediaStreamTrack({ kind: 'audio' });
@@ -131,15 +177,25 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     const source = new MediaStream([slot]);
     source.id = producer.userId;
     // A dedicated send-only line. Not addTrack: addTrack reuses the member's own
-    // receive-only microphone line when the slot is the first thing the connection
-    // sends, fusing both directions onto one sendrecv m-line. That is legal SDP and
-    // werift tolerates it, but Chromium hands the received audio nowhere on such a
-    // line while Firefox plays it, which is exactly the one-way call users hit. A
-    // receive-only microphone line plus one send-only line per forwarded stream is
-    // what an SFU is supposed to offer.
+    // receive-only line when the slot is the first thing the connection sends,
+    // fusing both directions onto one sendrecv m-line, which Chromium will not
+    // play back. A receive-only line plus one send-only line per forwarded stream
+    // is what an SFU is supposed to offer.
     consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
+  }
+
+  /** The same, for the producer's screen. */
+  function connectVideo(producer: Peer, consumer: Peer): void {
+    if (consumer.videoOutbound.has(producer.userId)) return;
+    const slot = new MediaStreamTrack({ kind: 'video' });
+    const source = new MediaStream([slot]);
+    source.id = producer.userId;
+    const transceiver = consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
+    consumer.videoOutbound.set(producer.userId, slot);
+    pipeVideo(producer, consumer, slot, () => requestKeyframe(producer));
+    transceiver.sender.onPictureLossIndication.subscribe(() => requestKeyframe(producer));
   }
 
   /** Brings one member's connection in step with everyone else in the room. */
@@ -147,15 +203,20 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     for (const other of room(peer.channelId)) {
       if (other === peer) continue;
       connect(other, peer);
+      connectVideo(other, peer);
       connect(peer, other);
+      connectVideo(peer, other);
     }
   }
 
-  /** Drops a consumer's slot and pipes for a producer, used when one leaves. */
+  /** Drops a consumer's slots and pipes for a producer, used when one leaves. */
   function disconnect(consumer: Peer, producerId: string): void {
     consumer.outbound.delete(producerId);
     for (const unsubscribe of consumer.pipes.get(producerId) ?? []) unsubscribe();
     consumer.pipes.delete(producerId);
+    consumer.videoOutbound.delete(producerId);
+    for (const unsubscribe of consumer.videoPipes.get(producerId) ?? []) unsubscribe();
+    consumer.videoPipes.delete(producerId);
   }
 
   return {
@@ -169,18 +230,32 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
         channelId,
         pc,
         inbound: null,
+        videoInbound: null,
+        videoSsrc: null,
         outbound: new Map(),
+        videoOutbound: new Map(),
         pipes: new Map(),
+        videoPipes: new Map(),
         queue: Promise.resolve(),
         awaitingAnswer: false,
         needsOffer: false,
         closed: false,
       };
-      // The member's own microphone: one receive-only audio line.
+      // The member's own microphone and screen: one receive-only line each.
       pc.addTransceiver('audio', { direction: 'recvonly' });
+      pc.addTransceiver('video', { direction: 'recvonly' });
       pc.onTrack.subscribe((track) => {
-        peer.inbound = track;
         // Slots made before the track arrived can be wired up now.
+        if (track.kind === 'video') {
+          peer.videoInbound = track;
+          for (const consumer of room(channelId)) {
+            if (consumer === peer) continue;
+            const slot = consumer.videoOutbound.get(userId);
+            if (slot) pipeVideo(peer, consumer, slot, () => requestKeyframe(peer));
+          }
+          return;
+        }
+        peer.inbound = track;
         for (const consumer of room(channelId)) {
           if (consumer === peer) continue;
           const slot = consumer.outbound.get(userId);
@@ -212,6 +287,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       peer.closed = true;
       peers.delete(userId);
       for (const subscriptions of peer.pipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
+      for (const subscriptions of peer.videoPipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
       for (const other of room(peer.channelId)) disconnect(other, userId);
       reofferRoom(peer.channelId);
       try {
@@ -225,6 +301,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       for (const peer of peers.values()) {
         peer.closed = true;
         for (const subscriptions of peer.pipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
+        for (const subscriptions of peer.videoPipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
         void Promise.resolve(peer.pc.close()).catch(() => undefined);
       }
       peers.clear();

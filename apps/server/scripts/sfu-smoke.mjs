@@ -1,6 +1,7 @@
 // Exercises the voice SFU: three in-process WebRTC peers join one room, two of
-// them send audio, and the third must receive both. It needs no browser and no
-// network, so it verifies the forwarding path the whole feature rests on.
+// them send audio and one sends a screen, and the third must receive it all. It
+// needs no browser and no network, so it verifies the forwarding path the whole
+// feature rests on.
 import { MediaStreamTrack, RTCPeerConnection, RtpHeader, RtpPacket } from 'werift';
 import { createSfu } from '../src/voice/sfu.ts';
 
@@ -17,12 +18,14 @@ function check(name, condition, detail = '') {
 function createClient(userId, sfu, sending) {
   const pc = new RTCPeerConnection({});
   const mic = sending ? new MediaStreamTrack({ kind: 'audio' }) : null;
+  const cam = sending ? new MediaStreamTrack({ kind: 'video' }) : null;
   if (mic) pc.addTrack(mic);
+  if (cam) pc.addTrack(cam);
 
   // One entry per inbound track, so a receiver can tell the senders apart.
   const tracks = [];
   pc.onTrack.subscribe((track) => {
-    const entry = { received: 0, streamId: track.streamId ?? null };
+    const entry = { received: 0, kind: track.kind, streamId: track.streamId ?? null };
     tracks.push(entry);
     track.onReceiveRtp.subscribe(() => {
       entry.received += 1;
@@ -32,6 +35,7 @@ function createClient(userId, sfu, sending) {
   const client = {
     pc,
     mic,
+    cam,
     tracks,
     /** Answers a server offer: the client is the answerer here. */
     async answerOffer(sdp) {
@@ -75,9 +79,11 @@ async function main() {
     c.pc.connectionState,
   ].join(','));
 
-  // Two senders, each pushing a steady stream.
+  // Two microphones and one screen, each pushing a steady stream.
   let seq = 1000;
   let timestamp = 0;
+  let vseq = 5000;
+  let vtimestamp = 0;
   for (let i = 0; i < 40; i += 1) {
     for (const sender of [a, b]) {
       sender.mic.writeRtp(
@@ -87,22 +93,32 @@ async function main() {
         ),
       );
     }
+    a.cam.writeRtp(
+      new RtpPacket(
+        new RtpHeader({ version: 2, payloadType: 96, sequenceNumber: vseq, timestamp: vtimestamp, ssrc: a.cam.ssrc ?? 2 }),
+        Buffer.alloc(120, 9),
+      ),
+    );
     seq += 1;
     timestamp += 960;
+    vseq += 1;
+    vtimestamp += 3000;
     await sleep(20);
   }
   await sleep(1000);
 
-  check('a receiver hears both senders', c.tracks.filter((track) => track.received > 0).length === 2, JSON.stringify(c.tracks));
-  check('a sender hears the other sender', b.tracks.some((track) => track.received > 0));
+  const audible = (client) => client.tracks.filter((track) => track.kind === 'audio' && track.received > 0);
+  const visible = (client) => client.tracks.filter((track) => track.kind === 'video' && track.received > 0);
+
+  check('a receiver hears both senders', audible(c).length === 2, JSON.stringify(c.tracks));
+  check('a sender hears the other sender', audible(b).length > 0);
   // A joined before B, so A's copy of B is wired up on the late-arrival path (the
   // slot exists before B's audio does). B is the only other sender in this room,
   // so A must have exactly one audible track: the one that path builds.
-  check(
-    'an earlier member hears a later sender',
-    a.tracks.filter((track) => track.received > 0).length === 1,
-    JSON.stringify(a.tracks),
-  );
+  check('an earlier member hears a later sender', audible(a).length === 1, JSON.stringify(a.tracks));
+  // Only A shares a screen, so C sees exactly one, and A never sees its own.
+  check('a receiver sees the shared screen', visible(c).length === 1, JSON.stringify(c.tracks));
+  check('a sharer is not sent its own screen', visible(a).length === 0, JSON.stringify(a.tracks));
   // The relayed tracks name their producer via the SDP msid, which is how a
   // browser client tells whose audio each track is (a speaking ring needs that).
   check(
@@ -112,12 +128,14 @@ async function main() {
   );
   // A forwarded stream must never ride the member's own receive line. addTrack
   // fuses them into one sendrecv m-line, which Chromium will not play back; the
-  // microphone line stays recvonly and every relayed stream gets its own sendonly.
+  // receive lines stay recvonly and every relayed stream gets its own sendonly.
   check(
     'no line carries both directions',
     !/a=sendrecv/.test(offers.get('C') ?? ''),
-    (offers.get('C') ?? '').split('\n').filter((line) => line === 'a=sendrecv' || line === 'a=sendonly' || line === 'a=recvonly').join(' | '),
+    (offers.get('C') ?? '').split('\n').filter((line) => line === 'a=sendrecv').join(' | '),
   );
+  // The offer has to carry a video codec, or no browser could answer a screen.
+  check('the offer carries a video codec', /vp8\/90000/i.test(offers.get('C') ?? ''));
 
   // A sender leaves; the room re-offers and must converge again.
   await sfu.leave('B');
