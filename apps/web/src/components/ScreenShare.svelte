@@ -38,26 +38,11 @@
   }
 
   /**
-   * Moves the whole window with the pointer. The header is the grip; a pointerdown
-   * on one of its buttons is left alone so they still click. The moves are clamped
-   * so the window cannot be dragged off the screen and stranded.
+   * Attaches pointer handlers for one gesture, reporting every move as a delta in
+   * pixels from where it started, and stops when the pointer lifts or is cancelled.
    */
-  function startDrag(event: PointerEvent): void {
-    if (event.button !== 0) return;
-    const base = anchor();
-    if (!base) return;
-    box = base;
-    const handle = event.currentTarget as HTMLElement;
-    handle.setPointerCapture(event.pointerId);
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const move = (current: PointerEvent): void => {
-      box = {
-        ...base,
-        x: clamp(base.x + current.clientX - startX, 0, window.innerWidth - base.w),
-        y: clamp(base.y + current.clientY - startY, 0, window.innerHeight - base.h),
-      };
-    };
+  function track(handle: HTMLElement, start: { x: number; y: number }, onMove: (dx: number, dy: number) => void): void {
+    const move = (current: PointerEvent): void => onMove(current.clientX - start.x, current.clientY - start.y);
     const end = (): void => {
       handle.removeEventListener('pointermove', move);
       handle.removeEventListener('pointerup', end);
@@ -68,8 +53,35 @@
     handle.addEventListener('pointercancel', end);
   }
 
-  /** Resizes from the bottom-right corner, within sane bounds. */
-  function startResize(event: PointerEvent): void {
+  /** The corner a resize started from, named by the edges that move. */
+  type Corner = 'br' | 'bl' | 'tl';
+
+  /**
+   * Moves the whole window with the pointer. The header is the grip. The moves are
+   * clamped so the window cannot be dragged off the screen and stranded.
+   */
+  function startDrag(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    const base = anchor();
+    if (!base) return;
+    box = base;
+    const handle = event.currentTarget as HTMLElement;
+    handle.setPointerCapture(event.pointerId);
+    track(handle, { x: event.clientX, y: event.clientY }, (dx, dy) => {
+      box = {
+        ...base,
+        x: clamp(base.x + dx, 0, window.innerWidth - base.w),
+        y: clamp(base.y + dy, 0, window.innerHeight - base.h),
+      };
+    });
+  }
+
+  /**
+   * Resizes from one corner, keeping the opposite corner pinned so the window grows
+   * toward the pointer. The size is clamped to a floor and to the viewport, so the
+   * pinned corner never leaves the screen.
+   */
+  function startResize(event: PointerEvent, corner: Corner): void {
     if (event.button !== 0) return;
     event.stopPropagation();
     const base = anchor();
@@ -77,23 +89,26 @@
     box = base;
     const handle = event.currentTarget as HTMLElement;
     handle.setPointerCapture(event.pointerId);
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const move = (current: PointerEvent): void => {
-      box = {
-        ...base,
-        w: clamp(base.w + current.clientX - startX, minWidth, window.innerWidth - base.x),
-        h: clamp(base.h + current.clientY - startY, minHeight, window.innerHeight - base.y),
-      };
-    };
-    const end = (): void => {
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', end);
-      handle.removeEventListener('pointercancel', end);
-    };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', end);
-    handle.addEventListener('pointercancel', end);
+    const right = base.x + base.w;
+    const bottom = base.y + base.h;
+    track(handle, { x: event.clientX, y: event.clientY }, (dx, dy) => {
+      if (corner === 'br') {
+        box = {
+          ...base,
+          w: clamp(base.w + dx, minWidth, window.innerWidth - base.x),
+          h: clamp(base.h + dy, minHeight, window.innerHeight - base.y),
+        };
+        return;
+      }
+      // A left corner pins the right edge, so dragging left grows the window over
+      // the space to its left; a top corner does the same with the bottom edge.
+      const w = clamp(base.w - dx, minWidth, right);
+      const h =
+        corner === 'bl'
+          ? clamp(base.h + dy, minHeight, window.innerHeight - base.y)
+          : clamp(base.h - dy, minHeight, bottom);
+      box = { ...base, x: right - w, w, y: corner === 'bl' ? base.y : bottom - h, h };
+    });
   }
 
   /** Fullscreens the tile the button belongs to, so the share fills the screen. */
@@ -163,10 +178,24 @@
     {/each}
     <button
       type="button"
-      class="screen-resize"
-      aria-label="Resize shared screen"
+      class="screen-resize tl"
+      aria-label="Resize from top left"
       title="Drag to resize"
-      onpointerdown={startResize}
+      onpointerdown={(event) => startResize(event, 'tl')}
+    ></button>
+    <button
+      type="button"
+      class="screen-resize bl"
+      aria-label="Resize from bottom left"
+      title="Drag to resize"
+      onpointerdown={(event) => startResize(event, 'bl')}
+    ></button>
+    <button
+      type="button"
+      class="screen-resize br"
+      aria-label="Resize from bottom right"
+      title="Drag to resize"
+      onpointerdown={(event) => startResize(event, 'br')}
     ></button>
   </div>
 {/if}
