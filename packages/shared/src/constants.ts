@@ -127,3 +127,15 @@ export const DEFAULT_MAX_VOICE_MEMBERS = 10;
 
 /** The largest room limit an administrator may set, to bound the relay. */
 export const MAX_VOICE_MEMBERS = 99;
+
+/**
+ * The upper bound a shared screen is captured at, and how many frames of it per
+ * second. 720p30 suits most connections; an administrator with the bandwidth to
+ * spare may raise either, so the two are separate settings rather than presets.
+ * The relay never transcodes, so this is only what the sharing client asks its
+ * own browser for.
+ */
+export const DEFAULT_SCREEN_SHARE_HEIGHT = 720;
+export const MAX_SCREEN_SHARE_HEIGHT = 1080;
+export const DEFAULT_SCREEN_SHARE_FRAME_RATE = 30;
+export const MAX_SCREEN_SHARE_FRAME_RATE = 60;

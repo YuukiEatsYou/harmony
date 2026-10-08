@@ -936,10 +936,22 @@ button.server-name:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+.voice-member-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
 .voice-member-muted {
   display: inline-flex;
-  margin-left: auto;
   color: var(--h-text-muted);
+}
+
+/* A member sharing their screen wears the same mark as the share button. */
+.voice-member-sharing {
+  display: inline-flex;
+  color: var(--h-ok);
 }
 
 /* The bar above the user bar while connected to a voice channel. */

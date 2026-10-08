@@ -6,6 +6,7 @@ import type {
   VoiceStateUpdatePayload,
 } from '@harmony/shared';
 import { api } from './api';
+import { meta } from './meta.svelte';
 import { session } from './session.svelte';
 import { playSound } from './sounds';
 
@@ -555,7 +556,11 @@ class VoiceStore {
     this.error = null;
     try {
       const display = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 30 } },
+        // The bounds an administrator set; the browser fits the screen into them.
+        video: {
+          height: { max: meta.data?.screenShare.height ?? 720 },
+          frameRate: { max: meta.data?.screenShare.frameRate ?? 30 },
+        },
         audio: false,
       });
       const track = display.getVideoTracks()[0];

@@ -201,7 +201,14 @@
           <span class="avatar small fallback">{initial(entry.user)}</span>
         {/if}
         <span class="voice-member-name">{entry.user.displayName ?? entry.user.username}</span>
-        {#if entry.muted}<span class="voice-member-muted"><Icon name="mic-off" size={12} /></span>{/if}
+        <span class="voice-member-tail">
+          {#if voice.screens[entry.user.id]}
+            <span class="voice-member-sharing" title="Sharing their screen"><Icon name="screen" size={12} /></span>
+          {/if}
+          {#if entry.muted}
+            <span class="voice-member-muted"><Icon name="mic-off" size={12} /></span>
+          {/if}
+        </span>
       </div>
     {/each}
   {:else}

@@ -6,6 +6,8 @@
     DEFAULT_BACKGROUND,
     DEFAULT_ICON_PADDING,
     MAX_ICON_PADDING,
+    MAX_SCREEN_SHARE_FRAME_RATE,
+    MAX_SCREEN_SHARE_HEIGHT,
     MAX_UPLOAD_CEILING_BYTES,
     type Channel,
     type ChannelListResponse,
@@ -27,6 +29,8 @@
   let themeAccent = $state(DEFAULT_ACCENT);
   let maxImageMb = $state('');
   let maxVideoMb = $state('');
+  let screenShareHeight = $state(720);
+  let screenShareFrameRate = $state(30);
   let previewUserAgent = $state('');
   /** Written only: the server never sends a saved key back, so this starts blank. */
   let klipyKey = $state('');
@@ -78,6 +82,8 @@
       themeAccent = settings.theme.accent ?? DEFAULT_ACCENT;
       maxImageMb = toMb(settings.maxImageBytes);
       maxVideoMb = toMb(settings.maxVideoBytes);
+      screenShareHeight = settings.screenShareHeight;
+      screenShareFrameRate = settings.screenShareFrameRate;
       previewUserAgent = settings.previewUserAgent ?? '';
       klipyConfigured = settings.klipyConfigured;
       gifStorage = settings.gifStorage;
@@ -216,6 +222,8 @@
       const videoBytes = toBytes(maxVideoMb);
       if (imageBytes !== undefined) body.maxImageBytes = imageBytes;
       if (videoBytes !== undefined) body.maxVideoBytes = videoBytes;
+      body.screenShareHeight = screenShareHeight;
+      body.screenShareFrameRate = screenShareFrameRate;
       // Blank means "keep the saved key", which is why it is left out entirely.
       if (klipyKey.trim()) body.klipyApiKey = klipyKey.trim();
 
@@ -232,6 +240,8 @@
       applyIcon(updated.icon);
       maxImageMb = toMb(updated.maxImageBytes);
       maxVideoMb = toMb(updated.maxVideoBytes);
+      screenShareHeight = updated.screenShareHeight;
+      screenShareFrameRate = updated.screenShareFrameRate;
       previewUserAgent = updated.previewUserAgent ?? '';
       klipyConfigured = updated.klipyConfigured;
       gifStorage = updated.gifStorage;
@@ -314,6 +324,25 @@
       <p class="muted">
         The largest file a member may attach. Videos must be MP4. Leave a field as it is to keep the
         current value; the hard ceiling is {ceilingMb} MB per upload.
+      </p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Screen sharing</legend>
+      <div class="inline">
+        <label>
+          Height (px)
+          <input type="number" min="240" max={MAX_SCREEN_SHARE_HEIGHT} step="1" bind:value={screenShareHeight} />
+        </label>
+        <label>
+          Frames per second
+          <input type="number" min="5" max={MAX_SCREEN_SHARE_FRAME_RATE} step="1" bind:value={screenShareFrameRate} />
+        </label>
+      </div>
+      <p class="muted">
+        The bound a shared screen is captured at. The relay never re-encodes, so a higher bound is
+        more bandwidth for the sharer and every viewer; 720p30 suits most connections, up to
+        {MAX_SCREEN_SHARE_HEIGHT}p{MAX_SCREEN_SHARE_FRAME_RATE} if the server has room.
       </p>
     </fieldset>
 

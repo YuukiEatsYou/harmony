@@ -33,6 +33,7 @@ export function registerMetaRoutes(app: FastifyInstance, deps: { config: Config;
         usernameMax: LIMITS.username.max,
         passwordMin: LIMITS.password.min,
       },
+      screenShare: { height: settings.screenShareHeight, frameRate: settings.screenShareFrameRate },
     };
     return body;
   });

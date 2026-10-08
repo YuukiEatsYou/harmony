@@ -149,6 +149,8 @@ export interface InstanceMeta {
     usernameMax: number;
     passwordMin: number;
   };
+  /** The bounds a shared screen is captured at; the relay never transcodes. */
+  screenShare: { height: number; frameRate: number };
   /**
    * Whether a hosted gif service is configured, and so whether the picker offers
    * its tab. The key itself is never exposed to clients.
@@ -221,6 +223,10 @@ export interface ServerSettingsResponse {
   klipyConfigured: boolean;
   /** How gifs are kept; see `InstanceMeta.gifStorage`. */
   gifStorage: GifStorageMode;
+  /** The tallest a shared screen is captured, in pixels. */
+  screenShareHeight: number;
+  /** How many frames a second a shared screen is captured at. */
+  screenShareFrameRate: number;
 }
 
 /** A user together with the roles assigned to them. */

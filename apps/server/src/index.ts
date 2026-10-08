@@ -7,6 +7,8 @@ import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
   DEFAULT_MAX_VOICE_MEMBERS,
+  DEFAULT_SCREEN_SHARE_FRAME_RATE,
+  DEFAULT_SCREEN_SHARE_HEIGHT,
   GatewayEvent,
   HARMONY_VERSION_SOURCE_URL,
   MAX_UPLOAD_CEILING_BYTES,
@@ -117,6 +119,8 @@ const settingsService = createSettingsService(db.sqlite, {
   previewUserAgent: null,
   setupCompleted: false,
   maxVoiceMembers: DEFAULT_MAX_VOICE_MEMBERS,
+  screenShareHeight: DEFAULT_SCREEN_SHARE_HEIGHT,
+  screenShareFrameRate: DEFAULT_SCREEN_SHARE_FRAME_RATE,
 });
 const authService = createAuthService(db.sqlite, config, settingsService);
 const discordOAuth = createDiscordOAuthService(settingsService);

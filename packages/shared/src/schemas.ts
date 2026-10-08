@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES, MAX_VOICE_MEMBERS } from './constants.ts';
+import { LIMITS, MAX_ICON_PADDING, MAX_SCREEN_SHARE_FRAME_RATE, MAX_SCREEN_SHARE_HEIGHT, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES, MAX_VOICE_MEMBERS } from './constants.ts';
 import { BOT_COMMAND_LIMITS } from './commands.ts';
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
@@ -282,6 +282,10 @@ export const updateSettingsSchema = z.object({
   gifStorage: z.enum(GIF_STORAGE_MODES as [GifStorageMode, ...GifStorageMode[]]).optional(),
   /** Members one voice channel holds; 0 is unlimited. */
   maxVoiceMembers: z.number().int().min(0).max(MAX_VOICE_MEMBERS).optional(),
+  /** The tallest a shared screen is captured, in pixels. */
+  screenShareHeight: z.number().int().min(240).max(MAX_SCREEN_SHARE_HEIGHT).optional(),
+  /** How many frames a second a shared screen is captured at. */
+  screenShareFrameRate: z.number().int().min(5).max(MAX_SCREEN_SHARE_FRAME_RATE).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
