@@ -30,6 +30,17 @@ const speakingLevel = 0.015;
 /** How often the speaking indicators are recomputed. */
 const speakingPollMs = 120;
 
+/*
+ * A dropped connection is rebuilt rather than left silent. WebRTC often heals a
+ * brief interruption on its own, so a disconnected state is given a moment
+ * before it is treated as a loss, while a failed one is rebuilt at once. The
+ * rebuild is the ordinary leave-and-join, so nothing here needs the server to
+ * change: the member is briefly out of the room, then back.
+ */
+const recoverGraceMs = 4000;
+const recoverDelayMs = 2500;
+const maxRecoverAttempts = 5;
+
 /**
  * Turns a failed join into something worth reading. A DOMException name is
  * meaningless to anyone who is not a browser engineer, and the microphone ones
@@ -104,6 +115,19 @@ class VoiceStore {
   #rosterReady = false;
   /** An offer that arrived before the connection was ready to answer it. */
   #offer: string | null = null;
+  /** The channel the member wants to be in, kept across a dropped connection. */
+  #intended: string | null = null;
+  #recovering = false;
+  #recoverTimer: ReturnType<typeof setTimeout> | null = null;
+  #recoverAttempts = 0;
+
+  constructor() {
+    // A phone that lost its network is most likely back when the browser says it
+    // is, well before any retry timer would notice.
+    window.addEventListener('online', () => {
+      if (this.#intended && this.#pc?.connectionState !== 'connected') this.#scheduleRecover(0);
+    });
+  }
 
   /** Handles the voice gateway frames; `chat` forwards them here. */
   handleFrame(frame: { t?: string; d?: unknown }): void {
@@ -288,6 +312,14 @@ class VoiceStore {
   /** Joins a channel, or moves there from another one. */
   async join(channelId: string): Promise<void> {
     if (this.channelId === channelId || this.joining) return;
+    this.#intended = channelId;
+    this.#recoverAttempts = 0;
+    this.#cancelRecover();
+    await this.#establish(channelId);
+  }
+
+  /** The join handshake. It leaves the intended channel alone for recovery. */
+  async #establish(channelId: string): Promise<void> {
     /*
      * The audio context is made and resumed here, inside the click that started
      * this, before anything is awaited. iOS only lets a context start from a
@@ -298,7 +330,7 @@ class VoiceStore {
     const ctx = this.#ctx ?? new AudioContext();
     this.#ctx = ctx;
     void ctx.resume().catch(() => undefined);
-    await this.leave();
+    await this.#disconnect();
     this.connecting = true;
     this.joining = channelId;
     this.error = null;
@@ -341,6 +373,7 @@ class VoiceStore {
       this.#pc = pc;
       pc.onconnectionstatechange = () => {
         this.connectionState = pc.connectionState;
+        this.#onConnectionState(pc.connectionState);
       };
       pc.ontrack = (event) => {
         // The relay names each track's producer in its stream id, which is the
@@ -368,15 +401,23 @@ class VoiceStore {
       }
     } catch (cause) {
       this.error = describeFailure(cause);
-      await this.leave();
+      await this.#disconnect();
     } finally {
       this.connecting = false;
       this.joining = null;
     }
   }
 
-  /** Leaves the channel, tearing down the microphone and the connection. */
+  /** Leaves the channel because the member asked to. */
   async leave(): Promise<void> {
+    this.#intended = null;
+    this.#recoverAttempts = 0;
+    this.#cancelRecover();
+    await this.#disconnect();
+  }
+
+  /** Tears down the microphone, the connection and the relayed audio. */
+  async #disconnect(): Promise<void> {
     const channelId = this.channelId;
     this.channelId = null;
     this.members = [];
@@ -387,6 +428,58 @@ class VoiceStore {
     this.muted = false;
     this.deafened = false;
     if (channelId) await api(`/channels/${channelId}/voice`, { method: 'DELETE' }).catch(() => undefined);
+  }
+
+  /**
+   * Rebuilds a call whose connection dropped, so a lost stream heals without the
+   * member having to leave and rejoin by hand.
+   */
+  #onConnectionState(state: RTCPeerConnectionState): void {
+    if (state === 'connected') {
+      this.#recoverAttempts = 0;
+      this.#cancelRecover();
+      return;
+    }
+    if (state === 'failed') this.#scheduleRecover(0);
+    else if (state === 'disconnected') this.#scheduleRecover(recoverGraceMs);
+  }
+
+  #scheduleRecover(delayMs: number): void {
+    if (this.#recovering || this.#recoverTimer || !this.#intended) return;
+    this.#recoverTimer = setTimeout(() => {
+      this.#recoverTimer = null;
+      void this.#recover();
+    }, delayMs);
+  }
+
+  #cancelRecover(): void {
+    if (this.#recoverTimer) {
+      clearTimeout(this.#recoverTimer);
+      this.#recoverTimer = null;
+    }
+  }
+
+  async #recover(): Promise<void> {
+    const target = this.#intended;
+    if (!target || this.#recovering) return;
+    this.#recovering = true;
+    try {
+      await this.#establish(target);
+    } finally {
+      this.#recovering = false;
+    }
+    if (this.channelId === target) {
+      this.#recoverAttempts = 0;
+      return;
+    }
+    this.#recoverAttempts += 1;
+    if (this.#intended !== target) return;
+    if (this.#recoverAttempts < maxRecoverAttempts) {
+      this.#scheduleRecover(recoverDelayMs);
+    } else {
+      this.#intended = null;
+      this.error = 'Voice connection lost. Rejoin the channel to try again.';
+    }
   }
 
   setMuted(next: boolean): void {
@@ -423,6 +516,10 @@ class VoiceStore {
 
   /** Drops everything without telling the server; used when the session ends. */
   reset(): void {
+    this.#intended = null;
+    this.#recovering = false;
+    this.#recoverAttempts = 0;
+    this.#cancelRecover();
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
