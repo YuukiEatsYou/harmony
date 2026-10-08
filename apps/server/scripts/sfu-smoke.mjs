@@ -110,6 +110,14 @@ async function main() {
     /a=msid:A /.test(offers.get('C') ?? '') && /a=msid:B /.test(offers.get('C') ?? ''),
     (offers.get('C') ?? '').split('\n').filter((line) => line.includes('msid')).join(' | '),
   );
+  // A forwarded stream must never ride the member's own receive line. addTrack
+  // fuses them into one sendrecv m-line, which Chromium will not play back; the
+  // microphone line stays recvonly and every relayed stream gets its own sendonly.
+  check(
+    'no line carries both directions',
+    !/a=sendrecv/.test(offers.get('C') ?? ''),
+    (offers.get('C') ?? '').split('\n').filter((line) => line === 'a=sendrecv' || line === 'a=sendonly' || line === 'a=recvonly').join(' | '),
+  );
 
   // A sender leaves; the room re-offers and must converge again.
   await sfu.leave('B');

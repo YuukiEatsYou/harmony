@@ -131,7 +131,14 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     // roster order is not reliable enough to guess it from.
     const source = new MediaStream([slot]);
     source.id = producer.userId;
-    consumer.pc.addTrack(slot, source);
+    // A dedicated send-only line. Not addTrack: addTrack reuses the member's own
+    // receive-only microphone line when the slot is the first thing the connection
+    // sends, fusing both directions onto one sendrecv m-line. That is legal SDP and
+    // werift tolerates it, but Chromium hands the received audio nowhere on such a
+    // line while Firefox plays it, which is exactly the one-way call users hit. A
+    // receive-only microphone line plus one send-only line per forwarded stream is
+    // what an SFU is supposed to offer.
+    consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
     log('voice_sfu_slot', { producer: producer.userId, consumer: consumer.userId });
