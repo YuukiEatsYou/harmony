@@ -300,6 +300,7 @@ class VoiceStore {
     this.connecting = true;
     this.joining = channelId;
     this.error = null;
+    console.info('[voice] joining as', session.user?.id ?? null);
     try {
       // A phone on a plain-HTTP address, or a browser that never exposes the
       // microphone, has no mediaDevices at all; say so rather than crashing on

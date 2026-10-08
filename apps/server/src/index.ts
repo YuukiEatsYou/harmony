@@ -134,6 +134,7 @@ const voiceService = createVoiceService({
   settings: settingsService,
   portRange: config.voicePortRange,
   publicIp: config.voicePublicIp,
+  serverLog,
 });
 const messageService = createMessageService(db.sqlite, hub, auditService);
 const pinService = createPinService(db.sqlite, hub, auditService, messageService);

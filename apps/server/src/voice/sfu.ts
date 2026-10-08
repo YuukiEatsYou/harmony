@@ -40,6 +40,12 @@ export interface SfuOptions {
   portRange?: [number, number];
   /** A public IP to advertise as a host candidate when the host is behind NAT. */
   publicIp?: string | null;
+  /**
+   * Where connection-level events go. The relay is deliberately silent, which is
+   * fine until audio does not arrive and there is nothing to look at; this is the
+   * seam an operator can watch.
+   */
+  log?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
 interface Peer {
@@ -64,6 +70,7 @@ interface Peer {
 /** A member with a live connection. `channelId` is validated by the caller. */
 export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   const peers = new Map<string, Peer>();
+  const log = options.log ?? ((): void => {});
 
   /** The config every connection is made with. */
   const peerConfig = {
@@ -112,6 +119,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       if (!consumer.closed) slot.writeRtp(packet);
     });
     consumer.pipes.set(producer.userId, [() => subscription.unSubscribe()]);
+    log('voice_sfu_pipe', { producer: producer.userId, consumer: consumer.userId });
   }
 
   /** A consumer's outbound slot carrying a producer's audio, made on demand. */
@@ -126,6 +134,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     consumer.pc.addTrack(slot, source);
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
+    log('voice_sfu_slot', { producer: producer.userId, consumer: consumer.userId });
   }
 
   /** Brings one member's connection in step with everyone else in the room. */
@@ -147,6 +156,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   return {
     async join(userId, channelId) {
       if (peers.has(userId)) await this.leave(userId);
+      log('voice_sfu_join', { userId, channelId, room: room(channelId).map((peer) => peer.userId) });
 
       const pc = new RTCPeerConnection(peerConfig);
       const peer: Peer = {
@@ -165,6 +175,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       pc.addTransceiver('audio', { direction: 'recvonly' });
       pc.onTrack.subscribe((track) => {
         peer.inbound = track;
+        log('voice_sfu_inbound', { userId });
         // Slots made before the track arrived can be wired up now.
         for (const consumer of room(channelId)) {
           if (consumer === peer) continue;
@@ -193,6 +204,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     async leave(userId) {
       const peer = peers.get(userId);
       if (!peer) return;
+      log('voice_sfu_leave', { userId });
       peer.closed = true;
       peers.delete(userId);
       for (const subscriptions of peer.pipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
