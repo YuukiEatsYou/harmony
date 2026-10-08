@@ -354,6 +354,16 @@
       </button>
       <button
         type="button"
+        class="voice-bar-button"
+        class:on={voice.sharing}
+        title={voice.sharing ? 'Stop sharing' : 'Share screen'}
+        aria-label={voice.sharing ? 'Stop sharing your screen' : 'Share your screen'}
+        onclick={() => (voice.sharing ? voice.stopScreen() : voice.shareScreen())}
+      >
+        <Icon name="screen" size={18} />
+      </button>
+      <button
+        type="button"
         class="voice-bar-button danger"
         title="Disconnect"
         aria-label="Disconnect from voice"

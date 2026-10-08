@@ -96,6 +96,10 @@ class VoiceStore {
    */
   sending = $state(false);
   receiving = $state(false);
+  /** Whether this member is sharing their screen right now. */
+  sharing = $state(false);
+  /** Remote screens, keyed by the member sharing them. */
+  screens = $state<Record<string, MediaStream>>({});
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
@@ -110,6 +114,9 @@ class VoiceStore {
   #statsTimer: ReturnType<typeof setInterval> | null = null;
   #inBytes = 0;
   #outBytes = 0;
+  /** The member's own screen capture, while it is being shared. */
+  #display: MediaStream | null = null;
+  #screenSender: RTCRtpSender | null = null;
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -186,6 +193,12 @@ class VoiceStore {
     const channelId = this.channelId;
     try {
       await pc.setRemoteDescription({ type: 'offer', sdp });
+      // The server offers this member's own screen line receive-only, and the
+      // first video line in the offer is that one. Left at the browser's default
+      // the line negotiates inactive, so a screen attached later would go nowhere;
+      // send-only is what makes a later replaceTrack flow without renegotiation.
+      const screen = pc.getTransceivers().find((entry) => entry.receiver.track?.kind === 'video');
+      if (screen && screen.direction === 'recvonly') screen.direction = 'sendonly';
       await pc.setLocalDescription(await pc.createAnswer());
       if (channelId && pc.localDescription) {
         await api(`/channels/${channelId}/voice/answer`, {
@@ -377,10 +390,11 @@ class VoiceStore {
       };
       pc.ontrack = (event) => {
         // The relay names each track's producer in its stream id, which is the
-        // member the audio belongs to.
+        // member the media belongs to.
         const userId = event.streams[0]?.id ?? 'unknown';
         const stream = event.streams[0] ?? new MediaStream([event.track]);
-        this.#attachRemote(userId, stream);
+        if (event.track.kind === 'video') this.#attachScreen(userId, stream, event.track);
+        else this.#attachRemote(userId, stream);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
 
@@ -418,9 +432,11 @@ class VoiceStore {
 
   /** Tears down the microphone, the connection and the relayed audio. */
   async #disconnect(): Promise<void> {
+    await this.stopScreen().catch(() => undefined);
     const channelId = this.channelId;
     this.channelId = null;
     this.members = [];
+    this.screens = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
@@ -495,6 +511,82 @@ class VoiceStore {
     this.#sync();
   }
 
+  /**
+   * Registers a member's screen for the UI. A remote video line exists from the
+   * moment a call starts, so a track here is not the same as a live share: the
+   * track stays muted until the relay actually sends a picture, and mute and
+   * unmute are what tell an active share from an idle line.
+   */
+  #attachScreen(userId: string, stream: MediaStream, track: MediaStreamTrack): void {
+    const show = (): void => {
+      this.screens = { ...this.screens, [userId]: stream };
+    };
+    const hide = (): void => {
+      if (this.screens[userId] !== stream) return;
+      const next = { ...this.screens };
+      delete next[userId];
+      this.screens = next;
+    };
+    if (!track.muted) show();
+    track.addEventListener('unmute', show);
+    track.addEventListener('mute', hide);
+    track.addEventListener('ended', hide);
+  }
+
+  /**
+   * Starts sharing this member's screen. The call already negotiated a send-only
+   * video line for it, so this replaces the track on that line and nothing is
+   * renegotiated.
+   */
+  async shareScreen(): Promise<void> {
+    const pc = this.#pc;
+    if (!pc || this.sharing) return;
+    const transceiver = pc
+      .getTransceivers()
+      .find((entry) => entry.receiver.track?.kind === 'video' && entry.currentDirection === 'sendonly');
+    if (!transceiver) {
+      this.error = 'This call cannot share a screen.';
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      this.error = 'This browser cannot share a screen.';
+      return;
+    }
+    this.error = null;
+    try {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 30 } },
+        audio: false,
+      });
+      const track = display.getVideoTracks()[0];
+      if (!track) throw new Error('The screen capture had no video track.');
+      this.#display = display;
+      await transceiver.sender.replaceTrack(track);
+      this.#screenSender = transceiver.sender;
+      this.sharing = true;
+      // The browser's own Stop sharing button ends the track; follow it.
+      track.addEventListener('ended', () => void this.stopScreen());
+    } catch (cause) {
+      for (const track of this.#display?.getTracks() ?? []) track.stop();
+      this.#display = null;
+      this.sharing = false;
+      // Cancelling the picker is a choice, not a failure.
+      if (cause instanceof DOMException && cause.name === 'NotAllowedError') return;
+      this.error = describeFailure(cause);
+    }
+  }
+
+  /** Stops sharing this member's screen. */
+  async stopScreen(): Promise<void> {
+    if (!this.sharing && !this.#display) return;
+    this.sharing = false;
+    for (const track of this.#display?.getTracks() ?? []) track.stop();
+    this.#display = null;
+    const sender = this.#screenSender;
+    this.#screenSender = null;
+    await sender?.replaceTrack(null).catch(() => undefined);
+  }
+
   /** Clears a failed-join message once it has been read. */
   clearError(): void {
     this.error = null;
@@ -520,6 +612,11 @@ class VoiceStore {
     this.#recovering = false;
     this.#recoverAttempts = 0;
     this.#cancelRecover();
+    for (const track of this.#display?.getTracks() ?? []) track.stop();
+    this.#display = null;
+    this.#screenSender = null;
+    this.sharing = false;
+    this.screens = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;

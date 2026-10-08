@@ -1035,6 +1035,78 @@ button.server-name:hover:not(:disabled) {
   outline-offset: 1px;
 }
 
+/* Shared screens, floating over the content while somebody is sharing. */
+.screen-share {
+  display: flex;
+  position: fixed;
+  top: 3.25rem;
+  left: 50%;
+  z-index: 50;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  max-width: min(960px, 94vw);
+  max-height: calc(100vh - 6rem);
+  transform: translateX(-50%);
+}
+
+.screen-tile {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--h-border-strong);
+  border-radius: var(--h-radius);
+  background: var(--h-bg-deep);
+  box-shadow: var(--h-shadow-lg);
+}
+
+.screen-tile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--h-bg-elevated);
+  color: var(--h-text-muted);
+  font-size: 0.78rem;
+}
+
+.screen-tile-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-tile-action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--h-radius-xs);
+  background: none;
+  color: var(--h-text-muted);
+}
+
+.screen-tile-action:hover:not(:disabled) {
+  background: var(--h-hover);
+  box-shadow: none;
+  color: var(--h-text);
+}
+
+.screen-tile video {
+  display: block;
+  width: 100%;
+  max-width: 440px;
+  max-height: 60vh;
+  background: #000;
+}
+
 .voice-bar-button.danger:hover:not(:disabled) {
   border-color: var(--h-error);
   background: var(--h-error);

@@ -34,4 +34,6 @@ export type IconName =
   | 'mic'
   | 'mic-off'
   | 'headphones'
-  | 'phone-off';
+  | 'phone-off'
+  | 'screen'
+  | 'expand';

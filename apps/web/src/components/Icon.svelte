@@ -138,5 +138,16 @@
   {:else if name === 'phone-off'}
     <path d="M6.5 4h3.2l1.5 4-2 1.4a12 12 0 0 0 5.4 5.4l1.4-2 4 1.5v3.2a2 2 0 0 1-2.2 2A16.2 16.2 0 0 1 4.5 6.2 2 2 0 0 1 6.5 4z" />
     <path d="M3.5 3.5 20.5 20.5" />
+  {:else if name === 'screen'}
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8.5 20h7" />
+    <path d="M12 16v4" />
+    <path d="M12 12.5v-5" />
+    <path d="M9.5 10 12 7.5 14.5 10" />
+  {:else if name === 'expand'}
+    <path d="M9 4H4v5" />
+    <path d="M15 4h5v5" />
+    <path d="M15 20h5v-5" />
+    <path d="M9 20H4v-5" />
   {/if}
 </svg>
