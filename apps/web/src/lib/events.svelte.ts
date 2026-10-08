@@ -15,7 +15,7 @@ import { chat } from './chat.svelte';
 import { applyEventUpdate, removeEvent, reminderText, upsertEvent } from './event-form';
 import type { GatewayFrame } from './gateway';
 import { session } from './session.svelte';
-import { playNotification } from './sounds';
+import { playSound } from './sounds';
 
 /** A reminder that arrived while the app was open. */
 export interface EventNotice {
@@ -123,7 +123,7 @@ class EventsState {
         // Keep the list's copy fresh, but the viewer is interested by definition.
         this.items = upsertEvent(this.items, { ...event, interested: true });
         this.notice = { event, text: reminderText(event, Date.now()) };
-        if (session.user?.notifyMajor) playNotification('major');
+        if (session.user?.notifyMajor) playSound('major');
         break;
       }
       case 'CHANNEL_DELETE': {

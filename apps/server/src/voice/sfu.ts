@@ -1,4 +1,4 @@
-import { MediaStreamTrack, RTCPeerConnection } from 'werift';
+import { MediaStream, MediaStreamTrack, RTCPeerConnection } from 'werift';
 
 /**
  * The server end of a voice room, as a selective forwarder. It terminates one
@@ -118,7 +118,12 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   function connect(producer: Peer, consumer: Peer): void {
     if (consumer.outbound.has(producer.userId)) return;
     const slot = new MediaStreamTrack({ kind: 'audio' });
-    consumer.pc.addTrack(slot);
+    // The msid carries the producer's member id, so the receiving client can tell
+    // whose audio each relayed track is: a speaking indicator needs that, and the
+    // roster order is not reliable enough to guess it from.
+    const source = new MediaStream([slot]);
+    source.id = producer.userId;
+    consumer.pc.addTrack(slot, source);
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
   }

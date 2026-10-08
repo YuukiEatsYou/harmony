@@ -19,10 +19,10 @@ function createClient(userId, sfu, sending) {
   const mic = sending ? new MediaStreamTrack({ kind: 'audio' }) : null;
   if (mic) pc.addTrack(mic);
 
-  // One counter per inbound track, so a receiver can tell the senders apart.
+  // One entry per inbound track, so a receiver can tell the senders apart.
   const tracks = [];
   pc.onTrack.subscribe((track) => {
-    const entry = { received: 0 };
+    const entry = { received: 0, streamId: track.streamId ?? null };
     tracks.push(entry);
     track.onReceiveRtp.subscribe(() => {
       entry.received += 1;
@@ -48,8 +48,11 @@ function createClient(userId, sfu, sending) {
 
 async function main() {
   const clients = new Map();
+  /** The last offer the SFU sent each member, for checking the SDP it carries. */
+  const offers = new Map();
   const sfu = createSfu({
     sendOffer: (userId, _channelId, sdp) => {
+      offers.set(userId, sdp);
       void clients.get(userId)?.answerOffer(sdp).catch(() => undefined);
     },
   });
@@ -92,6 +95,13 @@ async function main() {
 
   check('a receiver hears both senders', c.tracks.filter((track) => track.received > 0).length === 2, JSON.stringify(c.tracks));
   check('a sender hears the other sender', b.tracks.some((track) => track.received > 0));
+  // The relayed tracks name their producer via the SDP msid, which is how a
+  // browser client tells whose audio each track is (a speaking ring needs that).
+  check(
+    'each relayed track names its producer',
+    /a=msid:A /.test(offers.get('C') ?? '') && /a=msid:B /.test(offers.get('C') ?? ''),
+    (offers.get('C') ?? '').split('\n').filter((line) => line.includes('msid')).join(' | '),
+  );
 
   // A sender leaves; the room re-offers and must converge again.
   await sfu.leave('B');

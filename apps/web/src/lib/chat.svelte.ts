@@ -28,7 +28,7 @@ import { nameColors } from './name-colors.svelte';
 import { voice } from './voice.svelte';
 import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
-import { playNotification } from './sounds';
+import { playSound } from './sounds';
 import { GatewayClient, type GatewayFrame } from './gateway';
 
 /** How many messages one history page holds, for both directions. */
@@ -945,14 +945,14 @@ class ChatStore {
     // A mention is aimed at this person wherever they happen to be looking, so
     // it is worth the louder sound even from another channel.
     if (this.#mentionsMe(message)) {
-      if (me.notifyMajor) playNotification('major');
+      if (me.notifyMajor) playSound('major');
       return;
     }
     if (settings?.level === 'mentions') return;
 
     // Anything else only counts in the channel being read. Otherwise a busy
     // instance would chirp once per message in every channel at once.
-    if (message.channelId === this.activeChannelId && me.notifyMinor) playNotification('minor');
+    if (message.channelId === this.activeChannelId && me.notifyMinor) playSound('minor');
   }
 
   #handleEvent(frame: GatewayFrame): void {

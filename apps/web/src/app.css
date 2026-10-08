@@ -916,9 +916,18 @@ button.server-name:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.15rem 0.6rem 0.15rem 1.6rem;
+  padding: 0.2rem 0.6rem 0.2rem 1.6rem;
   color: var(--h-text-muted);
   font-size: 0.82rem;
+}
+
+/* A member whose microphone is picking up sound wears a steady ring. It is an
+   outline rather than a box-shadow or a transform: at the metering rate the
+   state flips several times a second, and an outline repaints without touching
+   layout or being caught by the avatar's own box-shadow transition. */
+.voice-member.speaking .avatar {
+  outline: 2px solid var(--h-ok);
+  outline-offset: 1px;
 }
 
 .voice-member-name {
@@ -994,6 +1003,15 @@ button.server-name:hover:not(:disabled) {
 .voice-bar-button.on {
   color: var(--h-text);
   background: var(--h-accent-subtle);
+}
+
+/* Your own mic button lights up while it is picking you up, so a live
+   microphone is obvious without leaning on the level meter alone. Muting or
+   deafening disables the track, which silences the meter, so this never
+   contradicts the mic icon. */
+.voice-bar-button.speaking {
+  outline: 2px solid var(--h-ok);
+  outline-offset: 1px;
 }
 
 .voice-bar-button.danger:hover:not(:disabled) {

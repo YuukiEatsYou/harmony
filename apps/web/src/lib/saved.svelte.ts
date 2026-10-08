@@ -9,7 +9,7 @@ import { api } from './api';
 import { chat } from './chat.svelte';
 import type { GatewayFrame } from './gateway';
 import { session } from './session.svelte';
-import { playNotification } from './sounds';
+import { playSound } from './sounds';
 
 /** The longest delay `setTimeout` honors; anything longer fires at once. */
 const maxTimerMs = 2 ** 31 - 1;
@@ -195,7 +195,7 @@ class SavedState {
     const latest = fresh.at(-1);
     if (latest) {
       this.notice = latest;
-      if (session.user?.notifyMajor) playNotification('major');
+      if (session.user?.notifyMajor) playSound('major');
     }
     this.#schedule();
   }

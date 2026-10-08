@@ -19,6 +19,7 @@
   // included; the panel itself hides the tabs they cannot reach.
   const canAdmin = $derived(canOpenAdminPanel(permissions));
   const myPicture = $derived(avatarUrl(session.user));
+  const myId = $derived(session.user?.id ?? null);
 
   /** Categories that demand a role; every channel inside one is locked too. */
   const lockedCategories = $derived(
@@ -190,7 +191,7 @@
       </button>
     </div>
     {#each voice.rosters[channel.id] ?? [] as entry (entry.user.id)}
-      <div class="voice-member">
+      <div class="voice-member" class:speaking={voice.speaking[entry.user.id]}>
         {#if avatarUrl(entry.user)}
           <img class="avatar small" src={avatarUrl(entry.user)} alt="" />
         {:else}
@@ -318,6 +319,7 @@
         type="button"
         class="voice-bar-button"
         class:on={voice.muted}
+        class:speaking={myId !== null && voice.speaking[myId] === true}
         title={voice.muted ? 'Unmute' : 'Mute'}
         aria-label={voice.muted ? 'Unmute' : 'Mute'}
         onclick={() => voice.setMuted(!voice.muted)}

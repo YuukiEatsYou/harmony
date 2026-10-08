@@ -6,6 +6,8 @@ import type {
   VoiceStateUpdatePayload,
 } from '@harmony/shared';
 import { api } from './api';
+import { session } from './session.svelte';
+import { playSound } from './sounds';
 
 /**
  * The client's voice session. All audio is handled here in the browser: the
@@ -17,7 +19,23 @@ import { api } from './api';
  * The server is the only party that offers. This side answers every offer it is
  * sent, so a renegotiation (someone joining or leaving the room) is just
  * answering again; there is nothing to coordinate.
+ *
+ * Each relayed track carries its producer's member id as the stream id, so a
+ * track can be matched to the member it belongs to — that is what a speaking
+ * indicator needs.
  */
+
+/** Root-mean-square above which a track counts as someone talking. */
+const speakingLevel = 0.015;
+/** How often the speaking indicators are recomputed. */
+const speakingPollMs = 120;
+
+interface RemoteAudio {
+  source: MediaStreamAudioSourceNode;
+  analyser: AnalyserNode;
+  gain: GainNode;
+}
+
 class VoiceStore {
   /** The channel this member is connected to, or null. */
   channelId = $state<string | null>(null);
@@ -25,6 +43,8 @@ class VoiceStore {
   members = $state<VoiceState[]>([]);
   /** Rosters for other channels, so the sidebar can show who is where. */
   rosters = $state<Record<string, VoiceState[]>>({});
+  /** Member ids currently talking, for the speaking indicators. */
+  speaking = $state<Record<string, boolean>>({});
   connecting = $state(false);
   muted = $state(false);
   deafened = $state(false);
@@ -32,8 +52,16 @@ class VoiceStore {
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
-  #remote = new MediaStream();
-  #audio: HTMLAudioElement | null = null;
+  #ctx: AudioContext | null = null;
+  /** Everything remote is played through this, so deafening is one gain. */
+  #master: GainNode | null = null;
+  #remote = new Map<string, RemoteAudio>();
+  /** One analyser per speaker, the local microphone included. */
+  #analysers = new Map<string, AnalyserNode>();
+  #pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The member ids in the room on the last roster, for the join/leave sounds. */
+  #lastMembers = new Set<string>();
+  #rosterReady = false;
   /** An offer that arrived before the connection was ready to answer it. */
   #offer: string | null = null;
 
@@ -42,11 +70,30 @@ class VoiceStore {
     if (frame.t === 'VOICE_STATE_UPDATE') {
       const payload = frame.d as VoiceStateUpdatePayload;
       this.rosters = { ...this.rosters, [payload.channelId]: payload.members };
-      if (payload.channelId === this.channelId) this.members = payload.members;
+      if (payload.channelId === this.channelId) {
+        this.members = payload.members;
+        this.#applyRoster(payload.members);
+      }
     } else if (frame.t === 'VOICE_SIGNAL') {
       const payload = frame.d as VoiceSignalPayload;
       if (payload.channelId === this.channelId) void this.#answer(payload.sdp);
     }
+  }
+
+  /** Plays a chime when a member other than you joins or leaves the room. */
+  #applyRoster(members: VoiceState[]): void {
+    const ids = new Set(members.map((entry) => entry.user.id));
+    const me = session.user?.id ?? null;
+    // The first roster after joining is the baseline: the people already there
+    // did not just arrive, so nothing is announced for them.
+    if (this.#rosterReady) {
+      const joined = [...ids].some((id) => id !== me && !this.#lastMembers.has(id));
+      const left = [...this.#lastMembers].some((id) => id !== me && !ids.has(id));
+      if (joined) playSound('voiceConnect');
+      if (left) playSound('voiceDisconnect');
+    }
+    this.#lastMembers = ids;
+    this.#rosterReady = true;
   }
 
   /**
@@ -87,17 +134,60 @@ class VoiceStore {
     }
   }
 
-  /** The remote audio element, made on first use and kept for the session. */
-  #ensureAudio(): HTMLAudioElement {
-    if (!this.#audio) {
-      const audio = new Audio();
-      audio.autoplay = true;
-      audio.srcObject = this.#remote;
-      audio.muted = this.deafened;
-      void audio.play().catch(() => undefined);
-      this.#audio = audio;
+  /** Wires one incoming track up for playback and for the speaking indicator. */
+  #attachRemote(userId: string, track: MediaStreamTrack): void {
+    const ctx = this.#ctx;
+    const master = this.#master;
+    if (!ctx || !master || this.#remote.has(userId)) return;
+    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    const gain = ctx.createGain();
+    source.connect(analyser);
+    analyser.connect(gain);
+    gain.connect(master);
+    this.#remote.set(userId, { source, analyser, gain });
+    this.#analysers.set(userId, analyser);
+  }
+
+  /** Root-mean-square of one analyser's current window. */
+  #level(analyser: AnalyserNode): number {
+    const data = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(data);
+    let sum = 0;
+    for (const value of data) sum += value * value;
+    return Math.sqrt(sum / data.length);
+  }
+
+  /** Recomputes who is talking, and only touches state when it changes. */
+  #poll(): void {
+    const next: Record<string, boolean> = {};
+    for (const [userId, analyser] of this.#analysers) {
+      if (this.#level(analyser) > speakingLevel) next[userId] = true;
     }
-    return this.#audio;
+    if (JSON.stringify(next) !== JSON.stringify(this.speaking)) this.speaking = next;
+  }
+
+  /** Tears down the audio graph, the meter, and the microphone. */
+  #teardown(): void {
+    if (this.#pollTimer) {
+      clearInterval(this.#pollTimer);
+      this.#pollTimer = null;
+    }
+    for (const node of this.#remote.values()) {
+      node.source.disconnect();
+      node.analyser.disconnect();
+      node.gain.disconnect();
+    }
+    this.#remote.clear();
+    this.#analysers.clear();
+    this.speaking = {};
+    this.#master?.disconnect();
+    this.#master = null;
+    for (const track of this.#mic?.getTracks() ?? []) track.stop();
+    this.#mic = null;
+    this.#lastMembers = new Set();
+    this.#rosterReady = false;
   }
 
   /** Joins a channel, or moves there from another one. */
@@ -112,13 +202,34 @@ class VoiceStore {
       });
       this.#mic = mic;
 
-      this.#remote = new MediaStream();
-      this.#audio = null;
+      // Everything remote plays through the master gain, so deafening is one
+      // change; the local microphone runs through an analyser only, into a silent
+      // sink so the meter is pulled without echoing you back.
+      const ctx = this.#ctx ?? new AudioContext();
+      this.#ctx = ctx;
+      void ctx.resume().catch(() => undefined);
+      const master = ctx.createGain();
+      master.gain.value = this.deafened ? 0 : 1;
+      master.connect(ctx.destination);
+      this.#master = master;
+      const micAnalyser = ctx.createAnalyser();
+      micAnalyser.fftSize = 512;
+      const silent = ctx.createGain();
+      silent.gain.value = 0;
+      const micSource = ctx.createMediaStreamSource(mic);
+      micSource.connect(micAnalyser);
+      micAnalyser.connect(silent);
+      silent.connect(ctx.destination);
+      const me = session.user?.id;
+      if (me) this.#analysers.set(me, micAnalyser);
+      this.#pollTimer = setInterval(() => this.#poll(), speakingPollMs);
+
       const pc = new RTCPeerConnection({ iceServers: [] });
       this.#pc = pc;
       pc.ontrack = (event) => {
-        this.#remote.addTrack(event.track);
-        this.#ensureAudio();
+        // The relay names each track's producer in its stream id.
+        const userId = event.streams[0]?.id ?? 'unknown';
+        this.#attachRemote(userId, event.track);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
 
@@ -128,6 +239,9 @@ class VoiceStore {
       const room = await api<VoiceRoomResponse>(`/channels/${channelId}/voice`, { method: 'POST' });
       this.members = room.members;
       this.rosters = { ...this.rosters, [channelId]: room.members };
+      // Anyone already in the room is a baseline, not a fresh arrival.
+      this.#lastMembers = new Set(room.members.map((entry) => entry.user.id));
+      this.#rosterReady = true;
 
       if (this.#offer) {
         const buffered = this.#offer;
@@ -150,14 +264,7 @@ class VoiceStore {
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
-    for (const track of this.#mic?.getTracks() ?? []) track.stop();
-    this.#mic = null;
-    this.#remote = new MediaStream();
-    if (this.#audio) {
-      this.#audio.pause();
-      this.#audio.srcObject = null;
-      this.#audio = null;
-    }
+    this.#teardown();
     this.muted = false;
     this.deafened = false;
     if (channelId) await api(`/channels/${channelId}/voice`, { method: 'DELETE' }).catch(() => undefined);
@@ -171,7 +278,7 @@ class VoiceStore {
 
   setDeafened(next: boolean): void {
     this.deafened = next;
-    if (this.#audio) this.#audio.muted = next;
+    if (this.#master) this.#master.gain.value = next ? 0 : 1;
     this.#applyMic();
     this.#sync();
   }
@@ -195,14 +302,7 @@ class VoiceStore {
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
-    for (const track of this.#mic?.getTracks() ?? []) track.stop();
-    this.#mic = null;
-    this.#remote = new MediaStream();
-    if (this.#audio) {
-      this.#audio.pause();
-      this.#audio.srcObject = null;
-      this.#audio = null;
-    }
+    this.#teardown();
     this.channelId = null;
     this.members = [];
     this.rosters = {};
