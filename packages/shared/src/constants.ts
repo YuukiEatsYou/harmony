@@ -7,7 +7,7 @@ export const HARMONY_NAME = 'Harmony';
  * the major number is the owner's to raise. Kept here rather than in a
  * package.json so the client, the server and the bridge all read one value.
  */
-export const HARMONY_VERSION = '1.33.7';
+export const HARMONY_VERSION = '2.0.0';
 
 /** Where the project lives, linked from the About panel. */
 export const HARMONY_REPO_URL = 'https://github.com/YuukiEatsYou/harmony';
@@ -127,3 +127,15 @@ export const DEFAULT_MAX_VOICE_MEMBERS = 10;
 
 /** The largest room limit an administrator may set, to bound the relay. */
 export const MAX_VOICE_MEMBERS = 99;
+
+/**
+ * The upper bound a shared screen is captured at, and how many frames of it per
+ * second. 720p30 suits most connections; an administrator with the bandwidth to
+ * spare may raise either, so the two are separate settings rather than presets.
+ * The relay never transcodes, so this is only what the sharing client asks its
+ * own browser for.
+ */
+export const DEFAULT_SCREEN_SHARE_HEIGHT = 720;
+export const MAX_SCREEN_SHARE_HEIGHT = 1080;
+export const DEFAULT_SCREEN_SHARE_FRAME_RATE = 30;
+export const MAX_SCREEN_SHARE_FRAME_RATE = 60;

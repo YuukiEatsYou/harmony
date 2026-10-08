@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_MAX_VOICE_MEMBERS,
+  DEFAULT_SCREEN_SHARE_FRAME_RATE,
+  DEFAULT_SCREEN_SHARE_HEIGHT,
   DEFAULT_UPDATE_BACKUP_RETENTION,
   HEX_COLOR_PATTERN,
   MAX_ICON_PADDING,
@@ -47,6 +49,10 @@ export interface ServerSettings {
   gifStorage: GifStorageMode;
   /** Members one voice channel holds; 0 means unlimited. */
   maxVoiceMembers: number;
+  /** The tallest a shared screen is captured, in pixels. */
+  screenShareHeight: number;
+  /** How many frames a second a shared screen is captured at. */
+  screenShareFrameRate: number;
 }
 
 /** A settings patch. `theme` is partial so one color can be changed on its own. */
@@ -66,6 +72,10 @@ export interface ServerSettingsUpdate {
   gifStorage?: GifStorageMode;
   /** Members one voice channel holds; 0 is unlimited. */
   maxVoiceMembers?: number;
+  /** The tallest a shared screen is captured, in pixels. */
+  screenShareHeight?: number;
+  /** How many frames a second a shared screen is captured at. */
+  screenShareFrameRate?: number;
 }
 
 export interface BridgeSettings {
@@ -165,6 +175,8 @@ const KEY_SETUP_COMPLETED = 'setup_completed';
 const KEY_UPDATE_CHECK = 'update_check_enabled';
 const KEY_UPDATE_BACKUP_RETENTION = 'update_backup_retention';
 const KEY_MAX_VOICE_MEMBERS = 'max_voice_members';
+const KEY_SCREEN_SHARE_HEIGHT = 'screen_share_height';
+const KEY_SCREEN_SHARE_FRAME_RATE = 'screen_share_frame_rate';
 
 function parseString(raw: string, fallback: string): string {
   try {
@@ -286,6 +298,14 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
         parseNumberOrNull(stored.get(KEY_MAX_VOICE_MEMBERS)) ??
         defaults.maxVoiceMembers ??
         DEFAULT_MAX_VOICE_MEMBERS,
+      screenShareHeight:
+        parseNumberOrNull(stored.get(KEY_SCREEN_SHARE_HEIGHT)) ??
+        defaults.screenShareHeight ??
+        DEFAULT_SCREEN_SHARE_HEIGHT,
+      screenShareFrameRate:
+        parseNumberOrNull(stored.get(KEY_SCREEN_SHARE_FRAME_RATE)) ??
+        defaults.screenShareFrameRate ??
+        DEFAULT_SCREEN_SHARE_FRAME_RATE,
     };
   }
 
@@ -431,6 +451,12 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       }
       if (patch.maxVoiceMembers !== undefined) {
         writeSetting(sqlite, KEY_MAX_VOICE_MEMBERS, JSON.stringify(patch.maxVoiceMembers));
+      }
+      if (patch.screenShareHeight !== undefined) {
+        writeSetting(sqlite, KEY_SCREEN_SHARE_HEIGHT, JSON.stringify(patch.screenShareHeight));
+      }
+      if (patch.screenShareFrameRate !== undefined) {
+        writeSetting(sqlite, KEY_SCREEN_SHARE_FRAME_RATE, JSON.stringify(patch.screenShareFrameRate));
       }
       return get();
     },

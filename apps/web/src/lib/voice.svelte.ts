@@ -6,6 +6,7 @@ import type {
   VoiceStateUpdatePayload,
 } from '@harmony/shared';
 import { api } from './api';
+import { meta } from './meta.svelte';
 import { session } from './session.svelte';
 import { playSound } from './sounds';
 
@@ -72,6 +73,16 @@ interface RemoteAudio {
   gain: GainNode;
 }
 
+/** One shared screen as the UI sees it: whose it is, and whether we watch it. */
+export interface ScreenTile {
+  userId: string;
+  name: string;
+  /** Whether this client has opted in to watch the stream. */
+  watching: boolean;
+  /** The picture, once the relay has actually delivered one. */
+  stream: MediaStream | null;
+}
+
 class VoiceStore {
   /** The channel this member is connected to, or null. */
   channelId = $state<string | null>(null);
@@ -96,6 +107,8 @@ class VoiceStore {
    */
   sending = $state(false);
   receiving = $state(false);
+  /** Whether this member is sharing their screen right now. */
+  sharing = $state(false);
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
@@ -110,6 +123,13 @@ class VoiceStore {
   #statsTimer: ReturnType<typeof setInterval> | null = null;
   #inBytes = 0;
   #outBytes = 0;
+  /** The member's own screen capture, while it is being shared. */
+  #display: MediaStream | null = null;
+  #screenSender: RTCRtpSender | null = null;
+  /** Pictures received for each member, whether or not they still share. */
+  #receivedScreens = $state<Record<string, MediaStream>>({});
+  /** Members whose screens this client has opted in to watch. */
+  #watching = $state<Record<string, boolean>>({});
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -186,6 +206,12 @@ class VoiceStore {
     const channelId = this.channelId;
     try {
       await pc.setRemoteDescription({ type: 'offer', sdp });
+      // The server offers this member's own screen line receive-only, and the
+      // first video line in the offer is that one. Left at the browser's default
+      // the line negotiates inactive, so a screen attached later would go nowhere;
+      // send-only is what makes a later replaceTrack flow without renegotiation.
+      const screen = pc.getTransceivers().find((entry) => entry.receiver.track?.kind === 'video');
+      if (screen && screen.direction === 'recvonly') screen.direction = 'sendonly';
       await pc.setLocalDescription(await pc.createAnswer());
       if (channelId && pc.localDescription) {
         await api(`/channels/${channelId}/voice/answer`, {
@@ -377,10 +403,11 @@ class VoiceStore {
       };
       pc.ontrack = (event) => {
         // The relay names each track's producer in its stream id, which is the
-        // member the audio belongs to.
+        // member the media belongs to.
         const userId = event.streams[0]?.id ?? 'unknown';
         const stream = event.streams[0] ?? new MediaStream([event.track]);
-        this.#attachRemote(userId, stream);
+        if (event.track.kind === 'video') this.#attachScreen(userId, stream, event.track);
+        else this.#attachRemote(userId, stream);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
 
@@ -399,6 +426,9 @@ class VoiceStore {
         this.#offer = null;
         await this.#answer(buffered);
       }
+      // A rebuilt call recreates the membership server-side with default flags, so
+      // the member's mute, deafen and watched screens are re-sent once it is up.
+      this.#sync();
     } catch (cause) {
       this.error = describeFailure(cause);
       await this.#disconnect();
@@ -412,15 +442,18 @@ class VoiceStore {
   async leave(): Promise<void> {
     this.#intended = null;
     this.#recoverAttempts = 0;
+    this.#watching = {};
     this.#cancelRecover();
     await this.#disconnect();
   }
 
   /** Tears down the microphone, the connection and the relayed audio. */
   async #disconnect(): Promise<void> {
+    await this.stopScreen().catch(() => undefined);
     const channelId = this.channelId;
     this.channelId = null;
     this.members = [];
+    this.#receivedScreens = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;
@@ -495,6 +528,131 @@ class VoiceStore {
     this.#sync();
   }
 
+  /**
+   * The screens to show, one per sharing member other than yourself. This is the
+   * roster's say-so, not the received track's: the relay only forwards a screen to
+   * the viewers that opted in, so a sharing member appears as a watch prompt until
+   * this client asks for it, and the tile disappears the moment their share stops
+   * rather than freezing on its last frame.
+   */
+  get screenTiles(): ScreenTile[] {
+    const me = session.user?.id ?? null;
+    const tiles: ScreenTile[] = [];
+    for (const entry of this.members) {
+      const id = entry.user.id;
+      if (!entry.sharing || id === me) continue;
+      tiles.push({
+        userId: id,
+        name: entry.user.displayName ?? entry.user.username,
+        watching: this.#watching[id] === true,
+        stream: this.#receivedScreens[id] ?? null,
+      });
+    }
+    return tiles;
+  }
+
+  /**
+   * Starts watching a member's screen. The relay forwards nothing until this is
+   * sent, which is what keeps the stream off the wire for everyone who never opted
+   * in; the server asks the producer for a keyframe, so the picture starts at once.
+   */
+  watchScreen(userId: string): void {
+    if (this.#watching[userId]) return;
+    this.#watching = { ...this.#watching, [userId]: true };
+    this.#sync();
+  }
+
+  /** Stops watching a member's screen, which stops the relay forwarding it. */
+  unwatchScreen(userId: string): void {
+    if (!this.#watching[userId]) return;
+    const next = { ...this.#watching };
+    delete next[userId];
+    this.#watching = next;
+    this.#sync();
+  }
+
+  /**
+   * Registers a member's screen for the UI. A remote video line exists from the
+   * moment a call starts, so a received track is not the same as a live share: the
+   * track stays muted until the relay actually sends a picture, and mute and
+   * unmute are what tell an idle line from a live one.
+   */
+  #attachScreen(userId: string, stream: MediaStream, track: MediaStreamTrack): void {
+    const show = (): void => {
+      this.#receivedScreens = { ...this.#receivedScreens, [userId]: stream };
+    };
+    const hide = (): void => {
+      if (this.#receivedScreens[userId] !== stream) return;
+      const next = { ...this.#receivedScreens };
+      delete next[userId];
+      this.#receivedScreens = next;
+    };
+    if (!track.muted) show();
+    track.addEventListener('unmute', show);
+    track.addEventListener('mute', hide);
+    track.addEventListener('ended', hide);
+  }
+
+  /**
+   * Starts sharing this member's screen. The call already negotiated a send-only
+   * video line for it, so this replaces the track on that line and nothing is
+   * renegotiated.
+   */
+  async shareScreen(): Promise<void> {
+    const pc = this.#pc;
+    if (!pc || this.sharing) return;
+    const transceiver = pc
+      .getTransceivers()
+      .find((entry) => entry.receiver.track?.kind === 'video' && entry.currentDirection === 'sendonly');
+    if (!transceiver) {
+      this.error = 'This call cannot share a screen.';
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      this.error = 'This browser cannot share a screen.';
+      return;
+    }
+    this.error = null;
+    try {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        // The bounds an administrator set; the browser fits the screen into them.
+        video: {
+          height: { max: meta.data?.screenShare.height ?? 720 },
+          frameRate: { max: meta.data?.screenShare.frameRate ?? 30 },
+        },
+        audio: false,
+      });
+      const track = display.getVideoTracks()[0];
+      if (!track) throw new Error('The screen capture had no video track.');
+      this.#display = display;
+      await transceiver.sender.replaceTrack(track);
+      this.#screenSender = transceiver.sender;
+      this.sharing = true;
+      this.#sync();
+      // The browser's own Stop sharing button ends the track; follow it.
+      track.addEventListener('ended', () => void this.stopScreen());
+    } catch (cause) {
+      for (const track of this.#display?.getTracks() ?? []) track.stop();
+      this.#display = null;
+      this.sharing = false;
+      // Cancelling the picker is a choice, not a failure.
+      if (cause instanceof DOMException && cause.name === 'NotAllowedError') return;
+      this.error = describeFailure(cause);
+    }
+  }
+
+  /** Stops sharing this member's screen. */
+  async stopScreen(): Promise<void> {
+    if (!this.sharing && !this.#display) return;
+    this.sharing = false;
+    this.#sync();
+    for (const track of this.#display?.getTracks() ?? []) track.stop();
+    this.#display = null;
+    const sender = this.#screenSender;
+    this.#screenSender = null;
+    await sender?.replaceTrack(null).catch(() => undefined);
+  }
+
   /** Clears a failed-join message once it has been read. */
   clearError(): void {
     this.error = null;
@@ -510,7 +668,12 @@ class VoiceStore {
     if (!this.channelId) return;
     void api(`/channels/${this.channelId}/voice`, {
       method: 'PATCH',
-      body: JSON.stringify({ muted: this.muted, deafened: this.deafened }),
+      body: JSON.stringify({
+        muted: this.muted,
+        deafened: this.deafened,
+        sharing: this.sharing,
+        watching: Object.keys(this.#watching),
+      }),
     }).catch(() => undefined);
   }
 
@@ -520,6 +683,12 @@ class VoiceStore {
     this.#recovering = false;
     this.#recoverAttempts = 0;
     this.#cancelRecover();
+    for (const track of this.#display?.getTracks() ?? []) track.stop();
+    this.#display = null;
+    this.#screenSender = null;
+    this.sharing = false;
+    this.#receivedScreens = {};
+    this.#watching = {};
     this.#offer = null;
     this.#pc?.close();
     this.#pc = null;

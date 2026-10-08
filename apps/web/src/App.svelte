@@ -16,6 +16,7 @@
   import ProfilePanel from './components/ProfilePanel.svelte';
   import ProfileViewer from './components/ProfileViewer.svelte';
   import SearchPanel from './components/SearchPanel.svelte';
+  import ScreenShare from './components/ScreenShare.svelte';
   import SetupWizard from './components/SetupWizard.svelte';
 
   let loading = $state(true);
@@ -143,6 +144,7 @@
   {/if}
   <ProfileCard />
   <Lightbox />
+  <ScreenShare />
 {:else}
   <AuthPanel />
 {/if}

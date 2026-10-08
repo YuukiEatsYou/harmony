@@ -201,7 +201,14 @@
           <span class="avatar small fallback">{initial(entry.user)}</span>
         {/if}
         <span class="voice-member-name">{entry.user.displayName ?? entry.user.username}</span>
-        {#if entry.muted}<span class="voice-member-muted"><Icon name="mic-off" size={12} /></span>{/if}
+        <span class="voice-member-tail">
+          {#if entry.sharing}
+            <span class="voice-member-sharing" title="Sharing their screen"><Icon name="screen" size={12} /></span>
+          {/if}
+          {#if entry.muted}
+            <span class="voice-member-muted"><Icon name="mic-off" size={12} /></span>
+          {/if}
+        </span>
       </div>
     {/each}
   {:else}
@@ -318,17 +325,20 @@
           {:else if voice.connectionState === 'failed'}Connection failed
           {:else if voice.connectionState === 'disconnected'}Reconnecting…
           {:else}Voice connected{/if}
-          {#if !voice.connecting && voice.connectionState !== 'failed'}
-            <span class="voice-signal" title="Live audio: microphone sending, incoming audio">
-              <span class="voice-signal-icon" class:on={voice.sending}>
-                <Icon name={voice.muted ? 'mic-off' : 'mic'} size={12} />
-              </span>
-              <span class="voice-signal-icon" class:on={voice.receiving}>
-                <Icon name="volume" size={12} />
-              </span>
-            </span>
-          {/if}
         </span>
+        {#if voice.sharing}
+          <span class="voice-bar-sharing"><Icon name="screen" size={12} /> Sharing your screen</span>
+        {/if}
+        {#if !voice.connecting && voice.connectionState !== 'failed'}
+          <span class="voice-signal" title="Live audio: microphone sending, incoming audio">
+            <span class="voice-signal-icon" class:on={voice.sending}>
+              <Icon name={voice.muted ? 'mic-off' : 'mic'} size={12} />
+            </span>
+            <span class="voice-signal-icon" class:on={voice.receiving}>
+              <Icon name="volume" size={12} />
+            </span>
+          </span>
+        {/if}
         {#if voice.error}<span class="voice-bar-error">{voice.error}</span>{/if}
       </div>
       <button
@@ -351,6 +361,16 @@
         onclick={() => voice.setDeafened(!voice.deafened)}
       >
         <Icon name="headphones" size={18} />
+      </button>
+      <button
+        type="button"
+        class="voice-bar-button"
+        class:sharing={voice.sharing}
+        title={voice.sharing ? 'Stop sharing' : 'Share screen'}
+        aria-label={voice.sharing ? 'Stop sharing your screen' : 'Share your screen'}
+        onclick={() => (voice.sharing ? voice.stopScreen() : voice.shareScreen())}
+      >
+        <Icon name="screen" size={18} />
       </button>
       <button
         type="button"

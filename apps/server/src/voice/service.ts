@@ -22,6 +22,10 @@ interface Membership {
   channelId: string;
   muted: boolean;
   deafened: boolean;
+  /** Whether the member is sharing their screen. */
+  sharing: boolean;
+  /** The members whose screens this member is watching, by their user id. */
+  watching: Set<string>;
 }
 
 export interface VoiceService {
@@ -29,8 +33,8 @@ export interface VoiceService {
   join(userId: string, channelId: string): Promise<void>;
   /** Leaves whatever voice channel the member is in, if any. */
   leave(userId: string): Promise<void>;
-  /** Sets the member's own mute and deafen flags. */
-  update(userId: string, patch: { muted?: boolean; deafened?: boolean }): void;
+  /** Sets the member's own mute, deafen, screen-sharing and watch flags. */
+  update(userId: string, patch: { muted?: boolean; deafened?: boolean; sharing?: boolean; watching?: string[] }): void;
   /** Applies the SDP answer a member's client sent for the current offer. */
   answer(userId: string, sdp: string): Promise<void>;
   /** The members in one channel, for a REST response. */
@@ -86,6 +90,14 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       portRange: deps.portRange,
       publicIp: deps.publicIp,
       log: (event, detail) => deps.serverLog?.info(event, event, detail),
+      // A connection that died without a leave takes its member's seat with it, so
+      // the room is not left holding a ghost who can never be heard again.
+      onPeerLost: (userId) => {
+        const membership = members.get(userId);
+        if (!membership) return;
+        drop(userId, membership);
+        broadcast(membership.channelId);
+      },
     },
   );
 
@@ -102,6 +114,7 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
         user: presentUser(sqlite, row),
         muted: membership.muted,
         deafened: membership.deafened,
+        sharing: membership.sharing,
       });
     }
     return states;
@@ -117,6 +130,28 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
     rooms.get(membership.channelId)?.delete(userId);
     if (rooms.get(membership.channelId)?.size === 0) rooms.delete(membership.channelId);
     members.delete(userId);
+  }
+
+  /**
+   * Replaces a member's screen subscriptions with the ones they named. The client
+   * sends the whole set, so this diffs it against what the relay already forwards:
+   * a dropped id stops immediately, a new one starts forwarding (and asks the
+   * producer for a keyframe so the picture appears at once). Ids that are not
+   * somebody else in the same room are ignored, so a client cannot subscribe to a
+   * member it cannot see.
+   */
+  function applyWatching(userId: string, membership: Membership, next: string[]): void {
+    const occupants = rooms.get(membership.channelId) ?? new Set<string>();
+    const wanted = new Set(
+      next.filter((id) => id !== userId && occupants.has(id) && members.has(id)),
+    );
+    for (const id of membership.watching) {
+      if (!wanted.has(id)) sfu.watch(userId, id, false);
+    }
+    for (const id of wanted) {
+      if (!membership.watching.has(id)) sfu.watch(userId, id, true);
+    }
+    membership.watching = wanted;
   }
 
   async function leave(userId: string): Promise<void> {
@@ -177,7 +212,7 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
         broadcast(existing.channelId);
       }
 
-      const membership: Membership = { channelId, muted: false, deafened: false };
+      const membership: Membership = { channelId, muted: false, deafened: false, sharing: false, watching: new Set() };
       members.set(userId, membership);
       const occupants = rooms.get(channelId) ?? new Set<string>();
       occupants.add(userId);
@@ -204,6 +239,8 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       if (!membership) throw new HttpError(409, 'not_in_voice', 'You are not in a voice channel.');
       if (patch.muted !== undefined) membership.muted = patch.muted;
       if (patch.deafened !== undefined) membership.deafened = patch.deafened;
+      if (patch.sharing !== undefined) membership.sharing = patch.sharing;
+      if (patch.watching !== undefined) applyWatching(userId, membership, patch.watching);
       broadcast(membership.channelId);
     },
 

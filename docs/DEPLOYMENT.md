@@ -235,8 +235,17 @@ directly to the process, so the range has to be open on the host **and** in your
 provider's firewall (OVHcloud has its own panel, separate from the machine).
 
 The range starts at `40000`–`40100`, and is set with `HARMONY_VOICE_PORT_MIN` and
-`HARMONY_VOICE_PORT_MAX`. Make it at least as large as the busiest room you
-expect: one port is used per member connected to voice.
+`HARMONY_VOICE_PORT_MAX`. Size it for the busiest moment you expect, not just one
+room: a connection binds a port for each local address the host has, so a member
+can take several. The default holds roughly a dozen simultaneous connections,
+which suits a small community; widen the range if you run larger or busier rooms.
+
+A member whose client vanishes without a clean leave is reaped within about half
+a minute, which frees their seat and most of their ports. Closing a connection
+that has already failed does not release every socket, though, so a process left
+running for a long time accumulates a few; a restart clears them. If members start
+being unable to connect after a week or two of heavy use, the range is likely
+exhausted and a restart will clear it.
 
 With `ufw` that is one rule for the whole range:
 

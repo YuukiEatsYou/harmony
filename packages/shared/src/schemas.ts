@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES, MAX_VOICE_MEMBERS } from './constants.ts';
+import { LIMITS, MAX_ICON_PADDING, MAX_SCREEN_SHARE_FRAME_RATE, MAX_SCREEN_SHARE_HEIGHT, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES, MAX_VOICE_MEMBERS } from './constants.ts';
 import { BOT_COMMAND_LIMITS } from './commands.ts';
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
@@ -47,15 +47,29 @@ export const createChannelSchema = z.object({
 });
 export type CreateChannelInput = z.infer<typeof createChannelSchema>;
 
-/** Muting or deafening yourself in the voice channel you are in. */
+/** Muting, deafening or screen sharing in the voice channel you are in. */
 export const voiceStatePatchSchema = z
   .object({
     muted: z.boolean().optional(),
     deafened: z.boolean().optional(),
+    sharing: z.boolean().optional(),
+    /**
+     * The members whose screens this client wants to watch. Full replacement: an
+     * empty list stops every stream. The relay only forwards a screen to the
+     * viewers that named it, so this is the whole opt-in. Ids outside the caller's
+     * own room are ignored server-side, and the ceiling is generous next to the
+     * room-size limit.
+     */
+    watching: z.array(z.string().min(1).max(64)).max(64).optional(),
   })
-  .refine((value) => value.muted !== undefined || value.deafened !== undefined, {
-    message: 'Nothing to update.',
-  });
+  .refine(
+    (value) =>
+      value.muted !== undefined ||
+      value.deafened !== undefined ||
+      value.sharing !== undefined ||
+      value.watching !== undefined,
+    { message: 'Nothing to update.' },
+  );
 export type VoiceStatePatchInput = z.infer<typeof voiceStatePatchSchema>;
 
 /** The client's SDP answer to a voice offer. Generous ceiling; it is one document. */
@@ -282,6 +296,10 @@ export const updateSettingsSchema = z.object({
   gifStorage: z.enum(GIF_STORAGE_MODES as [GifStorageMode, ...GifStorageMode[]]).optional(),
   /** Members one voice channel holds; 0 is unlimited. */
   maxVoiceMembers: z.number().int().min(0).max(MAX_VOICE_MEMBERS).optional(),
+  /** The tallest a shared screen is captured, in pixels. */
+  screenShareHeight: z.number().int().min(240).max(MAX_SCREEN_SHARE_HEIGHT).optional(),
+  /** How many frames a second a shared screen is captured at. */
+  screenShareFrameRate: z.number().int().min(5).max(MAX_SCREEN_SHARE_FRAME_RATE).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
