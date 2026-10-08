@@ -35,6 +35,16 @@ export interface SfuSignals {
   sendOffer(userId: string, channelId: string, sdp: string): void;
 }
 
+/**
+ * How long a dead connection is left to heal before it is reaped and its ICE port
+ * released. A failed connection is past hope, so it goes sooner; a disconnected
+ * one might still recover (a network blip, a client rebuilding its call), so it is
+ * given much longer. Both are longer than the client's own recovery grace, so a
+ * call that heals never has its member dropped out from under it.
+ */
+const reapFailedMs = 8_000;
+const reapDisconnectedMs = 20_000;
+
 export interface Sfu {
   /** Adds a member to a room, negotiating their connection and the others'. */
   join(userId: string, channelId: string): Promise<void>;
@@ -64,6 +74,11 @@ export interface SfuOptions {
    * seam an operator can watch.
    */
   log?: (event: string, detail?: Record<string, unknown>) => void;
+  /**
+   * Called when a connection is reaped because it died without a leave. The room
+   * membership is the caller's to release, since the SFU only owns the media side.
+   */
+  onPeerLost?: (userId: string) => void;
 }
 
 interface Peer {
@@ -92,6 +107,8 @@ interface Peer {
   awaitingAnswer: boolean;
   /** A change arrived mid-negotiation, so one more offer is owed. */
   needsOffer: boolean;
+  /** Pending reaping of a connection that went failed or stayed disconnected. */
+  reapTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
 }
 
@@ -258,6 +275,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
         queue: Promise.resolve(),
         awaitingAnswer: false,
         needsOffer: false,
+        reapTimer: null,
         closed: false,
       };
       // The member's own microphone and screen: one receive-only line each.
@@ -283,6 +301,34 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       });
 
       peers.set(userId, peer);
+      /*
+       * A member is normally removed by an explicit leave. If their client vanishes
+       * without one, though — a dropped session, a dev proxy that keeps the socket
+       * open — nothing else would ever close this connection, and it holds its slice
+       * of the ICE port range forever, so enough of them exhaust the range and no new
+       * call can connect. So a connection that goes failed is reaped after a short
+       * grace, and one that stays disconnected after a longer one; reaching connected
+       * cancels it. Both graces are past the client's own recovery, which leaves and
+       * rejoins first, so a call that heals never trips this.
+       */
+      pc.connectionStateChange.subscribe((state) => {
+        if (state === 'connected') {
+          if (peer.reapTimer) {
+            clearTimeout(peer.reapTimer);
+            peer.reapTimer = null;
+          }
+          return;
+        }
+        if (peer.reapTimer || peer.closed) return;
+        if (state !== 'failed' && state !== 'disconnected') return;
+        peer.reapTimer = setTimeout(() => {
+          peer.reapTimer = null;
+          // A rejoin replaces the peer; only reap the one this timer was set for.
+          if (peer.closed || peers.get(peer.userId) !== peer) return;
+          log('voice_sfu_reap', { userId: peer.userId, state });
+          void this.leave(peer.userId).then(() => options.onPeerLost?.(peer.userId));
+        }, state === 'failed' ? reapFailedMs : reapDisconnectedMs);
+      });
       reconcile(peer);
       reofferRoom(channelId);
     },
@@ -304,6 +350,10 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       if (!peer) return;
       log('voice_sfu_leave', { userId });
       peer.closed = true;
+      if (peer.reapTimer) {
+        clearTimeout(peer.reapTimer);
+        peer.reapTimer = null;
+      }
       peers.delete(userId);
       for (const subscriptions of peer.pipes.values()) for (const unsubscribe of subscriptions) unsubscribe();
       for (const subscriptions of peer.videoPipes.values()) for (const unsubscribe of subscriptions) unsubscribe();

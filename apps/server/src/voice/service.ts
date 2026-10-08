@@ -90,6 +90,14 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       portRange: deps.portRange,
       publicIp: deps.publicIp,
       log: (event, detail) => deps.serverLog?.info(event, event, detail),
+      // A connection that died without a leave takes its member's seat with it, so
+      // the room is not left holding a ghost who can never be heard again.
+      onPeerLost: (userId) => {
+        const membership = members.get(userId);
+        if (!membership) return;
+        drop(userId, membership);
+        broadcast(membership.channelId);
+      },
     },
   );
 

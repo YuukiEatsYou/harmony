@@ -231,6 +231,19 @@ never re-encodes, so a higher bound is more bandwidth for the sharer and every
 viewer. A watched screen shows in a floating window the viewer can drag by its
 header and resize from the corner.
 
+Presence and media are separate, and a member is normally removed by an explicit
+leave. A client that vanishes without one — a dropped session, or a development
+proxy that keeps its socket open — would otherwise hold its connection, and its
+slice of the ICE port range, forever, and enough of those exhaust the range so no
+new call can connect at all. So the relay watches each connection's own state: one
+that goes `failed` is reaped after a short grace and one that stays `disconnected`
+after a longer one, with reaching `connected` cancelling either. The reaped
+member's seat is then released by the voice service, which drops them from the room
+and tells everyone. Note that werift does not release every UDP socket when a
+connection that has already failed is closed, so reaping reclaims most of a dead
+connection's ports but not all; a restart clears the remainder, and the port range
+is sized with that in mind.
+
 ## Search
 
 Message search is a case-insensitive substring match (`LIKE`) over the text, rather than a full-text
