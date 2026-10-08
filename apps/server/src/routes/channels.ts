@@ -175,7 +175,10 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
     const categoryId = input.categoryId ?? null;
     if (categoryId) requireCategoryRow(categoryId);
 
-    const discordChannelId = input.discordChannelId ?? null;
+    // A voice channel carries no messages, so a Discord bridge and slowmode, which
+    // only apply to text, are ignored rather than stored and never used.
+    const type = input.type ?? 'text';
+    const discordChannelId = type === 'voice' ? null : (input.discordChannelId ?? null);
     if (discordChannelId) assertDiscordChannelFree(discordChannelId, null);
 
     const requiredRoleId = input.requiredRoleId ?? null;
@@ -187,12 +190,12 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
       name: input.name,
       topic: input.topic ?? null,
       categoryId,
-      type: 'text',
+      type,
       position: nextChannelPosition(db.sqlite, categoryId),
       createdAt: new Date().toISOString(),
       discordChannelId,
       requiredRoleId,
-      slowmodeSeconds: input.slowmodeSeconds ?? 0,
+      slowmodeSeconds: type === 'voice' ? 0 : (input.slowmodeSeconds ?? 0),
     });
 
     const channel = toChannel(requireChannelRow(id));

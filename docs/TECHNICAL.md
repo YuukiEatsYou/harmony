@@ -174,6 +174,34 @@ riding on `currentColor`); a color the member picked does not. Both a palette ed
 and a removal announce the affected members with `MEMBER_UPDATE`, since the color
 only changes for them in the DTO they are refetched with.
 
+## Voice
+
+Voice chats are rooms to talk in, and the design splits along one line: clients do
+all the audio, the server relays packets. Nothing in the server decodes, mixes or
+re-encodes — it forwards each member's one encoded stream to the others, so no
+member's IP is ever exposed to another. That is an SFU, not a mesh (which leaks
+IPs and makes every client upload N-1 streams) and not an MCU (which would mix on
+the server).
+
+What is in place today is the **presence** half: `channels.type` gained `voice`,
+the `ConnectVoice` and `SpeakVoice` permissions (open to `@everyone` by default,
+as on Discord, and granted to existing instances by migration 40), a
+`voice/service.ts` holding each room in memory — who is in it, and their mute and
+deafen flags — the join, mute and leave routes, and the `VOICE_STATE_UPDATE`
+dispatch. A member is in at most one channel: joining again moves them, and a
+member who goes fully offline, i.e. whose last gateway connection drops, is
+removed, which is why the gateway calls back into the voice service on disconnect.
+Rooms hold `maxVoiceMembers` (10 by default, admin-configurable, 0 unlimited),
+because the relay's cost grows with the square of the room.
+
+The **media** half is next and is where WebRTC comes in: an embedded SFU, one
+PeerConnection per client, forwarding the encoded Opus without decoding it. That
+is why audio does not ride the gateway (TCP would stutter under any loss) and why
+one UDP port will have to be opened on the host — media goes straight to the
+process, bypassing the reverse proxy. Screen share is deliberately out of scope
+for now; the presence model and the per-stream forwarding are shaped so a video
+track can be added alongside the audio one rather than reworked in.
+
 ## Search
 
 Message search is a case-insensitive substring match (`LIKE`) over the text, rather than a full-text

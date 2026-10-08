@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  DEFAULT_MAX_VOICE_MEMBERS,
   DEFAULT_UPDATE_BACKUP_RETENTION,
   HEX_COLOR_PATTERN,
   MAX_ICON_PADDING,
@@ -44,6 +45,8 @@ export interface ServerSettings {
    * `gif-hosts.ts` in the shared package.
    */
   gifStorage: GifStorageMode;
+  /** Members one voice channel holds; 0 means unlimited. */
+  maxVoiceMembers: number;
 }
 
 /** A settings patch. `theme` is partial so one color can be changed on its own. */
@@ -61,6 +64,8 @@ export interface ServerSettingsUpdate {
   /** Cleared by an empty string, which takes the picker's hosted tab away. */
   klipyApiKey?: string | null;
   gifStorage?: GifStorageMode;
+  /** Members one voice channel holds; 0 is unlimited. */
+  maxVoiceMembers?: number;
 }
 
 export interface BridgeSettings {
@@ -159,6 +164,7 @@ const KEY_PREVIEW_UA = 'preview_user_agent';
 const KEY_SETUP_COMPLETED = 'setup_completed';
 const KEY_UPDATE_CHECK = 'update_check_enabled';
 const KEY_UPDATE_BACKUP_RETENTION = 'update_backup_retention';
+const KEY_MAX_VOICE_MEMBERS = 'max_voice_members';
 
 function parseString(raw: string, fallback: string): string {
   try {
@@ -276,6 +282,10 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       setupCompleted: setup ? parseBoolean(setup, defaults.setupCompleted) : defaults.setupCompleted,
       klipyConfigured: parseStringOrNull(stored.get(KEY_KLIPY_KEY)) !== null,
       gifStorage: parseGifStorage(stored.get(KEY_GIF_STORAGE)),
+      maxVoiceMembers:
+        parseNumberOrNull(stored.get(KEY_MAX_VOICE_MEMBERS)) ??
+        defaults.maxVoiceMembers ??
+        DEFAULT_MAX_VOICE_MEMBERS,
     };
   }
 
@@ -418,6 +428,9 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       }
       if (patch.gifStorage !== undefined) {
         writeSetting(sqlite, KEY_GIF_STORAGE, JSON.stringify(patch.gifStorage));
+      }
+      if (patch.maxVoiceMembers !== undefined) {
+        writeSetting(sqlite, KEY_MAX_VOICE_MEMBERS, JSON.stringify(patch.maxVoiceMembers));
       }
       return get();
     },

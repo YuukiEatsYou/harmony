@@ -1084,4 +1084,21 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 40,
+    name: 'voice_permissions',
+    up(db) {
+      /*
+       * Voice channels need two new permissions, and the implied @everyone role is
+       * granted them so voice works out of the box on existing instances, the way
+       * Discord opens Connect and Speak to everyone. The bits are OR-ed in rather
+       * than written whole, so an instance that customized @everyone keeps its
+       * other changes. 1<<18 (ConnectVoice) | 1<<19 (SpeakVoice) is 786432, which
+       * fits SQLite's 64-bit INTEGER; permission bitfields are decimal strings.
+       */
+      db.exec(
+        `UPDATE roles SET permissions = CAST(CAST(permissions AS INTEGER) | 786432 AS TEXT) WHERE is_default = 1`,
+      );
+    },
+  },
 ];

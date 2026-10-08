@@ -29,6 +29,10 @@ export const Permission = {
   ManageMembers: 1n << 16n,
   /** Create, edit and cancel server events (a creator can always edit their own). */
   ManageEvents: 1n << 17n,
+  /** Join a voice channel and hear the members in it. */
+  ConnectVoice: 1n << 18n,
+  /** Unmute a microphone in a voice channel; muting yourself is always allowed. */
+  SpeakVoice: 1n << 19n,
 } as const;
 
 export type PermissionName = keyof typeof Permission;
@@ -46,7 +50,11 @@ export const EVERYONE_PERMISSIONS: PermissionValue =
   Permission.SendMessages |
   Permission.AttachFiles |
   Permission.AddReactions |
-  Permission.CreateInvites;
+  Permission.CreateInvites |
+  // Voice is open to everyone out of the box, as it is on Discord; a moderator
+  // can still take it away by editing @everyone.
+  Permission.ConnectVoice |
+  Permission.SpeakVoice;
 
 /** `Administrator` implies every other flag. */
 export function hasPermission(granted: PermissionValue, required: PermissionValue): boolean {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES } from './constants.ts';
+import { LIMITS, MAX_ICON_PADDING, MAX_UPDATE_BACKUP_RETENTION, MAX_UPLOAD_CEILING_BYTES, MAX_VOICE_MEMBERS } from './constants.ts';
 import { BOT_COMMAND_LIMITS } from './commands.ts';
 import { TIMEOUT_MAX_MINUTES } from './moderation.ts';
 import { MAX_SLOWMODE_SECONDS } from './slowmode.ts';
@@ -42,8 +42,21 @@ export const createChannelSchema = z.object({
   /** A role required to see the channel, or null for open access. */
   requiredRoleId: z.string().nullable().optional(),
   slowmodeSeconds,
+  /** A voice channel carries no messages; it is a room to talk in. */
+  type: z.enum(['text', 'voice']).optional(),
 });
 export type CreateChannelInput = z.infer<typeof createChannelSchema>;
+
+/** Muting or deafening yourself in the voice channel you are in. */
+export const voiceStatePatchSchema = z
+  .object({
+    muted: z.boolean().optional(),
+    deafened: z.boolean().optional(),
+  })
+  .refine((value) => value.muted !== undefined || value.deafened !== undefined, {
+    message: 'Nothing to update.',
+  });
+export type VoiceStatePatchInput = z.infer<typeof voiceStatePatchSchema>;
 
 export const createMessageSchema = z
   .object({
@@ -261,6 +274,8 @@ export const updateSettingsSchema = z.object({
   klipyApiKey: z.string().trim().max(200).nullable().optional(),
   /** "store" keeps a copy of each gif here; "link" points at allowlisted gif hosts. */
   gifStorage: z.enum(GIF_STORAGE_MODES as [GifStorageMode, ...GifStorageMode[]]).optional(),
+  /** Members one voice channel holds; 0 is unlimited. */
+  maxVoiceMembers: z.number().int().min(0).max(MAX_VOICE_MEMBERS).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

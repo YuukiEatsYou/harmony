@@ -23,6 +23,7 @@ code wins — please open an issue.
   - [Health and meta](#health-and-meta)
   - [Auth](#auth)
   - [Channels and categories](#channels-and-categories)
+  - [Voice](#voice)
   - [Messages](#messages)
   - [Polls](#polls)
   - [Search](#search)
@@ -678,8 +679,9 @@ for a locked channel, `404` for one that does not exist.
 Linking a `discordChannelId` requires a configured bridge and a Discord channel not already linked
 elsewhere (`409 discord_channel_taken`). `requiredRoleId` must name a real role (`400 invalid_role`)
 and locks the channel; see [Channel locking](#channel-locking). `slowmodeSeconds` sets a per-member
-cooldown, 0 to 21600; see [Slowmode](#slowmode). Returns the new `Channel` and fires
-`CHANNEL_CREATE`.
+cooldown, 0 to 21600; see [Slowmode](#slowmode). `type` is `"text"` (the default) or `"voice"`; a
+voice channel carries no messages, so a `discordChannelId` and `slowmodeSeconds` are ignored for it.
+Returns the new `Channel` and fires `CHANNEL_CREATE`.
 
 #### `PATCH /api/v1/channels/:id` — `ManageChannels`
 
@@ -765,6 +767,42 @@ a no-op at either end. Returns the moved `Category` and fires `CATEGORY_UPDATE`.
 Returns `204`, fires `CATEGORY_DELETE` with `{ "id": "..." }`. A category that still holds
 channels cannot be deleted: the request is refused with `409 category_not_empty`. Move or delete its
 channels first.
+
+### Voice
+
+A `voice` channel is a room to talk in. These routes carry **presence only** — who is in the room
+and whether they are muted. The audio itself never passes through the server's HTTP layer; it is
+relayed by the SFU. Presence is kept in memory, like presence itself, so a restart empties every room.
+
+Joining needs **Connect Voice**; an administrator may take it away from `@everyone` like any other
+permission. A member is in at most one voice channel: joining again moves them, and leaving or going
+offline (the last gateway connection dropping) frees their seat. A room holds
+`maxVoiceMembers` members (see the settings), 10 by default; `409 voice_full` when it is full.
+
+#### `POST /api/v1/channels/:channelId/voice` — `ConnectVoice`
+
+Joins the channel, or moves the caller there. Returns `VoiceRoomResponse`, the room's members after
+the join, and fires `VOICE_STATE_UPDATE` to everyone who can see the channel. Refused with
+`400 not_a_voice_channel`, `403 channel_forbidden` when the channel is locked away, or
+`409 voice_full`.
+
+```json
+{ "channelId": "…", "members": [{ "channelId": "…", "user": { /* User */ }, "muted": false, "deafened": false }] }
+```
+
+#### `PATCH /api/v1/channels/:channelId/voice` — auth
+
+```json
+{ "muted": true, "deafened": false }
+```
+
+Sets the caller's own mute and deafen flags; either may be omitted. Returns the updated room and
+fires `VOICE_STATE_UPDATE`. `409 not_in_voice` if the caller is not in that channel.
+
+#### `DELETE /api/v1/channels/:channelId/voice` — auth
+
+Leaves the channel, returning `204` and firing `VOICE_STATE_UPDATE` with the room now missing the
+caller. `409 not_in_voice` if the caller is not in that channel.
 
 ### Channel locking
 
@@ -2634,7 +2672,7 @@ Returns `204`.
 `{ "serverName"?: string, "requireInvite"?: boolean, "defaultChannelId"?: string | null,
 "embedsEnabled"?: boolean, "maxImageBytes"?: number, "maxVideoBytes"?: number,
 "previewUserAgent"?: string | null, "klipyApiKey"?: string | null,
-"gifStorage"?: "store" | "link",
+"gifStorage"?: "store" | "link", "maxVoiceMembers"?: number,
 "theme"?: { "background"?: string | null, "accent"?: string | null },
 "icon"?: { "padding"?: number | null, "background"?: string | null } }`.
 Returns the updated settings. `serverName` and `theme` changing also update `GET /api/v1/meta`.
@@ -2650,6 +2688,9 @@ again makes the wizard greet them once more. `gifStorage` is `"store"` (the defa
 sent is downloaded and kept here) or `"link"` (a gif on an allowlisted gif host is not downloaded;
 the message points at it). It is also in `GET /api/v1/meta`; see
 [Linked gifs](#linked-gifs) for what it changes.
+
+`maxVoiceMembers` is how many members one voice channel holds, from 0 (unlimited) to 99, defaulting
+to 10; see [Voice](#voice).
 
 `icon.padding` is a percentage of an installed app icon's tile to leave clear around the artwork,
 from 0 to 45. `null` works it out from the image: none for a picture with no transparent pixels,
@@ -2950,6 +2991,7 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `CHANNEL_SETTINGS_UPDATE` | `ChannelNotificationSettings`, sent only to the member it belongs to |
 | `COMMAND_INVOKE` | `CommandInvokePayload`, to the bot's own sessions only: a member invoked one of its slash commands |
 | `COMMANDS_UPDATE` | `{}`, to every connected member whenever a bot changes its slash command set; refetch `GET /commands` |
+| `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
 role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,

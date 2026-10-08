@@ -16,6 +16,12 @@ export interface GatewayOptions {
   cookieName: string;
   resolveToken: (token: string) => AuthContext | null;
   hub: GatewayHub;
+  /**
+   * Called when a member's last connection drops, so anything tied to being
+   * connected (their seat in a voice channel) can be released. A member with
+   * another tab still open does not trigger it.
+   */
+  onUserOffline?: (userId: string) => void;
 }
 
 /**
@@ -54,6 +60,9 @@ export function registerGateway(app: FastifyInstance, options: GatewayOptions): 
     );
 
     let identified = false;
+    // Kept for the close handler: a dropped connection releases the member's
+    // voice seat, but only once their last connection is gone.
+    let identifiedUserId: string | null = null;
     const identifyTimer = setTimeout(() => {
       if (!identified) socket.close(GatewayCloseCode.NotAuthenticated, 'Identify timed out');
     }, interval);
@@ -107,6 +116,7 @@ export function registerGateway(app: FastifyInstance, options: GatewayOptions): 
         }
 
         identified = true;
+        identifiedUserId = auth.user.id;
         clearTimeout(identifyTimer);
         options.hub.authenticate(clientId, auth);
         const ready: GatewayReady = { user: auth.user, gateway_version: GATEWAY_VERSION };
@@ -118,6 +128,9 @@ export function registerGateway(app: FastifyInstance, options: GatewayOptions): 
       clearTimeout(identifyTimer);
       if (silenceTimer) clearTimeout(silenceTimer);
       options.hub.unregister(clientId);
+      if (identifiedUserId && !options.hub.onlineUserIds().has(identifiedUserId)) {
+        options.onUserOffline?.(identifiedUserId);
+      }
       app.log.debug('gateway client disconnected');
     });
     socket.on('error', (error: Error) => app.log.error({ err: error }, 'gateway socket error'));

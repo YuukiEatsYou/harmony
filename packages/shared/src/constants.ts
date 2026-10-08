@@ -7,7 +7,7 @@ export const HARMONY_NAME = 'Harmony';
  * the major number is the owner's to raise. Kept here rather than in a
  * package.json so the client, the server and the bridge all read one value.
  */
-export const HARMONY_VERSION = '1.32.0';
+export const HARMONY_VERSION = '1.33.0';
 
 /** Where the project lives, linked from the About panel. */
 export const HARMONY_REPO_URL = 'https://github.com/YuukiEatsYou/harmony';
@@ -117,3 +117,13 @@ export const DEFAULT_UPDATE_BACKUP_RETENTION = 3;
 
 /** The most pre-update snapshots an owner may choose to keep, to bound disk use. */
 export const MAX_UPDATE_BACKUP_RETENTION = 20;
+
+/**
+ * How many members one voice channel holds by default. Rooms stay small on
+ * purpose: the relay forwards every speaker to every listener, so the cost grows
+ * with the square of the room. 0 means unlimited, which an administrator may set.
+ */
+export const DEFAULT_MAX_VOICE_MEMBERS = 10;
+
+/** The largest room limit an administrator may set, to bound the relay. */
+export const MAX_VOICE_MEMBERS = 99;

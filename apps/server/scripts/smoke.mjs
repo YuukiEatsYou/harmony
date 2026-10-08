@@ -849,6 +849,80 @@ try {
   await req(`/channels/${bravo.json.id}`, { method: 'DELETE', token: ownerToken });
   await req(`/categories/${miscCategory.json.id}`, { method: 'DELETE', token: ownerToken });
 
+  // --- Voice channels ---
+  // Audio never comes near the server: it is relayed by the SFU over UDP. These
+  // cover only the room presence: joining, the roster broadcast, muting, the size
+  // limit and leaving.
+  const bobPerms = await req('/auth/me', { token: bobToken });
+  check(
+    'members may join voice by default',
+    (BigInt(bobPerms.json?.permissions ?? '0') & (1n << 18n)) !== 0n,
+  );
+
+  const voiceChannel = await req('/channels', {
+    method: 'POST',
+    token: ownerToken,
+    body: { name: 'Lounge', type: 'voice' },
+  });
+  const voiceId = voiceChannel.json?.id;
+  check(
+    'a voice channel is created',
+    voiceChannel.status === 200 && voiceChannel.json?.type === 'voice',
+    `status ${voiceChannel.status}`,
+  );
+  check(
+    'the channel list marks it as voice',
+    (await req('/channels', { token: ownerToken })).json?.channels?.find((c) => c.id === voiceId)?.type === 'voice',
+  );
+
+  const voiceWatcher = await openGateway({ token: bobToken });
+  const joined = await req(`/channels/${voiceId}/voice`, { method: 'POST', token: ownerToken });
+  await sleep(250);
+  check(
+    'joining returns the room with the member in it',
+    joined.status === 200 &&
+      joined.json?.members?.length === 1 &&
+      joined.json?.members?.[0]?.user?.id === owner.json?.user?.id,
+    JSON.stringify(joined.json),
+  );
+  check(
+    'a voice join is broadcast to the channel',
+    voiceWatcher.events.some(
+      (frame) => frame.t === 'VOICE_STATE_UPDATE' && frame.d?.channelId === voiceId && frame.d?.members?.length === 1,
+    ),
+  );
+
+  const muted = await req(`/channels/${voiceId}/voice`, {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { muted: true },
+  });
+  check('a member can mute themselves', muted.json?.members?.[0]?.muted === true);
+
+  // The room limit is on by default at 10; set it to 1 so a second member is refused.
+  await req('/settings', { method: 'PATCH', token: ownerToken, body: { maxVoiceMembers: 1 } });
+  check(
+    'a full voice channel refuses another member (409)',
+    (await req(`/channels/${voiceId}/voice`, { method: 'POST', token: bobToken })).status === 409,
+  );
+  await req('/settings', { method: 'PATCH', token: ownerToken, body: { maxVoiceMembers: 10 } });
+
+  check(
+    'joining a text channel as voice is refused (400)',
+    (await req(`/channels/${general.id}/voice`, { method: 'POST', token: ownerToken })).status === 400,
+  );
+
+  const left = await req(`/channels/${voiceId}/voice`, { method: 'DELETE', token: ownerToken });
+  await sleep(250);
+  check('a member can leave', left.status === 204, `status ${left.status}`);
+  check(
+    'the emptied room is broadcast',
+    voiceWatcher.events.some(
+      (frame) => frame.t === 'VOICE_STATE_UPDATE' && frame.d?.channelId === voiceId && frame.d?.members?.length === 0,
+    ),
+  );
+  voiceWatcher.ws.close();
+
   // --- Typing indicators ---
   check('typing indicators default to on', owner.json?.user?.showTyping === true);
   const typingPing = await req(`/channels/${general.id}/typing`, { method: 'POST', token: ownerToken });

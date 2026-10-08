@@ -3,7 +3,7 @@ import type { Poll } from './polls.ts';
 
 export type SnowflakeId = string;
 export type IsoTimestamp = string;
-export type ChannelType = 'text';
+export type ChannelType = 'text' | 'voice';
 
 /**
  * A badge drawn beside a member's name. Owner and admin are derived rather than
@@ -145,6 +145,20 @@ export interface Channel {
   requiredRoleId: SnowflakeId | null;
   /** Seconds a member must wait between messages; 0 means slowmode is off. */
   slowmodeSeconds: number;
+}
+
+/**
+ * One member's presence in a voice channel. Audio itself never touches the
+ * server, so this is only who is in the room and how they are set: the flags
+ * here are what a client draws mute and deafen icons from.
+ */
+export interface VoiceState {
+  channelId: SnowflakeId;
+  user: User;
+  /** The member muted their own microphone. */
+  muted: boolean;
+  /** The member stopped hearing everyone, which also mutes them, as on Discord. */
+  deafened: boolean;
 }
 
 export interface Attachment {

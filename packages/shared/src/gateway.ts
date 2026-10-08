@@ -1,4 +1,4 @@
-import type { SavedMessage, User } from './types.ts';
+import type { SavedMessage, User, VoiceState } from './types.ts';
 
 /** Gateway opcodes, mirroring Discord's layout so tooling stays familiar. */
 export const GatewayOp = {
@@ -44,6 +44,8 @@ export const GatewayEvent = {
   UpdateAvailable: 'UPDATE_AVAILABLE',
   CommandInvoke: 'COMMAND_INVOKE',
   CommandsUpdate: 'COMMANDS_UPDATE',
+  /** The full roster of a voice channel after a change. */
+  VoiceStateUpdate: 'VOICE_STATE_UPDATE',
 } as const;
 export type GatewayEventName = (typeof GatewayEvent)[keyof typeof GatewayEvent];
 
@@ -140,6 +142,15 @@ export interface PresenceUpdatePayload {
 export interface UpdateAvailablePayload {
   running: string;
   latest: string;
+}
+
+/**
+ * A voice channel's members after a change. Rooms hold at most a handful, so the
+ * whole roster is sent rather than a diff; an empty list means it emptied out.
+ */
+export interface VoiceStateUpdatePayload {
+  channelId: string;
+  members: VoiceState[];
 }
 
 /** Envelope for every gateway frame. */

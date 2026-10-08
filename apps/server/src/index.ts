@@ -6,6 +6,7 @@ import websocket from '@fastify/websocket';
 import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_VIDEO_BYTES,
+  DEFAULT_MAX_VOICE_MEMBERS,
   GatewayEvent,
   HARMONY_VERSION_SOURCE_URL,
   MAX_UPLOAD_CEILING_BYTES,
@@ -35,6 +36,7 @@ import { createSavedMessageService } from './saved/service.ts';
 import { createScheduledMessageService } from './scheduled/service.ts';
 import { createPollService } from './polls/service.ts';
 import { createEventService } from './events/service.ts';
+import { createVoiceService } from './voice/service.ts';
 import { GatewayHub } from './realtime/hub.ts';
 import { createPruner } from './retention/pruner.ts';
 import { createUpdateService } from './update/service.ts';
@@ -82,6 +84,7 @@ import { registerUserRoutes } from './routes/users.ts';
 import { registerBotRoutes } from './routes/bots.ts';
 import { registerCommandRoutes } from './routes/commands.ts';
 import { registerChannelSettingsRoutes } from './routes/channel-settings.ts';
+import { registerVoiceRoutes } from './routes/voice.ts';
 import { registerRetentionRoutes } from './routes/retention.ts';
 import { registerBridgeRoutes } from './routes/bridge.ts';
 import { registerAuditRoutes } from './routes/audit.ts';
@@ -113,6 +116,7 @@ const settingsService = createSettingsService(db.sqlite, {
   maxVideoBytes: DEFAULT_MAX_VIDEO_BYTES,
   previewUserAgent: null,
   setupCompleted: false,
+  maxVoiceMembers: DEFAULT_MAX_VOICE_MEMBERS,
 });
 const authService = createAuthService(db.sqlite, config, settingsService);
 const discordOAuth = createDiscordOAuthService(settingsService);
@@ -124,6 +128,7 @@ const iconService = createIconService(config, settingsService);
 const userService = createUserService(db.sqlite, config);
 const botService = createBotService(db.sqlite);
 const commandService = createCommandService(db.sqlite, hub);
+const voiceService = createVoiceService({ sqlite: db.sqlite, hub, settings: settingsService });
 const messageService = createMessageService(db.sqlite, hub, auditService);
 const pinService = createPinService(db.sqlite, hub, auditService, messageService);
 const savedService = createSavedMessageService(db.sqlite, hub, messageService);
@@ -342,11 +347,14 @@ registerUserRoutes(app, { db, users: userService, hub, bridge });
 registerBotRoutes(app, { bots: botService, commands: commandService, users: userService, hub });
 registerCommandRoutes(app, { commands: commandService, hub });
 registerChannelSettingsRoutes(app, { db, hub });
+registerVoiceRoutes(app, { voice: voiceService });
 registerGateway(app, {
   heartbeatIntervalMs: config.gatewayHeartbeatMs,
   cookieName: config.cookieName,
   resolveToken: authService.resolveToken,
   hub,
+  // A member who goes fully offline leaves whatever voice channel they were in.
+  onUserOffline: (userId) => voiceService.handleOffline(userId),
 });
 
 app.addHook('onClose', async () => {

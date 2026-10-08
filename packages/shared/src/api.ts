@@ -12,6 +12,7 @@ import type {
   Role,
   SavedMessage,
   User,
+  VoiceState,
 } from './types.ts';
 import type { GifStorageMode } from './gif-hosts.ts';
 import type { ThemeSettings } from './theme.ts';
@@ -320,6 +321,12 @@ export interface RoleListResponse {
 /** The palette every member picks their username color from, in display order. */
 export interface NameColorListResponse {
   nameColors: NameColor[];
+}
+
+/** The members currently in a voice channel, as a join or leave returns them. */
+export interface VoiceRoomResponse {
+  channelId: string;
+  members: VoiceState[];
 }
 
 export interface InviteListResponse {
