@@ -30,6 +30,29 @@ const speakingLevel = 0.015;
 /** How often the speaking indicators are recomputed. */
 const speakingPollMs = 120;
 
+/**
+ * Turns a failed join into something worth reading. A DOMException name is
+ * meaningless to anyone who is not a browser engineer, and the microphone ones
+ * have a fix (a permission toggle) a message should name.
+ */
+function describeFailure(cause: unknown): string {
+  if (cause instanceof DOMException) {
+    switch (cause.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return 'Microphone access was blocked. Allow the microphone for this site, then try again.';
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        return 'No microphone was found on this device.';
+      case 'NotReadableError':
+        return 'The microphone is in use by another app on this device.';
+      default:
+        return cause.message || cause.name;
+    }
+  }
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 interface RemoteAudio {
   source: MediaStreamAudioSourceNode;
   analyser: AnalyserNode;
@@ -46,6 +69,8 @@ class VoiceStore {
   /** Member ids currently talking, for the speaking indicators. */
   speaking = $state<Record<string, boolean>>({});
   connecting = $state(false);
+  /** The channel a join is working on, so its row can show that it is trying. */
+  joining = $state<string | null>(null);
   muted = $state(false);
   deafened = $state(false);
   error = $state<string | null>(null);
@@ -130,7 +155,7 @@ class VoiceStore {
         });
       }
     } catch (cause) {
-      this.error = cause instanceof Error ? cause.message : String(cause);
+      this.error = describeFailure(cause);
     }
   }
 
@@ -192,11 +217,28 @@ class VoiceStore {
 
   /** Joins a channel, or moves there from another one. */
   async join(channelId: string): Promise<void> {
-    if (this.channelId === channelId || this.connecting) return;
+    if (this.channelId === channelId || this.joining) return;
+    /*
+     * The audio context is made and resumed here, inside the click that started
+     * this, before anything is awaited. iOS only lets a context start from a
+     * gesture, and the microphone prompt is a dialog the gesture does not
+     * survive, so a context created after it comes up suspended and never plays
+     * a packet.
+     */
+    const ctx = this.#ctx ?? new AudioContext();
+    this.#ctx = ctx;
+    void ctx.resume().catch(() => undefined);
     await this.leave();
     this.connecting = true;
+    this.joining = channelId;
     this.error = null;
     try {
+      // A phone on a plain-HTTP address, or a browser that never exposes the
+      // microphone, has no mediaDevices at all; say so rather than crashing on
+      // a property of undefined.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('This browser cannot reach the microphone. Voice needs HTTPS or localhost.');
+      }
       const mic = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
@@ -205,9 +247,6 @@ class VoiceStore {
       // Everything remote plays through the master gain, so deafening is one
       // change; the local microphone runs through an analyser only, into a silent
       // sink so the meter is pulled without echoing you back.
-      const ctx = this.#ctx ?? new AudioContext();
-      this.#ctx = ctx;
-      void ctx.resume().catch(() => undefined);
       const master = ctx.createGain();
       master.gain.value = this.deafened ? 0 : 1;
       master.connect(ctx.destination);
@@ -249,10 +288,11 @@ class VoiceStore {
         await this.#answer(buffered);
       }
     } catch (cause) {
-      this.error = cause instanceof Error ? cause.message : String(cause);
+      this.error = describeFailure(cause);
       await this.leave();
     } finally {
       this.connecting = false;
+      this.joining = null;
     }
   }
 
@@ -283,6 +323,11 @@ class VoiceStore {
     this.#sync();
   }
 
+  /** Clears a failed-join message once it has been read. */
+  clearError(): void {
+    this.error = null;
+  }
+
   /** Discord's rule: a deafened member is also muted, without touching their setting. */
   #applyMic(): void {
     const live = !this.muted && !this.deafened;
@@ -306,6 +351,7 @@ class VoiceStore {
     this.channelId = null;
     this.members = [];
     this.rosters = {};
+    this.joining = null;
     this.muted = false;
     this.deafened = false;
     this.error = null;

@@ -158,6 +158,7 @@
       <button
         class="channel"
         class:active={voice.channelId === channel.id}
+        class:connecting={voice.joining === channel.id}
         type="button"
         title={voice.channelId === channel.id ? `Disconnect from ${channel.name}` : `Join ${channel.name}`}
         onclick={() => (voice.channelId === channel.id ? voice.leave() : voice.join(channel.id))}
@@ -173,7 +174,9 @@
       >
         <span class="hash"><Icon name="volume" size={16} /></span><span class="channel-label">{channel.name}</span>
         <span class="tail">
-          {#if isLocked(channel)}
+          {#if voice.joining === channel.id}
+            <span class="voice-joining" title="Connecting…" aria-label="Connecting"></span>
+          {:else if isLocked(channel)}
             <span class="lock" title="Only members with a certain role can see this">
               <Icon name="lock" size={13} />
             </span>
@@ -344,6 +347,26 @@
         onclick={() => voice.leave()}
       >
         <Icon name="phone-off" size={18} />
+      </button>
+    </div>
+  {:else if voice.error}
+    <!--
+      A join that failed before it ever reached a channel has no connected bar
+      to report itself in, and a tap that silently does nothing is the one
+      outcome nobody can act on. Stand the error on its own until it is read.
+    -->
+    <div class="voice-bar error" role="alert">
+      <div class="voice-bar-info">
+        <span class="voice-bar-error">{voice.error}</span>
+      </div>
+      <button
+        type="button"
+        class="voice-bar-button"
+        title="Dismiss"
+        aria-label="Dismiss voice error"
+        onclick={() => voice.clearError()}
+      >
+        <Icon name="close" size={18} />
       </button>
     </div>
   {/if}
