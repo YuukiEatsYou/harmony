@@ -54,7 +54,9 @@ function describeFailure(cause: unknown): string {
 }
 
 interface RemoteAudio {
-  source: MediaStreamAudioSourceNode;
+  /** The element that actually pulls and decodes the remote track. */
+  element: HTMLAudioElement;
+  source: MediaElementAudioSourceNode;
   analyser: AnalyserNode;
   gain: GainNode;
 }
@@ -97,7 +99,6 @@ class VoiceStore {
   #statsTimer: ReturnType<typeof setInterval> | null = null;
   #inBytes = 0;
   #outBytes = 0;
-  #loggedInboundCodec = false;
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -173,19 +174,35 @@ class VoiceStore {
     }
   }
 
-  /** Wires one incoming track up for playback and for the speaking indicator. */
-  #attachRemote(userId: string, track: MediaStreamTrack): void {
+  /**
+   * Wires one incoming stream up for playback and for the speaking indicator.
+   *
+   * Playback has to run through a media element. A Web Audio
+   * MediaStreamAudioSourceNode pulls a local microphone without complaint, but
+   * Chromium will not pull a remote WebRTC track through one: the connection
+   * reports the packets received and then discards them, so the call is silent
+   * and the meter never moves, while Firefox plays the same stream. A media
+   * element does pull the track, so the audio goes through a hidden one and Web
+   * Audio taps it with createMediaElementSource, which also feeds the analyser.
+   */
+  #attachRemote(userId: string, stream: MediaStream): void {
     const ctx = this.#ctx;
     const master = this.#master;
     if (!ctx || !master || this.#remote.has(userId)) return;
-    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const element = document.createElement('audio');
+    element.autoplay = true;
+    element.srcObject = stream;
+    element.style.display = 'none';
+    document.body.appendChild(element);
+    void element.play().catch(() => undefined);
+    const source = ctx.createMediaElementSource(element);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     const gain = ctx.createGain();
     source.connect(analyser);
     analyser.connect(gain);
     gain.connect(master);
-    this.#remote.set(userId, { source, analyser, gain });
+    this.#remote.set(userId, { element, source, analyser, gain });
     this.#analysers.set(userId, analyser);
   }
 
@@ -209,30 +226,14 @@ class VoiceStore {
     if (!pc) return;
     let inbound: number | null = null;
     let outbound: number | null = null;
-    let inboundCodecId: string | undefined;
     try {
       const report = await pc.getStats();
       report.forEach((entry) => {
-        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number; codecId?: string };
+        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number };
         if (stat.kind !== 'audio') return;
-        if (stat.type === 'inbound-rtp') {
-          inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
-          if (stat.codecId) inboundCodecId = stat.codecId;
-        } else if (stat.type === 'outbound-rtp') {
-          outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
-        }
+        if (stat.type === 'inbound-rtp') inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
+        else if (stat.type === 'outbound-rtp') outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
       });
-      // Once, so a silent call can be read as "the wrong codec" rather than
-      // guessed at; the console is the only place with room for the detail.
-      if (!this.#loggedInboundCodec && inboundCodecId) {
-        this.#loggedInboundCodec = true;
-        let mime: string | undefined;
-        report.forEach((entry) => {
-          const stat = entry as RTCStats & { mimeType?: string };
-          if (stat.type === 'codec' && stat.id === inboundCodecId) mime = stat.mimeType;
-        });
-        console.info('[voice] inbound audio codec', mime ?? inboundCodecId);
-      }
     } catch {
       return;
     }
@@ -265,6 +266,8 @@ class VoiceStore {
       node.source.disconnect();
       node.analyser.disconnect();
       node.gain.disconnect();
+      node.element.srcObject = null;
+      node.element.remove();
     }
     this.#remote.clear();
     this.#analysers.clear();
@@ -280,7 +283,6 @@ class VoiceStore {
     this.receiving = false;
     this.#inBytes = 0;
     this.#outBytes = 0;
-    this.#loggedInboundCodec = false;
   }
 
   /** Joins a channel, or moves there from another one. */
@@ -300,7 +302,6 @@ class VoiceStore {
     this.connecting = true;
     this.joining = channelId;
     this.error = null;
-    console.info('[voice] joining as', session.user?.id ?? null);
     try {
       // A phone on a plain-HTTP address, or a browser that never exposes the
       // microphone, has no mediaDevices at all; say so rather than crashing on
@@ -342,16 +343,11 @@ class VoiceStore {
         this.connectionState = pc.connectionState;
       };
       pc.ontrack = (event) => {
-        // The relay names each track's producer in its stream id.
+        // The relay names each track's producer in its stream id, which is the
+        // member the audio belongs to.
         const userId = event.streams[0]?.id ?? 'unknown';
-        // A browser that drops the msid leaves the track anonymous, which the
-        // speaking ring keys on, so say what actually arrived instead of guessing.
-        console.info('[voice] incoming track', {
-          streams: event.streams.length,
-          producer: event.streams[0]?.id ?? null,
-          trackId: event.track.id,
-        });
-        this.#attachRemote(userId, event.track);
+        const stream = event.streams[0] ?? new MediaStream([event.track]);
+        this.#attachRemote(userId, stream);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
 

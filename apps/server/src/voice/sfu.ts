@@ -119,7 +119,6 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       if (!consumer.closed) slot.writeRtp(packet);
     });
     consumer.pipes.set(producer.userId, [() => subscription.unSubscribe()]);
-    log('voice_sfu_pipe', { producer: producer.userId, consumer: consumer.userId });
   }
 
   /** A consumer's outbound slot carrying a producer's audio, made on demand. */
@@ -141,7 +140,6 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
     consumer.pc.addTransceiver(slot, { direction: 'sendonly', streams: [source] });
     consumer.outbound.set(producer.userId, slot);
     pipe(producer, consumer, slot);
-    log('voice_sfu_slot', { producer: producer.userId, consumer: consumer.userId });
   }
 
   /** Brings one member's connection in step with everyone else in the room. */
@@ -182,7 +180,6 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       pc.addTransceiver('audio', { direction: 'recvonly' });
       pc.onTrack.subscribe((track) => {
         peer.inbound = track;
-        log('voice_sfu_inbound', { userId });
         // Slots made before the track arrived can be wired up now.
         for (const consumer of room(channelId)) {
           if (consumer === peer) continue;
