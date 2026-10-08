@@ -206,9 +206,24 @@ slot on the others and re-offers each once. That is why audio does not ride the
 gateway (TCP would stutter under any loss) and why one UDP port has to be opened
 on the host — media goes straight to the process, bypassing the reverse proxy.
 The relay is verified by `npm run smoke:sfu`, which drives three in-process
-WebRTC peers through a room, with no browser and no network. Screen share is
-deliberately out of scope for now; the presence model and the per-stream
-forwarding are shaped so a video track can be added alongside the audio one
+WebRTC peers through a room, with no browser and no network.
+
+Screen sharing rides the same forwarder. Every connection is given, when its
+member joins, a receive-only video line for that member's own screen beside the
+microphone line, and a send-only video slot per other member for that member's
+screen. Nothing is negotiated when a share starts or stops: the client attaches
+its screen to the line that is already there with `replaceTrack`, and the relay
+begins or stops copying packets, so renegotiation stays on join and leave. werift
+offers VP8 for video, which every desktop browser can produce from
+getDisplayMedia. Video needs one thing audio does not: a viewer only gets a
+picture at a keyframe, so the relay forwards a viewer's picture-loss request to
+the sharer and asks for one itself when a viewer attaches mid-share. One subtlety
+is worth remembering: a browser answers a transceiver it creates for a
+receive-only offer with its own default direction, which negotiates the line
+inactive, so the client flips that line to send-only before answering. The screen
+is captured at a bound the owner sets (`screenShareHeight`, `screenShareFrameRate`,
+published in `GET /meta`); the relay never re-encodes, so a higher bound is more
+bandwidth for the sharer and every viewer.
 rather than reworked in.
 
 ## Search

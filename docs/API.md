@@ -787,6 +787,16 @@ relay. When someone joins or leaves, every other member is re-offered once. The 
 mixes or re-encodes: it forwards each member's encoded audio to the others, so no member's IP ever
 reaches another.
 
+A member may also share their screen. Every connection carries a receive-only video line for the
+member's own screen beside the microphone line, and a send-only video slot per other member, so
+starting or stopping a share negotiates nothing: the client attaches its screen to the line that is
+already there and the relay copies packets into the slots, or stops. The relay is the same selective
+forwarder, so it re-encodes nothing; a viewer only gets a picture at a keyframe, so the server
+forwards a viewer's picture-loss request to the sharer and asks for one itself when a viewer joins
+mid-share. The bound a screen is captured at is the `screenShareHeight` and `screenShareFrameRate`
+settings, published in `GET /api/v1/meta`; the relay never transcodes, so a higher bound is more
+bandwidth for the sharer and every viewer.
+
 #### `GET /api/v1/voice` — `ViewChannels`
 
 ```json
@@ -2701,6 +2711,7 @@ Returns `204`.
 "embedsEnabled"?: boolean, "maxImageBytes"?: number, "maxVideoBytes"?: number,
 "previewUserAgent"?: string | null, "klipyApiKey"?: string | null,
 "gifStorage"?: "store" | "link", "maxVoiceMembers"?: number,
+"screenShareHeight"?: number, "screenShareFrameRate"?: number,
 "theme"?: { "background"?: string | null, "accent"?: string | null },
 "icon"?: { "padding"?: number | null, "background"?: string | null } }`.
 Returns the updated settings. `serverName` and `theme` changing also update `GET /api/v1/meta`.
@@ -2718,7 +2729,9 @@ the message points at it). It is also in `GET /api/v1/meta`; see
 [Linked gifs](#linked-gifs) for what it changes.
 
 `maxVoiceMembers` is how many members one voice channel holds, from 0 (unlimited) to 99, defaulting
-to 10; see [Voice](#voice).
+to 10; see [Voice](#voice). `screenShareHeight` (240-1080, default 720) and `screenShareFrameRate`
+(5-60, default 30) bound the screen a member shares, and are published to clients as `screenShare`
+in `GET /api/v1/meta`.
 
 `icon.padding` is a percentage of an installed app icon's tile to leave clear around the artwork,
 from 0 to 45. `null` works it out from the image: none for a picture with no transparent pixels,
