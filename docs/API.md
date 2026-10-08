@@ -3021,7 +3021,6 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `COMMANDS_UPDATE` | `{}`, to every connected member whenever a bot changes its slash command set; refetch `GET /commands` |
 | `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 | `VOICE_SIGNAL` | `VoiceSignalPayload`, to the member's own sessions only: an SDP offer for their voice connection |
-| `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
 role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,

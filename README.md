@@ -3,13 +3,13 @@
 ![The Harmony logo: three stacked smiling faces](apps/web/public/icon.png)
 
 **A chat server you run yourself.** Everything a small community actually uses
-from Discord — channels, roles, reactions, custom emoji, images and video — on a
+from Discord — channels, roles, reactions, voice chat, custom emoji, images and video — on a
 machine you own, with a bridge so nobody has to leave Discord behind.
 
 ## What is this?
 
 One instance is one server: channels and categories, a member list, replies,
-emoji reactions, polls, custom emoji, images and video, invites, per-channel slowmode,
+emoji reactions, polls, voice chat, custom emoji, images and video, invites, per-channel slowmode,
 message search across everything you can see (with Discord-style filters such as from:, in:, has: and dates), notification sounds, timeouts and
 bans, and an admin panel for all of it. It runs as a single small program, keeps
 everything in one folder you can back up, and needs no database server, no Docker
@@ -37,7 +37,7 @@ like a real app.
 
 ### What it isn't
 
-Harmony is deliberately scoped. There is no voice or video chat, no direct
+Harmony is deliberately scoped. There is no video or screen sharing, no direct
 messages and no friend list. One instance is one server — it is built to be *a*
 home for *a* community, not a platform.
 
