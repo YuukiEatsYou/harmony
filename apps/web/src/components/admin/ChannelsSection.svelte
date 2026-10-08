@@ -20,6 +20,7 @@
   let roles = $state<Role[]>([]);
   let discordChannels = $state<DiscordChannelOption[]>([]);
   let newChannelName = $state('');
+  let newChannelType = $state<'text' | 'voice'>('text');
   let newChannelCategory = $state('');
   let newChannelDiscord = $state('');
   let newCategoryName = $state('');
@@ -93,6 +94,7 @@
         method: 'POST',
         body: JSON.stringify({
           name,
+          type: newChannelType,
           categoryId: newChannelCategory || null,
           discordChannelId: newChannelDiscord || null,
         }),
@@ -290,7 +292,7 @@
       <button type="button" onclick={() => (editing = null)}>Cancel</button>
     {:else}
       {@render moveButtons(index, count, (direction) => moveChannel(channel, direction))}
-      <span class="grow"># {channel.name}</span>
+      <span class="grow">{channel.type === 'voice' ? 'Voice ·' : '#'} {channel.name}</span>
       <select
         title="Category"
         value={channel.categoryId ?? ''}
@@ -302,8 +304,11 @@
         {/each}
       </select>
       {@render roleSelect('channel', channel.id, channel.requiredRoleId)}
-      {@render slowmodeSelect(channel)}
-      {@render discordSelect(channel)}
+      {#if channel.type !== 'voice'}
+        <!-- Slowmode and a Discord bridge apply to text channels only. -->
+        {@render slowmodeSelect(channel)}
+        {@render discordSelect(channel)}
+      {/if}
       <button
         type="button"
         onclick={() => (editing = { kind: 'channel', id: channel.id, name: channel.name })}>Rename</button
@@ -335,6 +340,10 @@
 
     <form class="inline" onsubmit={createChannel}>
       <input bind:value={newChannelName} placeholder="New channel" required maxlength="64" />
+      <select bind:value={newChannelType} title="Channel type">
+        <option value="text">Text</option>
+        <option value="voice">Voice</option>
+      </select>
       <select bind:value={newChannelCategory}>
         <option value="">No category</option>
         {#each categories as category (category.id)}

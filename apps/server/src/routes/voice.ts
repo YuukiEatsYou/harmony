@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { Permission, voiceStatePatchSchema, type VoiceRoomResponse } from '@harmony/shared';
+import { Permission, voiceAnswerSchema, voiceStatePatchSchema, type VoiceRoomResponse } from '@harmony/shared';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
 import { HttpError } from '../http/errors.ts';
 import { parseBody } from '../http/validation.ts';
@@ -25,8 +25,23 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
   app.post('/api/v1/channels/:channelId/voice', async (request) => {
     const auth = requirePermission(request, Permission.ConnectVoice);
     const { channelId } = request.params as { channelId: string };
-    voice.join(auth.user.id, channelId);
+    await voice.join(auth.user.id, channelId);
     return room(channelId);
+  });
+
+  /**
+   * The client's answer to the offer it was sent over the gateway. Only the
+   * server ever offers, so this is the whole client-to-server media path.
+   */
+  app.post('/api/v1/channels/:channelId/voice/answer', async (request, reply) => {
+    const auth = requireAuth(request);
+    const { channelId } = request.params as { channelId: string };
+    if (voice.channelOf(auth.user.id) !== channelId) {
+      throw new HttpError(409, 'not_in_voice', 'You are not in that voice channel.');
+    }
+    const input = parseBody(voiceAnswerSchema, request.body);
+    await voice.answer(auth.user.id, input.sdp);
+    return reply.status(204).send();
   });
 
   app.patch('/api/v1/channels/:channelId/voice', async (request) => {
@@ -46,7 +61,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
     if (voice.channelOf(auth.user.id) !== channelId) {
       throw new HttpError(409, 'not_in_voice', 'You are not in that voice channel.');
     }
-    voice.leave(auth.user.id);
+    await voice.leave(auth.user.id);
     return reply.status(204).send();
   });
 }

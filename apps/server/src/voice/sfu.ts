@@ -21,7 +21,7 @@ import { MediaStreamTrack, RTCPeerConnection } from 'werift';
 /** How the SFU reaches a member's client; the gateway carries these in practice. */
 export interface SfuSignals {
   /** Sends an SDP offer for the member's connection; the client answers it. */
-  sendOffer(userId: string, sdp: string): void;
+  sendOffer(userId: string, channelId: string, sdp: string): void;
 }
 
 export interface Sfu {
@@ -33,6 +33,13 @@ export interface Sfu {
   leave(userId: string): Promise<void>;
   /** Closes every connection; on shutdown. */
   close(): void;
+}
+
+export interface SfuOptions {
+  /** UDP range the ICE agent may bind, so a firewall can open exactly that range. */
+  portRange?: [number, number];
+  /** A public IP to advertise as a host candidate when the host is behind NAT. */
+  publicIp?: string | null;
 }
 
 interface Peer {
@@ -55,8 +62,14 @@ interface Peer {
 }
 
 /** A member with a live connection. `channelId` is validated by the caller. */
-export function createSfu(signals: SfuSignals): Sfu {
+export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
   const peers = new Map<string, Peer>();
+
+  /** The config every connection is made with. */
+  const peerConfig = {
+    ...(options.portRange ? { icePortRange: options.portRange } : {}),
+    ...(options.publicIp ? { iceAdditionalHostAddresses: [options.publicIp] } : {}),
+  };
 
   function room(channelId: string): Peer[] {
     return [...peers.values()].filter((peer) => peer.channelId === channelId && !peer.closed);
@@ -78,7 +91,7 @@ export function createSfu(signals: SfuSignals): Sfu {
       .then(async () => {
         if (peer.closed) return;
         await peer.pc.setLocalDescription(await peer.pc.createOffer());
-        if (peer.pc.localDescription) signals.sendOffer(peer.userId, peer.pc.localDescription.sdp);
+        if (peer.pc.localDescription) signals.sendOffer(peer.userId, peer.channelId, peer.pc.localDescription.sdp);
       })
       .catch(() => undefined);
   }
@@ -130,7 +143,7 @@ export function createSfu(signals: SfuSignals): Sfu {
     async join(userId, channelId) {
       if (peers.has(userId)) await this.leave(userId);
 
-      const pc = new RTCPeerConnection({});
+      const pc = new RTCPeerConnection(peerConfig);
       const peer: Peer = {
         userId,
         channelId,

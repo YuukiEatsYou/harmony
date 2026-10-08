@@ -227,6 +227,29 @@ still created by registering with a password, since Discord sign-in is configure
 from the admin panel. The whole thing is optional and can be switched off again at
 any time.
 
+## Voice chat (optional)
+
+Voice needs UDP, which the HTTPS connection the rest of Harmony uses cannot
+carry. The media relay binds a fixed UDP port range and members send audio
+directly to the process, so the range has to be open on the host **and** in your
+provider's firewall (OVHcloud has its own panel, separate from the machine).
+
+The range starts at `40000`–`40100`, and is set with `HARMONY_VOICE_PORT_MIN` and
+`HARMONY_VOICE_PORT_MAX`. Make it at least as large as the busiest room you
+expect: one port is used per member connected to voice.
+
+With `ufw` that is one rule for the whole range:
+
+```sh
+sudo ufw allow 40000:40100/udp
+```
+
+There is nothing to configure in nginx: the media goes straight to the Node
+process, bypassing the reverse proxy. The server advertises its own addresses as
+the WebRTC candidate, which on a host whose interface carries its public IP (as on
+OVH) is already correct. A host behind another NAT should set
+`HARMONY_VOICE_PUBLIC_IP` to the address members reach it at.
+
 ## Installing it as an app
 
 Harmony is a Progressive Web App, so it can be installed to a phone or desktop

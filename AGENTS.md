@@ -28,6 +28,7 @@ npm start              # production: node apps/server/src/index.ts
 npm run typecheck      # tsc for server/shared, svelte-check for web
 npm run smoke          # boots a throwaway server and exercises the API end to end
 npm run smoke:bridge   # the Discord bridge against a fake transport
+npm run smoke:sfu      # the voice SFU relays RTP between in-process WebRTC peers
 npm run smoke:text     # web client pure logic (markdown/link parser, emoji picker, catch-up)
 ```
 

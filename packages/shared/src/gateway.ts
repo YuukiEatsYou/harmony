@@ -46,6 +46,8 @@ export const GatewayEvent = {
   CommandsUpdate: 'COMMANDS_UPDATE',
   /** The full roster of a voice channel after a change. */
   VoiceStateUpdate: 'VOICE_STATE_UPDATE',
+  /** An SDP offer for the caller's own voice connection; they answer it. */
+  VoiceSignal: 'VOICE_SIGNAL',
 } as const;
 export type GatewayEventName = (typeof GatewayEvent)[keyof typeof GatewayEvent];
 
@@ -151,6 +153,16 @@ export interface UpdateAvailablePayload {
 export interface VoiceStateUpdatePayload {
   channelId: string;
   members: VoiceState[];
+}
+
+/**
+ * An SDP offer for one member's own voice connection. The member answers it
+ * through the REST route rather than here, since only the server ever offers.
+ * Candidates ride inside the SDP, so there is nothing else to relay.
+ */
+export interface VoiceSignalPayload {
+  channelId: string;
+  sdp: string;
 }
 
 /** Envelope for every gateway frame. */

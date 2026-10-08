@@ -49,7 +49,7 @@ function createClient(userId, sfu, sending) {
 async function main() {
   const clients = new Map();
   const sfu = createSfu({
-    sendOffer: (userId, sdp) => {
+    sendOffer: (userId, _channelId, sdp) => {
       void clients.get(userId)?.answerOffer(sdp).catch(() => undefined);
     },
   });

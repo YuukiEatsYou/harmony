@@ -29,4 +29,9 @@ export type IconName =
   | 'more'
   | 'poll'
   | 'bot'
-  | 'calendar';
+  | 'calendar'
+  | 'volume'
+  | 'mic'
+  | 'mic-off'
+  | 'headphones'
+  | 'phone-off';

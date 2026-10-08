@@ -118,5 +118,25 @@
     <path d="M9.2 13h.01" stroke-width="2.4" />
     <path d="M14.8 13h.01" stroke-width="2.4" />
     <path d="M9.5 16.2h5" />
+  {:else if name === 'volume'}
+    <path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z" />
+    <path d="M15.5 9.7a3.5 3.5 0 0 1 0 4.6" />
+    <path d="M18 7.2a7 7 0 0 1 0 9.6" />
+  {:else if name === 'mic'}
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
+    <path d="M12 17.5V21" />
+  {:else if name === 'mic-off'}
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5.5 11a6.5 6.5 0 0 0 13 0" />
+    <path d="M12 17.5V21" />
+    <path d="M3.5 3.5 20.5 20.5" />
+  {:else if name === 'headphones'}
+    <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
+    <rect x="3" y="13" width="4.5" height="7" rx="2" />
+    <rect x="16.5" y="13" width="4.5" height="7" rx="2" />
+  {:else if name === 'phone-off'}
+    <path d="M6.5 4h3.2l1.5 4-2 1.4a12 12 0 0 0 5.4 5.4l1.4-2 4 1.5v3.2a2 2 0 0 1-2.2 2A16.2 16.2 0 0 1 4.5 6.2 2 2 0 0 1 6.5 4z" />
+    <path d="M3.5 3.5 20.5 20.5" />
   {/if}
 </svg>

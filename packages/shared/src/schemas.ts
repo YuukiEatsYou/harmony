@@ -58,6 +58,12 @@ export const voiceStatePatchSchema = z
   });
 export type VoiceStatePatchInput = z.infer<typeof voiceStatePatchSchema>;
 
+/** The client's SDP answer to a voice offer. Generous ceiling; it is one document. */
+export const voiceAnswerSchema = z.object({
+  sdp: z.string().min(1).max(200_000),
+});
+export type VoiceAnswerInput = z.infer<typeof voiceAnswerSchema>;
+
 export const createMessageSchema = z
   .object({
     content: z.string().max(LIMITS.messageLength).default(''),

@@ -911,6 +911,97 @@ button.server-name:hover:not(:disabled) {
   text-shadow: 0 0 9px color-mix(in srgb, currentColor 60%, transparent);
 }
 
+/* Members under a voice channel in the sidebar. */
+.voice-member {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.6rem 0.15rem 1.6rem;
+  color: var(--h-text-muted);
+  font-size: 0.82rem;
+}
+
+.voice-member-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-member-muted {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--h-text-muted);
+}
+
+/* The bar above the user bar while connected to a voice channel. */
+.voice-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-top: 1px solid var(--h-border);
+  background: var(--h-bg-deep);
+}
+
+.voice-bar-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-bar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--h-text);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.voice-bar-status {
+  color: var(--h-text-muted);
+  font-size: 0.74rem;
+}
+
+.voice-bar-error {
+  overflow: hidden;
+  color: var(--h-error);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-bar-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-sm);
+  background: none;
+  color: var(--h-text-muted);
+}
+
+.voice-bar-button:hover:not(:disabled) {
+  color: var(--h-text);
+  background: var(--h-hover);
+}
+
+.voice-bar-button.on {
+  color: var(--h-text);
+  background: var(--h-accent-subtle);
+}
+
+.voice-bar-button.danger:hover:not(:disabled) {
+  border-color: var(--h-error);
+  background: var(--h-error);
+  color: #fff;
+}
+
 /* The Admin and Log out links beside the member's own name. */
 .user-actions {
   display: flex;

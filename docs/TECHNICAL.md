@@ -194,13 +194,22 @@ removed, which is why the gateway calls back into the voice service on disconnec
 Rooms hold `maxVoiceMembers` (10 by default, admin-configurable, 0 unlimited),
 because the relay's cost grows with the square of the room.
 
-The **media** half is next and is where WebRTC comes in: an embedded SFU, one
-PeerConnection per client, forwarding the encoded Opus without decoding it. That
-is why audio does not ride the gateway (TCP would stutter under any loss) and why
-one UDP port will have to be opened on the host — media goes straight to the
-process, bypassing the reverse proxy. Screen share is deliberately out of scope
-for now; the presence model and the per-stream forwarding are shaped so a video
-track can be added alongside the audio one rather than reworked in.
+The **media** half is the SFU in `voice/sfu.ts`, built on `werift` (pure
+TypeScript WebRTC for Node, so no native dependency and no build step). It
+terminates one WebRTC connection per member and relays each member's encoded
+audio into the others' outbound slots (`track.onReceiveRtp` → `slot.writeRtp`),
+never decoding it. Negotiation is non-trickle, so an offer carries its ICE
+candidates and there is no candidate relay; the server is the only party that
+offers, so there is no glare, and a per-connection queue holds one offer
+outstanding until its answer arrives. A member joining or leaving adds or drops a
+slot on the others and re-offers each once. That is why audio does not ride the
+gateway (TCP would stutter under any loss) and why one UDP port has to be opened
+on the host — media goes straight to the process, bypassing the reverse proxy.
+The relay is verified by `npm run smoke:sfu`, which drives three in-process
+WebRTC peers through a room, with no browser and no network. Screen share is
+deliberately out of scope for now; the presence model and the per-stream
+forwarding are shaped so a video track can be added alongside the audio one
+rather than reworked in.
 
 ## Search
 

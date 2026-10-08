@@ -46,6 +46,18 @@ export interface Config {
    * setting a normal hoster could break from the panel.
    */
   updateCommand: string | null;
+  /**
+   * The UDP port range the voice relay binds for WebRTC media. It is fixed so it
+   * can be opened in the firewall: anything outside it is unreachable, so the
+   * range has to be at least as large as the busiest room.
+   */
+  voicePortRange: [number, number];
+  /**
+   * The public IP to advertise for voice, or null to use the machine's own
+   * addresses. Only needed when the host sits behind another NAT; a host whose
+   * interface already carries its public IP (as on OVH) needs nothing here.
+   */
+  voicePublicIp: string | null;
 }
 
 // Load `.env` if present, without pulling in a dotenv dependency.
@@ -117,5 +129,11 @@ export function loadConfig(): Config {
     scheduledMinLeadMs: Math.max(0, readNumber(process.env.HARMONY_SCHEDULED_MIN_LEAD_MS, SCHEDULED_MIN_LEAD_MS)),
     csp: readCsp(process.env.HARMONY_CSP),
     updateCommand: readCommand(process.env.HARMONY_UPDATE_COMMAND),
+    // The media relay binds this UDP range; see the Voice section of DEPLOYMENT.md.
+    voicePortRange: [
+      readNumber(process.env.HARMONY_VOICE_PORT_MIN, 40_000),
+      readNumber(process.env.HARMONY_VOICE_PORT_MAX, 40_100),
+    ],
+    voicePublicIp: process.env.HARMONY_VOICE_PUBLIC_IP?.trim() || null,
   };
 }

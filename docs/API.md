@@ -770,14 +770,22 @@ channels first.
 
 ### Voice
 
-A `voice` channel is a room to talk in. These routes carry **presence only** — who is in the room
-and whether they are muted. The audio itself never passes through the server's HTTP layer; it is
-relayed by the SFU. Presence is kept in memory, like presence itself, so a restart empties every room.
+A `voice` channel is a room to talk in. The routes here carry **presence and
+signaling**: who is in the room, and the WebRTC negotiation. The audio itself
+never passes through the server's HTTP layer — it is relayed by the SFU over UDP.
+Presence is kept in memory, like presence itself, so a restart empties every room.
 
 Joining needs **Connect Voice**; an administrator may take it away from `@everyone` like any other
 permission. A member is in at most one voice channel: joining again moves them, and leaving or going
 offline (the last gateway connection dropping) frees their seat. A room holds
 `maxVoiceMembers` members (see the settings), 10 by default; `409 voice_full` when it is full.
+
+On join the server opens a WebRTC connection for the member and sends it an SDP offer as a
+`VOICE_SIGNAL` dispatch. The client answers with the route below. Only the server ever offers
+(so there is no glare), and candidates ride inside the SDP (non-trickle), so there is nothing else to
+relay. When someone joins or leaves, every other member is re-offered once. The server never decodes,
+mixes or re-encodes: it forwards each member's encoded audio to the others, so no member's IP ever
+reaches another.
 
 #### `POST /api/v1/channels/:channelId/voice` — `ConnectVoice`
 
@@ -789,6 +797,15 @@ the join, and fires `VOICE_STATE_UPDATE` to everyone who can see the channel. Re
 ```json
 { "channelId": "…", "members": [{ "channelId": "…", "user": { /* User */ }, "muted": false, "deafened": false }] }
 ```
+
+#### `POST /api/v1/channels/:channelId/voice/answer` — auth
+
+```json
+{ "sdp": "v=0…" }
+```
+
+The client's answer to the offer it received as `VOICE_SIGNAL`. Returns `204`. `409 not_in_voice`
+when the caller is not in that channel.
 
 #### `PATCH /api/v1/channels/:channelId/voice` — auth
 
@@ -2991,6 +3008,8 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 | `CHANNEL_SETTINGS_UPDATE` | `ChannelNotificationSettings`, sent only to the member it belongs to |
 | `COMMAND_INVOKE` | `CommandInvokePayload`, to the bot's own sessions only: a member invoked one of its slash commands |
 | `COMMANDS_UPDATE` | `{}`, to every connected member whenever a bot changes its slash command set; refetch `GET /commands` |
+| `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
+| `VOICE_SIGNAL` | `VoiceSignalPayload`, to the member's own sessions only: an SDP offer for their voice connection |
 | `VOICE_STATE_UPDATE` | `VoiceStateUpdatePayload`, to members who can see the channel |
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,

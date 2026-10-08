@@ -128,7 +128,13 @@ const iconService = createIconService(config, settingsService);
 const userService = createUserService(db.sqlite, config);
 const botService = createBotService(db.sqlite);
 const commandService = createCommandService(db.sqlite, hub);
-const voiceService = createVoiceService({ sqlite: db.sqlite, hub, settings: settingsService });
+const voiceService = createVoiceService({
+  sqlite: db.sqlite,
+  hub,
+  settings: settingsService,
+  portRange: config.voicePortRange,
+  publicIp: config.voicePublicIp,
+});
 const messageService = createMessageService(db.sqlite, hub, auditService);
 const pinService = createPinService(db.sqlite, hub, auditService, messageService);
 const savedService = createSavedMessageService(db.sqlite, hub, messageService);
@@ -363,6 +369,7 @@ app.addHook('onClose', async () => {
   scheduledService.stop();
   pollService.stop();
   eventService.stop();
+  voiceService.close();
   await bridge.shutdown();
   db.close();
 });

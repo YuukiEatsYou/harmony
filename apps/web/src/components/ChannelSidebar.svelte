@@ -12,6 +12,7 @@
   import { muteLabel, pillCount } from '../lib/unread';
   import ChannelMenu from './ChannelMenu.svelte';
   import Icon from './Icon.svelte';
+  import { voice } from '../lib/voice.svelte';
 
   const permissions = $derived(permissionsFromString(session.permissions || '0'));
   // The button appears for anyone who could use at least one tab, moderators
@@ -151,51 +152,101 @@
 {#snippet channelRow(channel: Channel)}
   {@const settings = channelSettings.resolve(channel)}
   {@const mentions = chat.mentionsShown(channel)}
-  <div class="channel-item" class:active={channel.id === chat.activeChannelId}>
-    <button
-      class="channel"
-      class:active={channel.id === chat.activeChannelId}
-      class:unread={chat.unreadShown(channel)}
-      class:muted={settings.muted}
-      type="button"
-      title={settings.muted ? muteLabel(settings.muteEndsAt, channelSettings.now) : undefined}
-      onclick={(event) => swallowLongPress(event) || selectChannel(channel.id)}
-      oncontextmenu={(event) => {
-        event.preventDefault();
-        cancelPress();
-        openChannelMenu(channel, event.clientX, event.clientY);
-      }}
-      onpointerdown={(event) => startPress(event, (x, y) => openChannelMenu(channel, x, y))}
-      onpointerup={cancelPress}
-      onpointercancel={cancelPress}
-      onpointerleave={cancelPress}
-    >
-      <span class="hash">
-        {#if channel.discordChannelId}<Icon name="link" size={15} />{:else}#{/if}
-      </span><span class="channel-label">{channel.name}</span>
-      <span class="tail">
-        {#if mentions > 0}
-          <span class="mention-pill" title={mentions === 1 ? '1 unread mention' : `${mentions} unread mentions`}>
-            {pillCount(mentions)}
-          </span>
+  {#if channel.type === 'voice'}
+    <div class="channel-item" class:active={voice.channelId === channel.id}>
+      <button
+        class="channel"
+        class:active={voice.channelId === channel.id}
+        type="button"
+        title={voice.channelId === channel.id ? `Disconnect from ${channel.name}` : `Join ${channel.name}`}
+        onclick={() => (voice.channelId === channel.id ? voice.leave() : voice.join(channel.id))}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          cancelPress();
+          openChannelMenu(channel, event.clientX, event.clientY);
+        }}
+        onpointerdown={(event) => startPress(event, (x, y) => openChannelMenu(channel, x, y))}
+        onpointerup={cancelPress}
+        onpointercancel={cancelPress}
+        onpointerleave={cancelPress}
+      >
+        <span class="hash"><Icon name="volume" size={16} /></span><span class="channel-label">{channel.name}</span>
+        <span class="tail">
+          {#if isLocked(channel)}
+            <span class="lock" title="Only members with a certain role can see this">
+              <Icon name="lock" size={13} />
+            </span>
+          {/if}
+        </span>
+      </button>
+      <button
+        class="channel-more"
+        type="button"
+        aria-label={`Options for ${channel.name}`}
+        title="More options"
+        onclick={(event) => openChannelMenu(channel, ...fromButton(event))}
+      >
+        <Icon name="more" size={16} />
+      </button>
+    </div>
+    {#each voice.rosters[channel.id] ?? [] as entry (entry.user.id)}
+      <div class="voice-member">
+        {#if avatarUrl(entry.user)}
+          <img class="avatar small" src={avatarUrl(entry.user)} alt="" />
+        {:else}
+          <span class="avatar small fallback">{initial(entry.user)}</span>
         {/if}
-        {#if isLocked(channel)}
-          <span class="lock" title="Only members with a certain role can see this">
-            <Icon name="lock" size={13} />
-          </span>
-        {/if}
-      </span>
-    </button>
-    <button
-      class="channel-more"
-      type="button"
-      aria-label={`Options for #${channel.name}`}
-      title="More options"
-      onclick={(event) => openChannelMenu(channel, ...fromButton(event))}
-    >
-      <Icon name="more" size={16} />
-    </button>
-  </div>
+        <span class="voice-member-name">{entry.user.displayName ?? entry.user.username}</span>
+        {#if entry.muted}<span class="voice-member-muted"><Icon name="mic-off" size={12} /></span>{/if}
+      </div>
+    {/each}
+  {:else}
+    <div class="channel-item" class:active={channel.id === chat.activeChannelId}>
+      <button
+        class="channel"
+        class:active={channel.id === chat.activeChannelId}
+        class:unread={chat.unreadShown(channel)}
+        class:muted={settings.muted}
+        type="button"
+        title={settings.muted ? muteLabel(settings.muteEndsAt, channelSettings.now) : undefined}
+        onclick={(event) => swallowLongPress(event) || selectChannel(channel.id)}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          cancelPress();
+          openChannelMenu(channel, event.clientX, event.clientY);
+        }}
+        onpointerdown={(event) => startPress(event, (x, y) => openChannelMenu(channel, x, y))}
+        onpointerup={cancelPress}
+        onpointercancel={cancelPress}
+        onpointerleave={cancelPress}
+      >
+        <span class="hash">
+          {#if channel.discordChannelId}<Icon name="link" size={15} />{:else}#{/if}
+        </span><span class="channel-label">{channel.name}</span>
+        <span class="tail">
+          {#if mentions > 0}
+            <span class="mention-pill" title={mentions === 1 ? '1 unread mention' : `${mentions} unread mentions`}>
+              {pillCount(mentions)}
+            </span>
+          {/if}
+          {#if isLocked(channel)}
+            <span class="lock" title="Only members with a certain role can see this">
+              <Icon name="lock" size={13} />
+            </span>
+          {/if}
+        </span>
+      </button>
+      <button
+        class="channel-more"
+        type="button"
+        aria-label={`Options for #${channel.name}`}
+        title="More options"
+        onclick={(event) => openChannelMenu(channel, ...fromButton(event))}
+      >
+        <Icon name="more" size={16} />
+      </button>
+    </div>
+  {/if}
 {/snippet}
 
 <aside class="sidebar" class:open={ui.sidebarOpen}>
@@ -252,6 +303,48 @@
       {@render channelRow(channel)}
     {/each}
   </nav>
+
+  {#if voice.channelId}
+    {@const voiceName = chat.channels.find((entry) => entry.id === voice.channelId)?.name ?? 'Voice'}
+    <div class="voice-bar">
+      <div class="voice-bar-info">
+        <span class="voice-bar-title">{voiceName}</span>
+        <span class="voice-bar-status">
+          {#if voice.connecting}Connecting…{:else}Voice connected{/if}
+        </span>
+        {#if voice.error}<span class="voice-bar-error">{voice.error}</span>{/if}
+      </div>
+      <button
+        type="button"
+        class="voice-bar-button"
+        class:on={voice.muted}
+        title={voice.muted ? 'Unmute' : 'Mute'}
+        aria-label={voice.muted ? 'Unmute' : 'Mute'}
+        onclick={() => voice.setMuted(!voice.muted)}
+      >
+        <Icon name={voice.muted ? 'mic-off' : 'mic'} size={18} />
+      </button>
+      <button
+        type="button"
+        class="voice-bar-button"
+        class:on={voice.deafened}
+        title={voice.deafened ? 'Undeafen' : 'Deafen'}
+        aria-label={voice.deafened ? 'Undeafen' : 'Deafen'}
+        onclick={() => voice.setDeafened(!voice.deafened)}
+      >
+        <Icon name="headphones" size={18} />
+      </button>
+      <button
+        type="button"
+        class="voice-bar-button danger"
+        title="Disconnect"
+        aria-label="Disconnect from voice"
+        onclick={() => voice.leave()}
+      >
+        <Icon name="phone-off" size={18} />
+      </button>
+    </div>
+  {/if}
 
   <footer class="user-bar">
     <button class="user-button" type="button" title="Edit your profile" onclick={() => ui.openProfile()}>

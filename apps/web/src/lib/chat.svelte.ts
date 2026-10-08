@@ -25,6 +25,7 @@ import { members } from './members.svelte';
 import { roster } from './roster.svelte';
 import { commands } from './commands.svelte';
 import { nameColors } from './name-colors.svelte';
+import { voice } from './voice.svelte';
 import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
 import { playNotification } from './sounds';
@@ -275,6 +276,7 @@ class ChatStore {
     roster.reset();
     commands.reset();
     nameColors.reset();
+    voice.reset();
   }
 
   /**
@@ -953,6 +955,11 @@ class ChatStore {
   }
 
   #handleEvent(frame: GatewayFrame): void {
+    // Voice is its own concern; hand its frames straight to the voice store.
+    if (frame.t === 'VOICE_STATE_UPDATE' || frame.t === 'VOICE_SIGNAL') {
+      voice.handleFrame(frame);
+      return;
+    }
     switch (frame.t) {
       case 'MESSAGE_CREATE': {
         const message = frame.d as Message;
