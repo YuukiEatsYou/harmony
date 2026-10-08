@@ -314,7 +314,20 @@
       <div class="voice-bar-info">
         <span class="voice-bar-title">{voiceName}</span>
         <span class="voice-bar-status">
-          {#if voice.connecting}Connecting…{:else}Voice connected{/if}
+          {#if voice.connecting}Connecting…
+          {:else if voice.connectionState === 'failed'}Connection failed
+          {:else if voice.connectionState === 'disconnected'}Reconnecting…
+          {:else}Voice connected{/if}
+          {#if !voice.connecting && voice.connectionState !== 'failed'}
+            <span class="voice-signal" title="Live audio: microphone sending, incoming audio">
+              <span class="voice-signal-icon" class:on={voice.sending}>
+                <Icon name={voice.muted ? 'mic-off' : 'mic'} size={12} />
+              </span>
+              <span class="voice-signal-icon" class:on={voice.receiving}>
+                <Icon name="volume" size={12} />
+              </span>
+            </span>
+          {/if}
         </span>
         {#if voice.error}<span class="voice-bar-error">{voice.error}</span>{/if}
       </div>

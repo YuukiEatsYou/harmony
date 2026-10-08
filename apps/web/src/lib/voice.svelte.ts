@@ -74,6 +74,15 @@ class VoiceStore {
   muted = $state(false);
   deafened = $state(false);
   error = $state<string | null>(null);
+  /** The connection's own state, so a dropped call reads as more than silence. */
+  connectionState = $state<RTCPeerConnectionState | null>(null);
+  /**
+   * Whether audio is actually moving, sampled from getStats(). A call can be
+   * "connected" and still carry nothing, which between two different networks is
+   * the usual failure, so the bar says so rather than pretending all is well.
+   */
+  sending = $state(false);
+  receiving = $state(false);
 
   #pc: RTCPeerConnection | null = null;
   #mic: MediaStream | null = null;
@@ -84,6 +93,10 @@ class VoiceStore {
   /** One analyser per speaker, the local microphone included. */
   #analysers = new Map<string, AnalyserNode>();
   #pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Samples RTP counters, to tell a live call from a merely connected one. */
+  #statsTimer: ReturnType<typeof setInterval> | null = null;
+  #inBytes = 0;
+  #outBytes = 0;
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -184,6 +197,34 @@ class VoiceStore {
     return Math.sqrt(sum / data.length);
   }
 
+  /**
+   * Reads the connection's RTP counters to see whether audio is flowing. The
+   * counters only ever climb, so a sample that is higher than the last one means
+   * packets moved in that direction since then. Silence suppresses them to
+   * nearly nothing, which is fine: this is about a dead path, not a quiet one.
+   */
+  async #sample(): Promise<void> {
+    const pc = this.#pc;
+    if (!pc) return;
+    let inbound: number | null = null;
+    let outbound: number | null = null;
+    try {
+      const report = await pc.getStats();
+      report.forEach((entry) => {
+        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number };
+        if (stat.kind !== 'audio') return;
+        if (stat.type === 'inbound-rtp') inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
+        else if (stat.type === 'outbound-rtp') outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
+      });
+    } catch {
+      return;
+    }
+    this.sending = outbound !== null && outbound > this.#outBytes;
+    this.receiving = inbound !== null && inbound > this.#inBytes;
+    if (inbound !== null) this.#inBytes = inbound;
+    if (outbound !== null) this.#outBytes = outbound;
+  }
+
   /** Recomputes who is talking, and only touches state when it changes. */
   #poll(): void {
     const next: Record<string, boolean> = {};
@@ -199,6 +240,10 @@ class VoiceStore {
       clearInterval(this.#pollTimer);
       this.#pollTimer = null;
     }
+    if (this.#statsTimer) {
+      clearInterval(this.#statsTimer);
+      this.#statsTimer = null;
+    }
     for (const node of this.#remote.values()) {
       node.source.disconnect();
       node.analyser.disconnect();
@@ -213,6 +258,11 @@ class VoiceStore {
     this.#mic = null;
     this.#lastMembers = new Set();
     this.#rosterReady = false;
+    this.connectionState = null;
+    this.sending = false;
+    this.receiving = false;
+    this.#inBytes = 0;
+    this.#outBytes = 0;
   }
 
   /** Joins a channel, or moves there from another one. */
@@ -263,8 +313,15 @@ class VoiceStore {
       if (me) this.#analysers.set(me, micAnalyser);
       this.#pollTimer = setInterval(() => this.#poll(), speakingPollMs);
 
+      this.#inBytes = 0;
+      this.#outBytes = 0;
+      this.#statsTimer = setInterval(() => void this.#sample(), 1000);
+
       const pc = new RTCPeerConnection({ iceServers: [] });
       this.#pc = pc;
+      pc.onconnectionstatechange = () => {
+        this.connectionState = pc.connectionState;
+      };
       pc.ontrack = (event) => {
         // The relay names each track's producer in its stream id.
         const userId = event.streams[0]?.id ?? 'unknown';

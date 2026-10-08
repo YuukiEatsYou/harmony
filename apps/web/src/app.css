@@ -969,8 +969,29 @@ button.server-name:hover:not(:disabled) {
 }
 
 .voice-bar-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   color: var(--h-text-muted);
   font-size: 0.74rem;
+}
+
+/* Live audio readout: one glyph for the microphone, one for incoming audio.
+   Either dark means that direction is carrying nothing, which is exactly the
+   thing a silently broken call hides. */
+.voice-signal {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.voice-signal-icon {
+  display: inline-flex;
+  color: var(--h-text-faint);
+  transition: color var(--h-duration) var(--h-ease);
+}
+
+.voice-signal-icon.on {
+  color: var(--h-ok);
 }
 
 .voice-bar-error {
