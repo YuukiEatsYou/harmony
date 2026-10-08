@@ -97,6 +97,7 @@ class VoiceStore {
   #statsTimer: ReturnType<typeof setInterval> | null = null;
   #inBytes = 0;
   #outBytes = 0;
+  #loggedInboundCodec = false;
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
@@ -208,14 +209,30 @@ class VoiceStore {
     if (!pc) return;
     let inbound: number | null = null;
     let outbound: number | null = null;
+    let inboundCodecId: string | undefined;
     try {
       const report = await pc.getStats();
       report.forEach((entry) => {
-        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number };
+        const stat = entry as RTCStats & { kind?: string; bytesReceived?: number; bytesSent?: number; codecId?: string };
         if (stat.kind !== 'audio') return;
-        if (stat.type === 'inbound-rtp') inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
-        else if (stat.type === 'outbound-rtp') outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
+        if (stat.type === 'inbound-rtp') {
+          inbound = (inbound ?? 0) + (stat.bytesReceived ?? 0);
+          if (stat.codecId) inboundCodecId = stat.codecId;
+        } else if (stat.type === 'outbound-rtp') {
+          outbound = (outbound ?? 0) + (stat.bytesSent ?? 0);
+        }
       });
+      // Once, so a silent call can be read as "the wrong codec" rather than
+      // guessed at; the console is the only place with room for the detail.
+      if (!this.#loggedInboundCodec && inboundCodecId) {
+        this.#loggedInboundCodec = true;
+        let mime: string | undefined;
+        report.forEach((entry) => {
+          const stat = entry as RTCStats & { mimeType?: string };
+          if (stat.type === 'codec' && stat.id === inboundCodecId) mime = stat.mimeType;
+        });
+        console.info('[voice] inbound audio codec', mime ?? inboundCodecId);
+      }
     } catch {
       return;
     }
@@ -263,6 +280,7 @@ class VoiceStore {
     this.receiving = false;
     this.#inBytes = 0;
     this.#outBytes = 0;
+    this.#loggedInboundCodec = false;
   }
 
   /** Joins a channel, or moves there from another one. */
@@ -325,6 +343,13 @@ class VoiceStore {
       pc.ontrack = (event) => {
         // The relay names each track's producer in its stream id.
         const userId = event.streams[0]?.id ?? 'unknown';
+        // A browser that drops the msid leaves the track anonymous, which the
+        // speaking ring keys on, so say what actually arrived instead of guessing.
+        console.info('[voice] incoming track', {
+          streams: event.streams.length,
+          producer: event.streams[0]?.id ?? null,
+          trackId: event.track.id,
+        });
         this.#attachRemote(userId, event.track);
       };
       for (const track of mic.getTracks()) pc.addTrack(track, mic);
