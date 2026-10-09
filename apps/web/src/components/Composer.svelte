@@ -14,6 +14,7 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { commands } from '../lib/commands.svelte';
+  import { registerComposerField } from '../lib/composer-field';
   import { drafts, type Draft } from '../lib/drafts.svelte';
   import { emojis } from '../lib/emojis.svelte';
   import { emojiUsage } from '../lib/emoji-usage.svelte';
@@ -43,10 +44,11 @@
   /** How stale the member directory may be before a mention refreshes it. */
   const directoryMaxAgeMs = 30_000;
   /**
-   * Safari honors `autocorrect` on a textarea too, but Svelte's element types
-   * only list it for inputs, so it is spread in rather than written inline.
+   * Safari (and Chrome on iOS) honor `autocorrect` on a textarea, but Svelte's
+   * element types only list it for inputs, so it is spread in rather than written
+   * inline. On, so a phone keyboard corrects ordinary prose.
    */
-  const noAutocorrect: Record<string, string> = { autocorrect: 'off' };
+  const autocorrectOn: Record<string, string> = { autocorrect: 'on' };
 
   /**
    * The composer is mounted once and stays put while channels change, so what is
@@ -67,6 +69,11 @@
   let error = $state<string | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);
   let textInput = $state<HTMLTextAreaElement | null>(null);
+  // Lets another component (a message's Reply button) hand focus back here.
+  $effect(() => {
+    registerComposerField(textInput);
+    return () => registerComposerField(null);
+  });
   let showPicker = $state(false);
   let showGifs = $state(false);
   let showTimes = $state(false);
@@ -1171,7 +1178,7 @@
       bind:this={textInput}
       placeholder={`Message #${chat.activeChannel?.name ?? ''}`}
       autocomplete="off"
-      {...noAutocorrect}
+      {...autocorrectOn}
       enterkeyhint="send"
       aria-label="Message"
       aria-autocomplete="list"

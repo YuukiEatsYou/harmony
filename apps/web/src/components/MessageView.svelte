@@ -3,6 +3,7 @@
   import { Permission, hasPermission, isGifContentType, isGifLinkUrl, type Attachment, type LinkEmbed, type Message, type User } from '@harmony/shared';
   import { ApiError } from '../lib/api';
   import { chat } from '../lib/chat.svelte';
+  import { focusComposer } from '../lib/composer-field';
   import { avatarUrl, initial } from '../lib/avatar';
   import { inlineSegmentsOf, parseMessage } from '../lib/message-text';
   import { firstUnreadIndex, newMessageCount, newMessagesLabel } from '../lib/unread';
@@ -748,6 +749,8 @@
             onclick={() => {
               chat.replyTarget = message;
               actionsFor = null;
+              // Straight from the click, so a phone raises the keyboard.
+              focusComposer();
             }}>Reply</button
           >
           <button
