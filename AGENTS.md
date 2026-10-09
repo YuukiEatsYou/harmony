@@ -196,6 +196,12 @@ These have each cost real time; keep them in mind.
   (for example a `both` fill mode on a scale pop): the element re-renders at its
   untransformed size and reads as a small size change. Fade instead of scale for
   badges.
+- A full-screen click-catcher behind a modal (to close it on an outside click) is
+  a button, so the shared button styles tint the whole scrim with the accent
+  color the moment the pointer is anywhere over it. Reuse `.overlay-backdrop` in
+  `app.css`, whose hover and active are pinned off it and kept more specific than
+  `button:hover:not(:disabled)`, and give the panel itself `position: relative;
+  z-index: 1` so it stays above the catcher and its controls keep working.
 
 ## Working with the user
 
