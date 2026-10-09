@@ -106,6 +106,7 @@ import {
   suggestFor,
 } from '../src/lib/search-query.ts';
 import { SLASH_COMMANDS, applySlashCommand, matchSlashCommands, slashQuery } from '../src/lib/slash-commands.ts';
+import { mediaFilesFrom } from '../src/lib/files.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -1427,6 +1428,25 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
     'a handle with a slash or space is refused',
     !validSocialValue('github', 'a/b') && !validSocialValue('github', 'a b'),
   );
+}
+
+// --- Files carried by a paste or a drop ---
+{
+  // A fresh object each call, as a browser builds one per source and encoding.
+  const image = (over = {}) => ({ name: 'image.png', size: 4096, type: 'image/png', lastModified: 111, ...over });
+  const fake = (items, files) => ({ items: items.map((file) => ({ kind: 'file', getAsFile: () => file })), files });
+  // The files list is authoritative while it has anything; items is ignored, which
+  // is what stops a picture offered once through each source from attaching twice.
+  check('files is used when present, items is ignored', (() => {
+    const got = mediaFilesFrom(fake([image({ name: 'a.png' })], [image({ name: 'b.png' })]));
+    return got.length === 1 && got[0].name === 'b.png';
+  })());
+  check('a paste that only fills items is still read', mediaFilesFrom(fake([image()], [])).length === 1);
+  check('two different images in files are both kept', mediaFilesFrom(fake([], [image({ size: 1 }), image({ size: 2 })])).length === 2);
+  check('two different images in items are both kept', mediaFilesFrom(fake([image({ size: 1 }), image({ size: 2 })], [])).length === 2);
+  check('the same image listed twice in one source is taken once', mediaFilesFrom(fake([], [image(), image()])).length === 1);
+  check('a non-media file is left out', mediaFilesFrom(fake([], [image({ type: 'application/pdf', name: 'a.pdf' })])).length === 0);
+  check('no clipboard means no files', mediaFilesFrom(null).length === 0);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
