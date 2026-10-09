@@ -828,13 +828,23 @@ does when its own connection drops.
 #### `GET /api/v1/voice` — `ViewChannels`
 
 ```json
-{ "channels": [{ "channelId": "…", "members": [ /* VoiceState */ ] }] }
+{ "channels": [{ "channelId": "…", "members": [ /* VoiceState */ ] }],
+  "self": { "channelId": "…", "detached": false } }
 ```
 
 Every voice channel that currently has members, and who. A client fetches this
 once on load, since `VOICE_STATE_UPDATE` only arrives as changes are made; without
 it a client that loads while somebody is already talking would show an empty room.
 Only channels the caller can see are included.
+
+`self` is the caller's own room, or `null` if they are not in one, and it is what
+lets a freshly loaded client know it is already in a call — so it can show the call
+and rebuild the media connection instead of showing nothing. `detached` is `true`
+when the server still lists the member but their client is gone (a page reloaded,
+or a phone closed and reopened the app); rejoining then re-creates their media
+connection rather than being a no-op. `detached` is `false` while another session
+still holds the connection — a second tab — so a newly loaded one leaves it alone
+instead of fighting it for the call.
 
 #### `GET /api/v1/voice/ice` — `ConnectVoice`
 
@@ -860,6 +870,11 @@ Joins the channel, or moves the caller there. Returns `VoiceRoomResponse`, the r
 the join, and fires `VOICE_STATE_UPDATE` to everyone who can see the channel. Refused with
 `400 not_a_voice_channel`, `403 channel_forbidden` when the channel is locked away, or
 `409 voice_full`.
+
+Joining the channel the caller is already in is a **reattach**: it returns the room, and if their
+previous client had gone away (see `self.detached` on `GET /voice`) it gives them a fresh media
+connection and offers again; otherwise it changes nothing, so a second session cannot take a call
+another one is holding.
 
 ```json
 { "channelId": "…", "members": [{ "channelId": "…", "user": { /* User */ }, "muted": false, "deafened": false, "sharing": false }] }

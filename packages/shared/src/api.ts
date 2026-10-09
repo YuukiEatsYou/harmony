@@ -351,6 +351,14 @@ export interface VoiceRoomResponse {
  */
 export interface VoiceRoomsResponse {
   channels: Array<{ channelId: string; members: VoiceState[] }>;
+  /**
+   * The caller's own room, if they are in one. `detached` means the server still
+   * lists them but their client is gone — a page reloaded, or a phone closed the
+   * app — so a fresh client should rejoin: it shows the call and rebuilds the
+   * media connection. When `detached` is false another session still holds the
+   * connection (a second tab), and a new one leaves it alone rather than fight.
+   */
+  self: { channelId: string; detached: boolean } | null;
 }
 
 /** One ICE server, in the shape `RTCPeerConnection` takes. */

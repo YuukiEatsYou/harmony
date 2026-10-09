@@ -257,6 +257,15 @@ changed networks can reconnect and renegotiate rather than be evicted; the media
 reaper above stays the authority for a connection that is genuinely dead, and
 whichever fires first removes the member.
 
+The dropped connection also marks the member **detached**: their seat is held, but
+the client that was answering the relay is gone, so the media connection it left is
+presumed stale. A client that loads and finds itself detached — the page was
+reloaded, or a phone closed and reopened the app — rejoins the room it is already
+in, which the server turns into a fresh media connection rather than a no-op; a
+client that finds itself still attached (another tab) leaves it alone, so the two do
+not fight over the call. That is what brings a call back after a reload instead of
+leaving the client unaware it was ever in one.
+
 The relay gathers against the ICE servers it was configured with and no others: by
 default none, since a host with a public address needs no STUN. Clients, which may
 be behind a NAT the relay cannot reach, are handed their own list by

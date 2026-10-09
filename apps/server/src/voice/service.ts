@@ -36,6 +36,13 @@ interface Membership {
   sharing: boolean;
   /** The members whose screens this member is watching, by their user id. */
   watching: Set<string>;
+  /**
+   * True once the member's client has gone away (their last gateway connection
+   * dropped) while their seat was held. Their media connection is then presumed
+   * stale, and a client that rejoins is given a fresh one instead of the seat being
+   * a no-op rejoin. Cleared on rejoin.
+   */
+  detached: boolean;
 }
 
 export interface VoiceService {
@@ -53,6 +60,8 @@ export interface VoiceService {
   room(channelId: string): VoiceState[];
   /** Every non-empty room the member may see, for a freshly loaded client. */
   snapshot(userId: string): Array<{ channelId: string; members: VoiceState[] }>;
+  /** The caller's own room and whether their client is gone, or null if they are not in one. */
+  self(userId: string): { channelId: string; detached: boolean } | null;
   /** The voice channel a member is in, or null. */
   channelOf(userId: string): string | null;
   /** Drops a member who has gone fully offline, i.e. has no other live connection. */
@@ -202,11 +211,17 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       }
       return result;
     },
+    self: (userId) => {
+      const membership = members.get(userId);
+      return membership ? { channelId: membership.channelId, detached: membership.detached } : null;
+    },
     leave,
     handleOffline: (userId) => {
       // Not proof the member is gone; see the grace constant above. Re-check at
       // the end, since a reconnect within the window cancels the removal.
       cancelOfflineTimer(userId);
+      const membership = members.get(userId);
+      if (membership) membership.detached = true;
       const timer = setTimeout(() => {
         offlineTimers.delete(userId);
         if (deps.hub.onlineUserIds().has(userId)) return;
@@ -236,7 +251,18 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       }
 
       const existing = members.get(userId);
-      if (existing?.channelId === channelId) return;
+      if (existing?.channelId === channelId) {
+        // A rejoin for a room the member is already listed in. If their client had
+        // gone away, the media connection it left behind is stale, so make a fresh
+        // one and offer again; otherwise another session still holds it and this is
+        // just a no-op rejoin that returns the room.
+        cancelOfflineTimer(userId);
+        if (existing.detached) {
+          existing.detached = false;
+          await sfu.join(userId, channelId);
+        }
+        return;
+      }
 
       // The seat is counted against the room being joined, and only taken if one
       // is free; being in another room already does not reserve one here.
@@ -251,7 +277,14 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
         broadcast(existing.channelId);
       }
 
-      const membership: Membership = { channelId, muted: false, deafened: false, sharing: false, watching: new Set() };
+      const membership: Membership = {
+        channelId,
+        muted: false,
+        deafened: false,
+        sharing: false,
+        watching: new Set(),
+        detached: false,
+      };
       members.set(userId, membership);
       const occupants = rooms.get(channelId) ?? new Set<string>();
       occupants.add(userId);

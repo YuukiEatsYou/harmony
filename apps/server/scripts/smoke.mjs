@@ -983,6 +983,24 @@ try {
     'a dropped last connection does not remove the member at once',
     (await req('/voice', { token: ownerToken })).json?.channels?.some((entry) => entry.channelId === voiceId) === true,
   );
+  const selfAfterDrop = await req('/voice', { token: bobToken });
+  check(
+    'the roster reports the member as detached once their client goes',
+    selfAfterDrop.json?.self?.channelId === voiceId && selfAfterDrop.json?.self?.detached === true,
+    JSON.stringify(selfAfterDrop.json?.self),
+  );
+  // Rejoining a room the member is still listed in is a reattach, not a no-op:
+  // the server gives them a fresh media connection and clears the detach.
+  check(
+    'rejoining a room the member is still in is accepted (200)',
+    (await req(`/channels/${voiceId}/voice`, { method: 'POST', token: bobToken })).status === 200,
+  );
+  const selfAfterRejoin = await req('/voice', { token: bobToken });
+  check(
+    'the member is attached again after rejoining',
+    selfAfterRejoin.json?.self?.channelId === voiceId && selfAfterRejoin.json?.self?.detached === false,
+    JSON.stringify(selfAfterRejoin.json?.self),
+  );
   await req(`/channels/${voiceId}/voice`, { method: 'DELETE', token: bobToken });
   check(
     'an explicit leave still removes the member during the grace',

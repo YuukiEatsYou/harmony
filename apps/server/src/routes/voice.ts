@@ -63,7 +63,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
    */
   app.get('/api/v1/voice', async (request) => {
     const auth = requirePermission(request, Permission.ViewChannels);
-    const body: VoiceRoomsResponse = { channels: voice.snapshot(auth.user.id) };
+    const body: VoiceRoomsResponse = { channels: voice.snapshot(auth.user.id), self: voice.self(auth.user.id) };
     return body;
   });
 

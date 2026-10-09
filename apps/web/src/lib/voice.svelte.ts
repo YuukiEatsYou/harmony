@@ -194,6 +194,14 @@ class VoiceStore {
       const rosters: Record<string, VoiceState[]> = {};
       for (const entry of data.channels) rosters[entry.channelId] = entry.members;
       this.rosters = rosters;
+      // The server still lists this member but their client is gone — the page was
+      // reloaded, or a phone closed and reopened the app — so put them back in the
+      // call: the bar returns and the media connection is made again. When another
+      // session still holds the connection (a second tab), nothing is done here, so
+      // the two do not fight over it.
+      if (data.self?.detached && this.channelId === null && !this.joining) {
+        await this.join(data.self.channelId);
+      }
     } catch {
       // A failed load leaves the sidebar without rosters until the next event.
     }
