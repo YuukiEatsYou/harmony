@@ -836,6 +836,24 @@ once on load, since `VOICE_STATE_UPDATE` only arrives as changes are made; witho
 it a client that loads while somebody is already talking would show an empty room.
 Only channels the caller can see are included.
 
+#### `GET /api/v1/voice/ice` — `ConnectVoice`
+
+```json
+{ "iceServers": [ { "urls": ["stun:stun.example.com:3478"] },
+                  { "urls": ["turn:turn.example.com:3478"], "username": "1728384000:…", "credential": "…" } ],
+  "ttlSeconds": 3600 }
+```
+
+The ICE servers a client uses to reach the relay: STUN to learn its public address, and TURN to
+relay when a direct path is impossible. It is an authenticated route rather than a `/meta` field
+because TURN is bandwidth — relay credentials in an unauthenticated place would be an open door.
+TURN entries appear only when an operator configured it, and their credentials are minted per
+request in coturn's REST scheme (the username carries an expiry and the member, the credential is
+that username hashed under the shared secret), so a leaked one expires. With nothing configured —
+the usual case for a host with a public IP — `iceServers` is `[]`, and the response is still `200`
+so a client never has to branch on an error. A client fetches this around joining and may cache it
+for `ttlSeconds`.
+
 #### `POST /api/v1/channels/:channelId/voice` — `ConnectVoice`
 
 Joins the channel, or moves the caller there. Returns `VoiceRoomResponse`, the room's members after
@@ -856,6 +874,16 @@ the join, and fires `VOICE_STATE_UPDATE` to everyone who can see the channel. Re
 The client's answer to the offer it received as `VOICE_SIGNAL`. Returns `204`. `409 not_in_voice`
 when the caller is not in that channel.
 
+#### `POST /api/v1/channels/:channelId/voice/renegotiate` — auth
+
+Asks the server to restart ICE on the caller's connection and offer again, for a client whose network
+changed. It exists because the server is the only offerer: a client cannot offer an ICE restart
+itself. The fresh offer arrives as `VOICE_SIGNAL` and is answered through the route above, exactly
+like any other, with the new ICE credentials in the SDP. Returns `204`; `409 not_in_voice` when the
+caller is not in that channel, which includes having already been removed, so a client falls back to
+leaving and rejoining. A request that arrives while an offer is already outstanding is coalesced
+into that one.
+
 #### `PATCH /api/v1/channels/:channelId/voice` — auth
 
 ```json
@@ -874,6 +902,13 @@ channel.
 
 Leaves the channel, returning `204` and firing `VOICE_STATE_UPDATE` with the room now missing the
 caller. `409 not_in_voice` if the caller is not in that channel.
+
+A member whose **last** gateway connection drops is not removed at once: a short grace (about ten
+seconds) keeps their seat while they may be reconnecting, which is what lets a phone that changed
+networks come back and ask for a renegotiation instead of being evicted. If they are still offline
+when the grace ends, they are removed exactly as a leave would; an explicit leave or a rejoin
+cancels it. The media connection is judged separately: a connection that actually died is removed on
+its own schedule (see the relay's reaping).
 
 ### Channel locking
 
@@ -2745,6 +2780,7 @@ Returns `204`.
 "previewUserAgent"?: string | null, "klipyApiKey"?: string | null,
 "gifStorage"?: "store" | "link", "maxVoiceMembers"?: number,
 "screenShareHeight"?: number, "screenShareFrameRate"?: number,
+"stunUrls"?: string[], "turnUrls"?: string[], "turnSecret"?: string | null,
 "theme"?: { "background"?: string | null, "accent"?: string | null },
 "icon"?: { "padding"?: number | null, "background"?: string | null } }`.
 Returns the updated settings. `serverName` and `theme` changing also update `GET /api/v1/meta`.
@@ -2765,6 +2801,13 @@ the message points at it). It is also in `GET /api/v1/meta`; see
 to 10; see [Voice](#voice). `screenShareHeight` (240-1080, default 720) and `screenShareFrameRate`
 (5-60, default 30) bound the screen a member shares, and are published to clients as `screenShare`
 in `GET /api/v1/meta`.
+
+`stunUrls` and `turnUrls` are the ICE servers handed to clients by `GET /api/v1/voice/ice`, and an
+empty list clears them; `turnSecret` is the coturn shared secret those TURN credentials are minted
+under. Like the gif key it is **write-only** — the response carries only `turnConfigured` — and an
+empty string or `null` clears it. They are not in `GET /api/v1/meta`: TURN is bandwidth, and an
+unauthenticated relay credential would be an open door. See [Voice chat](#voice-chat-optional) in
+the deployment guide for what to run.
 
 `icon.padding` is a percentage of an installed app icon's tile to leave clear around the artwork,
 from 0 to 45. `null` works it out from the image: none for a picture with no transparent pixels,

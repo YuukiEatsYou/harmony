@@ -17,6 +17,16 @@ import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import { createSfu } from './sfu.ts';
 
+/**
+ * How long a member keeps their seat after their last gateway connection drops,
+ * before they are actually removed. A phone changing networks loses that socket
+ * too, and its media may be perfectly fine, so this gives the client a moment to
+ * reconnect and ask for an ICE restart instead of being evicted and having to
+ * rejoin. The media reaper is untouched by this: a connection that is genuinely
+ * dead is still removed on its own schedule, whichever comes first.
+ */
+const VOICE_OFFLINE_GRACE_MS = 10_000;
+
 /** One member's voice presence, as it is held in memory. */
 interface Membership {
   channelId: string;
@@ -37,6 +47,8 @@ export interface VoiceService {
   update(userId: string, patch: { muted?: boolean; deafened?: boolean; sharing?: boolean; watching?: string[] }): void;
   /** Applies the SDP answer a member's client sent for the current offer. */
   answer(userId: string, sdp: string): Promise<void>;
+  /** Restarts a member's ICE and re-offers, so a client that changed networks stays. */
+  renegotiate(userId: string): void;
   /** The members in one channel, for a REST response. */
   room(channelId: string): VoiceState[];
   /** Every non-empty room the member may see, for a freshly loaded client. */
@@ -56,6 +68,8 @@ export interface VoiceDeps {
   /** UDP range the media relay binds, and a public IP to advertise behind NAT. */
   portRange?: [number, number];
   publicIp?: string | null;
+  /** STUN servers the relay itself gathers against; see `config.voiceStunUrls`. */
+  stunUrls?: string[];
   /** Where the relay's connection events are recorded, so a silent call can be read. */
   serverLog?: ServerLogService;
 }
@@ -76,6 +90,17 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
   const members = new Map<string, Membership>();
   /** channelId -> member ids, for a quick roster and the room-size check. */
   const rooms = new Map<string, Set<string>>();
+  /** Members whose gateway dropped, waiting out the grace before being removed. */
+  const offlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Cancels a pending offline removal, e.g. because the member came back. */
+  function cancelOfflineTimer(userId: string): void {
+    const timer = offlineTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      offlineTimers.delete(userId);
+    }
+  }
 
   // The SFU reaches members only through the gateway: an offer goes to that one
   // member's sessions, and their client answers it over REST.
@@ -89,6 +114,7 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
     {
       portRange: deps.portRange,
       publicIp: deps.publicIp,
+      iceServers: (deps.stunUrls ?? []).map((url) => ({ urls: [url] })),
       log: (event, detail) => deps.serverLog?.info(event, event, detail),
       // A connection that died without a leave takes its member's seat with it, so
       // the room is not left holding a ghost who can never be heard again.
@@ -155,6 +181,7 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
   }
 
   async function leave(userId: string): Promise<void> {
+    cancelOfflineTimer(userId);
     const membership = members.get(userId);
     if (!membership) return;
     drop(userId, membership);
@@ -177,10 +204,22 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
     },
     leave,
     handleOffline: (userId) => {
-      void leave(userId);
+      // Not proof the member is gone; see the grace constant above. Re-check at
+      // the end, since a reconnect within the window cancels the removal.
+      cancelOfflineTimer(userId);
+      const timer = setTimeout(() => {
+        offlineTimers.delete(userId);
+        if (deps.hub.onlineUserIds().has(userId)) return;
+        void leave(userId);
+      }, VOICE_OFFLINE_GRACE_MS);
+      timer.unref?.();
+      offlineTimers.set(userId, timer);
     },
 
     async join(userId, channelId) {
+      // A join, or a re-POST after a network change, is a sign of life: it cancels
+      // any pending offline removal.
+      cancelOfflineTimer(userId);
       const user = findUserById(sqlite, userId);
       if (!user) throw new HttpError(404, 'user_not_found', 'That member does not exist.');
 
@@ -234,6 +273,10 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
       await sfu.answer(userId, sdp);
     },
 
+    renegotiate(userId) {
+      sfu.renegotiate(userId);
+    },
+
     update(userId, patch) {
       const membership = members.get(userId);
       if (!membership) throw new HttpError(409, 'not_in_voice', 'You are not in a voice channel.');
@@ -245,6 +288,8 @@ export function createVoiceService(deps: VoiceDeps): VoiceService {
     },
 
     close() {
+      for (const timer of offlineTimers.values()) clearTimeout(timer);
+      offlineTimers.clear();
       sfu.close();
     },
   };

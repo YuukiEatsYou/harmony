@@ -7,7 +7,7 @@
 //
 // Run with: npm run smoke --workspace @harmony/server
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { gunzipSync } from 'node:zlib';
@@ -905,6 +905,46 @@ try {
   });
   check('a member can mute themselves', muted.json?.members?.[0]?.muted === true);
 
+  // --- ICE configuration for clients, and restarting ICE after a network change ---
+  const iceUnset = await req('/voice/ice', { token: bobToken });
+  check(
+    'an ICE config is served even when none is set',
+    iceUnset.status === 200 && iceUnset.json?.iceServers?.length === 0 && iceUnset.json?.ttlSeconds > 0,
+    JSON.stringify(iceUnset.json),
+  );
+  await req('/settings', {
+    method: 'PATCH',
+    token: ownerToken,
+    body: { stunUrls: ['stun:stun.example.test:3478'], turnUrls: ['turn:turn.example.test:3478'], turnSecret: 'shared-secret' },
+  });
+  const iceSet = await req('/voice/ice', { token: bobToken });
+  const servers = iceSet.json?.iceServers ?? [];
+  const stun = servers.find((entry) => entry.urls?.[0]?.startsWith('stun:'));
+  const turn = servers.find((entry) => entry.urls?.[0]?.startsWith('turn:'));
+  check('a configured STUN server is handed to clients', stun?.urls?.[0] === 'stun:stun.example.test:3478');
+  check(
+    'TURN is handed out with a per-request credential',
+    turn?.urls?.[0] === 'turn:turn.example.test:3478' &&
+      typeof turn.username === 'string' &&
+      turn.username.endsWith(`:${bob.json?.user?.id}`) &&
+      turn.credential === createHmac('sha1', 'shared-secret').update(turn.username).digest('base64'),
+    JSON.stringify(turn),
+  );
+  const settingsAfterIce = await req('/settings', { token: ownerToken });
+  check(
+    'the TURN secret is write-only',
+    settingsAfterIce.json?.turnConfigured === true && settingsAfterIce.json?.turnSecret === undefined,
+  );
+
+  check(
+    'renegotiating outside the channel is refused (409)',
+    (await req(`/channels/${voiceId}/voice/renegotiate`, { method: 'POST', token: bobToken })).status === 409,
+  );
+  check(
+    'a member in the channel can ask for a renegotiation (204)',
+    (await req(`/channels/${voiceId}/voice/renegotiate`, { method: 'POST', token: ownerToken })).status === 204,
+  );
+
   // The room limit is on by default at 10; set it to 1 so a second member is refused.
   await req('/settings', { method: 'PATCH', token: ownerToken, body: { maxVoiceMembers: 1 } });
   check(
@@ -928,6 +968,26 @@ try {
     ),
   );
   voiceWatcher.ws.close();
+
+  // --- The offline grace: a dropped last connection is not an instant eviction ---
+  const graceGateway = await openGateway({ token: bobToken });
+  await req(`/channels/${voiceId}/voice`, { method: 'POST', token: bobToken });
+  await sleep(200);
+  check(
+    'a member can join once the room is free',
+    (await req('/voice', { token: ownerToken })).json?.channels?.some((entry) => entry.channelId === voiceId) === true,
+  );
+  graceGateway.ws.close();
+  await sleep(400);
+  check(
+    'a dropped last connection does not remove the member at once',
+    (await req('/voice', { token: ownerToken })).json?.channels?.some((entry) => entry.channelId === voiceId) === true,
+  );
+  await req(`/channels/${voiceId}/voice`, { method: 'DELETE', token: bobToken });
+  check(
+    'an explicit leave still removes the member during the grace',
+    (await req('/voice', { token: ownerToken })).json?.channels?.length === 0,
+  );
 
   // --- Typing indicators ---
   check('typing indicators default to on', owner.json?.user?.showTyping === true);

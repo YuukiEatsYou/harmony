@@ -61,6 +61,12 @@ export interface Sfu {
   watch(userId: string, producerId: string, watching: boolean): void;
   /** Closes every connection; on shutdown. */
   close(): void;
+  /**
+   * Restarts ICE on a member's connection and re-offers, so a client whose network
+   * changed can stay in the room instead of leaving and rejoining. A pending reap
+   * is cancelled, since the restart is a fresh chance for the connection.
+   */
+  renegotiate(userId: string): void;
 }
 
 export interface SfuOptions {
@@ -74,6 +80,12 @@ export interface SfuOptions {
    * seam an operator can watch.
    */
   log?: (event: string, detail?: Record<string, unknown>) => void;
+  /**
+   * ICE servers the relay itself gathers against. Always set (empty means none),
+   * so werift does not fall back to its own silent default of a public STUN
+   * server. A host with a public IP needs none of these.
+   */
+  iceServers?: Array<{ urls: string | string[]; username?: string; credential?: string }>;
   /**
    * Called when a connection is reaped because it died without a leave. The room
    * membership is the caller's to release, since the SFU only owns the media side.
@@ -119,6 +131,8 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
 
   /** The config every connection is made with. */
   const peerConfig = {
+    // Set even when empty, so werift does not reach for its own default STUN server.
+    iceServers: options.iceServers ?? [],
     ...(options.portRange ? { icePortRange: options.portRange } : {}),
     ...(options.publicIp ? { iceAdditionalHostAddresses: [options.publicIp] } : {}),
   };
@@ -374,6 +388,18 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
       // A viewer that just opted in sees nothing until the producer sends a keyframe.
       const producer = peers.get(producerId);
       if (watching && producer) requestKeyframe(producer);
+    },
+
+    renegotiate(userId) {
+      const peer = peers.get(userId);
+      if (!peer || peer.closed) return;
+      // The restart is a fresh chance, so a pending reap no longer applies.
+      if (peer.reapTimer) {
+        clearTimeout(peer.reapTimer);
+        peer.reapTimer = null;
+      }
+      peer.pc.restartIce();
+      reoffer(peer);
     },
 
     close() {

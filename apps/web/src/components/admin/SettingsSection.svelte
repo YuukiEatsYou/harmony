@@ -31,6 +31,12 @@
   let maxVideoMb = $state('');
   let screenShareHeight = $state(720);
   let screenShareFrameRate = $state(30);
+  /** ICE servers offered to clients, typed as a comma-separated list. */
+  let stunUrls = $state('');
+  let turnUrls = $state('');
+  /** Write-only: the server never sends the saved secret back, so this starts blank. */
+  let turnSecret = $state('');
+  let turnConfigured = $state(false);
   let previewUserAgent = $state('');
   /** Written only: the server never sends a saved key back, so this starts blank. */
   let klipyKey = $state('');
@@ -68,6 +74,14 @@
     return Math.round(parsed * MB);
   }
 
+  /** A typed list of ICE URLs: split on commas or whitespace, dropping blanks. */
+  function parseUrls(value: string): string[] {
+    return value
+      .split(/[\s,]+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
   onMount(async () => {
     try {
       const [settings, channelData] = await Promise.all([
@@ -84,6 +98,9 @@
       maxVideoMb = toMb(settings.maxVideoBytes);
       screenShareHeight = settings.screenShareHeight;
       screenShareFrameRate = settings.screenShareFrameRate;
+      stunUrls = settings.stunUrls.join(', ');
+      turnUrls = settings.turnUrls.join(', ');
+      turnConfigured = settings.turnConfigured;
       previewUserAgent = settings.previewUserAgent ?? '';
       klipyConfigured = settings.klipyConfigured;
       gifStorage = settings.gifStorage;
@@ -224,6 +241,10 @@
       if (videoBytes !== undefined) body.maxVideoBytes = videoBytes;
       body.screenShareHeight = screenShareHeight;
       body.screenShareFrameRate = screenShareFrameRate;
+      body.stunUrls = parseUrls(stunUrls);
+      body.turnUrls = parseUrls(turnUrls);
+      // Blank means "keep the saved secret", which is why it is left out entirely.
+      if (turnSecret.trim()) body.turnSecret = turnSecret.trim();
       // Blank means "keep the saved key", which is why it is left out entirely.
       if (klipyKey.trim()) body.klipyApiKey = klipyKey.trim();
 
@@ -242,6 +263,10 @@
       maxVideoMb = toMb(updated.maxVideoBytes);
       screenShareHeight = updated.screenShareHeight;
       screenShareFrameRate = updated.screenShareFrameRate;
+      stunUrls = updated.stunUrls.join(', ');
+      turnUrls = updated.turnUrls.join(', ');
+      turnConfigured = updated.turnConfigured;
+      turnSecret = '';
       previewUserAgent = updated.previewUserAgent ?? '';
       klipyConfigured = updated.klipyConfigured;
       gifStorage = updated.gifStorage;
@@ -343,6 +368,29 @@
         The bound a shared screen is captured at. The relay never re-encodes, so a higher bound is
         more bandwidth for the sharer and every viewer; 720p30 suits most connections, up to
         {MAX_SCREEN_SHARE_HEIGHT}p{MAX_SCREEN_SHARE_FRAME_RATE} if the server has room.
+      </p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Voice relay (STUN/TURN)</legend>
+      <label>
+        STUN servers
+        <input placeholder="stun:stun.example.com:3478" bind:value={stunUrls} />
+      </label>
+      <label>
+        TURN servers
+        <input placeholder="turn:turn.example.com:3478" bind:value={turnUrls} />
+      </label>
+      <label>
+        TURN secret{turnConfigured ? ' (set)' : ''}
+        <input type="password" placeholder={turnConfigured ? 'Leave blank to keep' : 'coturn shared secret'} bind:value={turnSecret} />
+      </label>
+      <p class="muted">
+        Handed to clients when they join, so they can reach the relay from other networks — STUN to
+        learn their public address, TURN to relay when a direct path is impossible. Separate the
+        addresses with commas. The secret is the coturn shared secret used to mint short-lived
+        credentials and is never sent back out. Leave these blank for a server that already has a
+        public address.
       </p>
     </fieldset>
 

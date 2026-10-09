@@ -1,4 +1,5 @@
 import type {
+  VoiceIceResponse,
   VoiceRoomResponse,
   VoiceRoomsResponse,
   VoiceSignalPayload,
@@ -133,6 +134,8 @@ class VoiceStore {
   /** The member ids in the room on the last roster, for the join/leave sounds. */
   #lastMembers = new Set<string>();
   #rosterReady = false;
+  /** ICE servers from the server, cached until the credentials they carry expire. */
+  #ice: { servers: RTCIceServer[]; expiresAt: number } | null = null;
   /** An offer that arrived before the connection was ready to answer it. */
   #offer: string | null = null;
   /** The channel the member wants to be in, kept across a dropped connection. */
@@ -193,6 +196,26 @@ class VoiceStore {
       this.rosters = rosters;
     } catch {
       // A failed load leaves the sidebar without rosters until the next event.
+    }
+  }
+
+  /**
+   * The ICE servers to reach the relay through, fetched from the server and cached
+   * until its credentials expire. An instance with nothing configured — the common
+   * case on a host with a public IP — returns an empty list, and a failed fetch
+   * falls back to whatever was cached before, or to none at all.
+   */
+  async #iceServers(): Promise<RTCIceServer[]> {
+    if (this.#ice && this.#ice.expiresAt > Date.now()) return this.#ice.servers;
+    try {
+      const data = await api<VoiceIceResponse>('/voice/ice');
+      this.#ice = {
+        servers: data.iceServers,
+        expiresAt: Date.now() + Math.max(0, data.ttlSeconds) * 1000,
+      };
+      return this.#ice.servers;
+    } catch {
+      return this.#ice?.servers ?? [];
     }
   }
 
@@ -395,7 +418,7 @@ class VoiceStore {
       this.#outBytes = 0;
       this.#statsTimer = setInterval(() => void this.#sample(), 1000);
 
-      const pc = new RTCPeerConnection({ iceServers: [] });
+      const pc = new RTCPeerConnection({ iceServers: await this.#iceServers() });
       this.#pc = pc;
       pc.onconnectionstatechange = () => {
         this.connectionState = pc.connectionState;
@@ -683,6 +706,7 @@ class VoiceStore {
     this.#recovering = false;
     this.#recoverAttempts = 0;
     this.#cancelRecover();
+    this.#ice = null;
     for (const track of this.#display?.getTracks() ?? []) track.stop();
     this.#display = null;
     this.#screenSender = null;

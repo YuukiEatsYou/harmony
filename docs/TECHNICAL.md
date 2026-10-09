@@ -244,6 +244,26 @@ connection that has already failed is closed, so reaping reclaims most of a dead
 connection's ports but not all; a restart clears the remainder, and the port range
 is sized with that in mind.
 
+A connection that dies is normally rebuilt by the client leaving and rejoining. A
+client whose *network* changed can do better: `POST …/voice/renegotiate` asks the
+relay to restart ICE on the connection it already has and offer again, so the call
+continues without the churn of a leave and join. The server being the only offerer
+is exactly why the route has to exist — a client cannot offer an ICE restart itself.
+A pending reap is cancelled when one arrives, since a restart is a fresh chance.
+
+The gateway and the media are judged separately. A member's seat is released when
+their last gateway connection drops, but only after a short grace, so a phone that
+changed networks can reconnect and renegotiate rather than be evicted; the media
+reaper above stays the authority for a connection that is genuinely dead, and
+whichever fires first removes the member.
+
+The relay gathers against the ICE servers it was configured with and no others: by
+default none, since a host with a public address needs no STUN. Clients, which may
+be behind a NAT the relay cannot reach, are handed their own list by
+`GET /voice/ice` — STUN, and TURN with short-lived credentials when an operator has
+configured one. That list is behind authentication and never in `/meta`, because
+TURN is bandwidth.
+
 ## Search
 
 Message search is a case-insensitive substring match (`LIKE`) over the text, rather than a full-text

@@ -162,6 +162,19 @@ async function main() {
   // The offer has to carry a video codec, or no browser could answer a screen.
   check('the offer carries a video codec', /vp8\/90000/i.test(offers.get('C') ?? ''));
 
+  // A client whose network changed cannot offer itself, so the server restarts its
+  // ICE and asks again; the fresh offer must carry new ICE credentials.
+  const ufrag = (sdp) => (sdp.match(/^a=ice-ufrag:(.*)$/m) ?? [])[1] ?? '';
+  const beforeOffer = offers.get('C') ?? '';
+  sfu.renegotiate('C');
+  await sleep(600);
+  const afterOffer = offers.get('C') ?? '';
+  check(
+    'renegotiate sends a fresh offer with new ICE credentials',
+    beforeOffer !== afterOffer && ufrag(afterOffer) !== '' && ufrag(afterOffer) !== ufrag(beforeOffer),
+    `ufrag ${ufrag(beforeOffer)} -> ${ufrag(afterOffer)}`,
+  );
+
   // A sender leaves; the room re-offers and must converge again.
   await sfu.leave('B');
   await sleep(1000);

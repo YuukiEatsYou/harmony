@@ -300,6 +300,12 @@ export const updateSettingsSchema = z.object({
   screenShareHeight: z.number().int().min(240).max(MAX_SCREEN_SHARE_HEIGHT).optional(),
   /** How many frames a second a shared screen is captured at. */
   screenShareFrameRate: z.number().int().min(5).max(MAX_SCREEN_SHARE_FRAME_RATE).optional(),
+  /** STUN URLs offered to clients; an empty list clears them. */
+  stunUrls: z.array(z.string().trim().min(1).max(200)).max(8).optional(),
+  /** TURN URLs offered to clients; an empty list clears them. */
+  turnUrls: z.array(z.string().trim().min(1).max(200)).max(8).optional(),
+  /** The coturn shared secret; an empty string clears it. Write-only. */
+  turnSecret: z.string().trim().max(200).nullable().optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

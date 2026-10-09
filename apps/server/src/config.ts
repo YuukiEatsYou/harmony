@@ -58,6 +58,14 @@ export interface Config {
    * interface already carries its public IP (as on OVH) needs nothing here.
    */
   voicePublicIp: string | null;
+  /**
+   * STUN servers the *relay* gathers against for its own candidates, from
+   * `HARMONY_VOICE_STUN_URLS`. Empty by default, which means none: werift
+   * otherwise reaches for a public STUN server on its own, and a host with a
+   * public IP does not need one. (Client STUN/TURN is a separate, operator-set
+   * matter handed out by `GET /voice/ice`.)
+   */
+  voiceStunUrls: string[];
 }
 
 // Load `.env` if present, without pulling in a dotenv dependency.
@@ -135,5 +143,9 @@ export function loadConfig(): Config {
       readNumber(process.env.HARMONY_VOICE_PORT_MAX, 40_100),
     ],
     voicePublicIp: process.env.HARMONY_VOICE_PUBLIC_IP?.trim() || null,
+    voiceStunUrls: (process.env.HARMONY_VOICE_STUN_URLS ?? '')
+      .split(',')
+      .map((url) => url.trim())
+      .filter((url) => url.length > 0),
   };
 }

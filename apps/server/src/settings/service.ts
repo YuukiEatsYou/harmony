@@ -53,6 +53,12 @@ export interface ServerSettings {
   screenShareHeight: number;
   /** How many frames a second a shared screen is captured at. */
   screenShareFrameRate: number;
+  /** STUN URLs handed to clients by `GET /voice/ice`; empty when none are set. */
+  stunUrls: string[];
+  /** TURN URLs handed to clients by `GET /voice/ice`; empty when none are set. */
+  turnUrls: string[];
+  /** Whether a TURN shared secret is set. The secret itself is write-only. */
+  turnConfigured: boolean;
 }
 
 /** A settings patch. `theme` is partial so one color can be changed on its own. */
@@ -76,6 +82,12 @@ export interface ServerSettingsUpdate {
   screenShareHeight?: number;
   /** How many frames a second a shared screen is captured at. */
   screenShareFrameRate?: number;
+  /** STUN URLs offered to clients; an empty list clears them. */
+  stunUrls?: string[];
+  /** TURN URLs offered to clients; an empty list clears them. */
+  turnUrls?: string[];
+  /** The coturn shared secret; an empty string clears it. */
+  turnSecret?: string | null;
 }
 
 export interface BridgeSettings {
@@ -128,6 +140,8 @@ export interface SettingsService {
   discordRedirectUri(): string | null;
   /** API key for the hosted gif service, or null when none is configured. */
   getKlipyKey(): string | null;
+  /** The coturn shared secret for minting TURN credentials, or null when unset. */
+  getTurnSecret(): string | null;
   /** The gif storage mode, read on its own because the security headers ask on every response. */
   getGifStorage(): GifStorageMode;
   /** Content hash of the uploaded server icon, or null for the built-in default. */
@@ -177,6 +191,9 @@ const KEY_UPDATE_BACKUP_RETENTION = 'update_backup_retention';
 const KEY_MAX_VOICE_MEMBERS = 'max_voice_members';
 const KEY_SCREEN_SHARE_HEIGHT = 'screen_share_height';
 const KEY_SCREEN_SHARE_FRAME_RATE = 'screen_share_frame_rate';
+const KEY_STUN_URLS = 'voice_stun_urls';
+const KEY_TURN_URLS = 'voice_turn_urls';
+const KEY_TURN_SECRET = 'voice_turn_secret';
 
 function parseString(raw: string, fallback: string): string {
   try {
@@ -214,6 +231,18 @@ function parseStringOrNull(raw: string | undefined): string | null {
     return typeof value === 'string' && value.length > 0 ? value : null;
   } catch {
     return null;
+  }
+}
+
+/** A stored list of URLs, dropping anything that is not a non-empty string. */
+function parseStringArray(raw: string | undefined): string[] {
+  if (raw == null) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value)) return [];
+    return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
+  } catch {
+    return [];
   }
 }
 
@@ -255,7 +284,10 @@ function parseSize(raw: string | undefined, fallback: number): number {
  * settings shape minus the few that are worked out rather than defaulted, so a
  * caller cannot set something that is meant to be derived.
  */
-export type SettingsDefaults = Omit<ServerSettings, 'klipyConfigured' | 'gifStorage'>;
+export type SettingsDefaults = Omit<
+  ServerSettings,
+  'klipyConfigured' | 'gifStorage' | 'turnConfigured' | 'stunUrls' | 'turnUrls'
+>;
 
 /** A stored gif storage mode; anything unrecognized means the safe default, "store". */
 function parseGifStorage(raw: string | undefined): GifStorageMode {
@@ -306,6 +338,9 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
         parseNumberOrNull(stored.get(KEY_SCREEN_SHARE_FRAME_RATE)) ??
         defaults.screenShareFrameRate ??
         DEFAULT_SCREEN_SHARE_FRAME_RATE,
+      stunUrls: parseStringArray(stored.get(KEY_STUN_URLS)),
+      turnUrls: parseStringArray(stored.get(KEY_TURN_URLS)),
+      turnConfigured: parseStringOrNull(stored.get(KEY_TURN_SECRET)) !== null,
     };
   }
 
@@ -374,6 +409,9 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
 
     getKlipyKey() {
       return parseStringOrNull(readAllSettings(sqlite).get(KEY_KLIPY_KEY));
+    },
+    getTurnSecret() {
+      return parseStringOrNull(readAllSettings(sqlite).get(KEY_TURN_SECRET));
     },
 
     getGifStorage() {
@@ -457,6 +495,16 @@ export function createSettingsService(sqlite: DatabaseSync, defaults: SettingsDe
       }
       if (patch.screenShareFrameRate !== undefined) {
         writeSetting(sqlite, KEY_SCREEN_SHARE_FRAME_RATE, JSON.stringify(patch.screenShareFrameRate));
+      }
+      if (patch.stunUrls !== undefined) {
+        writeSetting(sqlite, KEY_STUN_URLS, JSON.stringify(patch.stunUrls));
+      }
+      if (patch.turnUrls !== undefined) {
+        writeSetting(sqlite, KEY_TURN_URLS, JSON.stringify(patch.turnUrls));
+      }
+      if (patch.turnSecret !== undefined) {
+        const trimmed = patch.turnSecret?.trim() ?? '';
+        writeSetting(sqlite, KEY_TURN_SECRET, JSON.stringify(trimmed.length > 0 ? trimmed : null));
       }
       return get();
     },

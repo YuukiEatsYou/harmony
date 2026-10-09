@@ -227,6 +227,16 @@ export interface ServerSettingsResponse {
   screenShareHeight: number;
   /** How many frames a second a shared screen is captured at. */
   screenShareFrameRate: number;
+  /** STUN URLs handed to clients by `GET /voice/ice`; empty when none are set. */
+  stunUrls: string[];
+  /** TURN URLs handed to clients by `GET /voice/ice`; empty when none are set. */
+  turnUrls: string[];
+  /**
+   * Whether a TURN shared secret is set, and so whether `/voice/ice` mints relay
+   * credentials. The secret itself is write-only: it goes in through the settings
+   * and is never sent back out.
+   */
+  turnConfigured: boolean;
 }
 
 /** A user together with the roles assigned to them. */
@@ -341,6 +351,26 @@ export interface VoiceRoomResponse {
  */
 export interface VoiceRoomsResponse {
   channels: Array<{ channelId: string; members: VoiceState[] }>;
+}
+
+/** One ICE server, in the shape `RTCPeerConnection` takes. */
+export interface IceServerConfig {
+  urls: string[];
+  /** Present only on TURN entries, and minted per request. */
+  username?: string;
+  credential?: string;
+}
+
+/**
+ * The ICE configuration a client uses to reach the voice relay: STUN to learn
+ * its public address, and TURN to relay when a direct path is impossible. TURN
+ * is included, with short-lived credentials, only when an operator configured
+ * it; that is why this is an authenticated route and not part of `/meta`.
+ */
+export interface VoiceIceResponse {
+  iceServers: IceServerConfig[];
+  /** How long the credentials stay valid, so a client can refresh before then. */
+  ttlSeconds: number;
 }
 
 export interface InviteListResponse {

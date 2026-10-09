@@ -138,6 +138,7 @@ const voiceService = createVoiceService({
   settings: settingsService,
   portRange: config.voicePortRange,
   publicIp: config.voicePublicIp,
+  stunUrls: config.voiceStunUrls,
   serverLog,
 });
 const messageService = createMessageService(db.sqlite, hub, auditService);
@@ -358,7 +359,7 @@ registerUserRoutes(app, { db, users: userService, hub, bridge });
 registerBotRoutes(app, { bots: botService, commands: commandService, users: userService, hub });
 registerCommandRoutes(app, { commands: commandService, hub });
 registerChannelSettingsRoutes(app, { db, hub });
-registerVoiceRoutes(app, { voice: voiceService });
+registerVoiceRoutes(app, { voice: voiceService, settings: settingsService });
 registerGateway(app, {
   heartbeatIntervalMs: config.gatewayHeartbeatMs,
   cookieName: config.cookieName,

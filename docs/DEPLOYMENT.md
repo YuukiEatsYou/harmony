@@ -259,14 +259,21 @@ the WebRTC candidate, which on a host whose interface carries its public IP (as 
 OVH) is already correct. A host behind another NAT should set
 `HARMONY_VOICE_PUBLIC_IP` to the address members reach it at.
 
-The relay also gathers a server-reflexive candidate against a public STUN server
-by default (Google's), so the process contacts it while a call is up; a host with a
-public IP does not need this, and there is no setting to change or disable it yet.
-Reachability is otherwise one-sided: the server is the public peer, so a member
-usually connects by sending to it even from behind a NAT. A member on a symmetric
-NAT or a carrier-grade NAT can still fail, and nothing in this release relays for
-them; a self-hosted STUN or TURN server would be the fix, wired into the client's
-ICE configuration. There is no such configuration exposed yet.
+The relay gathers against no external server by default: a host whose interface
+carries its public IP needs no STUN, and werift's silent fallback to a public one is
+switched off. If the relay itself sits behind a NAT, set `HARMONY_VOICE_PUBLIC_IP`
+to the address members reach it at, or `HARMONY_VOICE_STUN_URLS` (comma-separated)
+for it to learn that address itself.
+
+Clients are a different matter, since a member may be behind a NAT the relay cannot
+reach. Set the STUN and TURN servers in the admin panel under **Voice relay
+(STUN/TURN)**: STUN URLs, TURN URLs, and the coturn shared secret. They are handed
+to clients at `GET /voice/ice`, with per-request, expiring TURN credentials, and are
+deliberately not in the unauthenticated meta payload. TURN is only needed for a
+member on a symmetric NAT or a carrier-grade NAT, and can be left empty: without
+it, reachability is one-sided, and a member usually still connects by sending to
+the relay even from behind an ordinary NAT. To run TURN, point the TURN URLs and the
+secret at a coturn server configured with `use-auth-secret` and the same secret.
 
 ## Installing it as an app
 
