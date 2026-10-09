@@ -2933,8 +2933,10 @@ button.roster-member:hover {
 
 /* ---- Profile viewer ---- */
 
-/* A full-screen click-catcher behind the fixed panel, so a click anywhere closes it. */
-.profile-viewer-backdrop {
+/* A full-screen click-catcher behind a fixed overlay panel, so a click anywhere
+   outside the panel closes it. Shared by the profile viewer and the channel media
+   gallery: the panel itself carries z-index 1 so it stays above this. */
+.overlay-backdrop {
   position: absolute;
   inset: 0;
   z-index: 0;
@@ -2950,8 +2952,8 @@ button.roster-member:hover {
 /* A button backdrop, so the shared hover/active styles are pinned off it. Kept
    more specific than button:hover:not(:disabled), or the whole scrim tints
    accent the moment the pointer is anywhere over it. */
-.admin-overlay .profile-viewer-backdrop:hover:not(:disabled),
-.admin-overlay .profile-viewer-backdrop:active:not(:disabled) {
+.admin-overlay .overlay-backdrop:hover:not(:disabled),
+.admin-overlay .overlay-backdrop:active:not(:disabled) {
   background: transparent;
   box-shadow: none;
   transform: none;

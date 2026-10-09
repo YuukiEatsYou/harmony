@@ -78,6 +78,8 @@
 </script>
 
 <div class="admin-overlay">
+  <button class="overlay-backdrop" type="button" aria-label="Close media gallery" onclick={onclose}></button>
+
   <div class="admin inbox-panel gallery-panel">
     <div class="admin-body">
       <div class="search-head">
@@ -137,8 +139,11 @@
 </div>
 
 <style>
-  /* A grid of tiles wants more room than the reading-width panels. */
+  /* A grid of tiles wants more room than the reading-width panels, and it sits
+     above the shared click-catcher so its controls stay live. */
   .gallery-panel {
+    position: relative;
+    z-index: 1;
     width: min(900px, 96vw);
   }
 </style>

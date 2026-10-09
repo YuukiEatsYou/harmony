@@ -81,7 +81,7 @@
 {#if user}
   <div class="admin-overlay">
     <button
-      class="profile-viewer-backdrop"
+      class="overlay-backdrop"
       type="button"
       aria-label="Close profile"
       onclick={() => ui.closeProfileViewer()}
