@@ -1,4 +1,4 @@
-import type { User } from '@harmony/shared';
+import type { Channel, User } from '@harmony/shared';
 import type { AdminTabId } from './admin';
 
 class UiState {
@@ -13,6 +13,8 @@ class UiState {
   savedOpen = $state(false);
   scheduledOpen = $state(false);
   eventsOpen = $state(false);
+  /** The channel whose media gallery is open, or null. */
+  gallery: Channel | null = $state(null);
   /** The member whose full profile viewer is open, or null. */
   profileViewerUser = $state<User | null>(null);
   /** Off-canvas navigation, used on narrow screens. */
@@ -89,6 +91,17 @@ class UiState {
     this.eventsOpen = false;
   }
 
+  /** Opens one channel's media gallery. The channel need not be the open one. */
+  openGallery(channel: Channel): void {
+    this.closeDrawers();
+    this.#closePanels();
+    this.gallery = channel;
+  }
+
+  closeGallery(): void {
+    this.gallery = null;
+  }
+
   openAdmin(tab: AdminTabId = 'settings'): void {
     this.closeDrawers();
     this.#closePanels();
@@ -136,6 +149,7 @@ class UiState {
     this.savedOpen = false;
     this.scheduledOpen = false;
     this.eventsOpen = false;
+    this.gallery = null;
     this.profileViewerUser = null;
   }
 

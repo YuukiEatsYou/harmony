@@ -165,7 +165,7 @@ const eventService = createEventService(db.sqlite, hub, messageService, auditSer
   defaultDurationMs: Number(process.env.HARMONY_EVENT_DEFAULT_DURATION_MS) || undefined,
 });
 const moderationService = createModerationService({ sqlite: db.sqlite, hub, audit: auditService });
-const mediaService = createMediaService(db.sqlite, config);
+const mediaService = createMediaService(db.sqlite, config, messageService);
 const gifSources = createGifSourceService(db.sqlite, config, { attachments: attachmentService });
 const gifService = createGifService(db.sqlite, config, {
   attachments: attachmentService,

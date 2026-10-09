@@ -14,6 +14,7 @@
   import { channelSettings } from '../lib/channel-settings.svelte';
   import { chat } from '../lib/chat.svelte';
   import { muteLabel } from '../lib/unread';
+  import { ui } from '../lib/ui.svelte';
 
   /**
    * The menu a channel or category opens on right-click, long-press or its "…"
@@ -80,6 +81,13 @@
 
   function markRead(): void {
     chat.markChannelsRead(channelIds);
+    onclose();
+  }
+
+  /** Opens this channel's media gallery, whether or not it is the one on screen. */
+  function openMedia(): void {
+    if (target.kind !== 'channel') return;
+    ui.openGallery(target.channel);
     onclose();
   }
 
@@ -154,6 +162,10 @@
     onclick={markRead}
     onpointerenter={(event) => event.pointerType === 'mouse' && (open = null)}>Mark as read</button
   >
+
+  {#if target.kind === 'channel' && target.channel.type === 'text'}
+    <button type="button" role="menuitem" onclick={openMedia}>Media</button>
+  {/if}
 
   <div class="separator" role="separator"></div>
 

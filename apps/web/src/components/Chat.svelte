@@ -13,6 +13,7 @@
   import ChannelSidebar from './ChannelSidebar.svelte';
   import Composer from './Composer.svelte';
   import EventsPanel from './EventsPanel.svelte';
+  import GalleryPanel from './GalleryPanel.svelte';
   import HeaderActions from './HeaderActions.svelte';
   import Icon from './Icon.svelte';
   import KeyboardShortcuts from './KeyboardShortcuts.svelte';
@@ -247,6 +248,9 @@
   {/if}
   {#if ui.eventsOpen}
     <EventsPanel onclose={() => ui.closeEvents()} />
+  {/if}
+  {#if ui.gallery}
+    <GalleryPanel channel={ui.gallery} onclose={() => ui.closeGallery()} />
   {/if}
 
   {#if ui.sidebarOpen || ui.rosterOpen}

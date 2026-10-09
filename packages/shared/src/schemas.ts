@@ -175,6 +175,10 @@ export type MentionQuery = z.infer<typeof mentionQuerySchema>;
 export const mediaQuerySchema = cursorQuerySchema;
 export type MediaQuery = z.infer<typeof mediaQuerySchema>;
 
+/** A channel's own media gallery pages the same way. */
+export const channelMediaQuerySchema = cursorQuerySchema;
+export type ChannelMediaQuery = z.infer<typeof channelMediaQuerySchema>;
+
 /**
  * A member's saved messages page the same way, newest save first: `before` is a
  * save time and `beforeId` the message it saved. `reminders` asks instead for

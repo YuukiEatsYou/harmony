@@ -1,11 +1,20 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { MediaItem, MediaListResponse, MediaQuery } from '@harmony/shared';
+import type {
+  ChannelMediaItem,
+  ChannelMediaQuery,
+  ChannelMediaResponse,
+  MediaItem,
+  MediaListResponse,
+  MediaQuery,
+} from '@harmony/shared';
 import type { Config } from '../config.ts';
+import { canAccessChannel, channelAccessFor } from '../access/service.ts';
 import { findChannel } from '../db/channels.ts';
-import { findAttachment, listMedia, deleteAttachment, deleteAttachmentsByHash, listAttachmentsByHash, listReferencedHashes, toAttachment } from '../db/attachments.ts';
+import { findAttachment, listChannelMedia, listMedia, deleteAttachment, deleteAttachmentsByHash, listAttachmentsByHash, listReferencedHashes, toAttachment } from '../db/attachments.ts';
 import { findMessage } from '../db/messages.ts';
 import { findUserById, presentUser } from '../db/users.ts';
 import { HttpError } from '../http/errors.ts';
+import type { MessageService } from '../messages/service.ts';
 import { createBlobStore } from '../storage/blobs.ts';
 
 /** What the audit log needs about an image that has just been deleted. */
@@ -17,6 +26,12 @@ export interface RemovedMedia {
 export interface MediaService {
   /** A page of stored images, newest first, one entry per unique piece of content. */
   list(query: MediaQuery): MediaListResponse;
+  /**
+   * A page of one channel's images and videos, newest first, one entry per
+   * attachment. A member may only read a channel they can see; the check matches
+   * reading its history.
+   */
+  channelMedia(channelId: string, query: ChannelMediaQuery, viewerId: string): ChannelMediaResponse;
   /** Deletes an attachment and reclaims its bytes when nothing else uses them. */
   remove(attachmentId: string): RemovedMedia;
   /**
@@ -26,7 +41,7 @@ export interface MediaService {
   removeByHash(hash: string): RemovedMedia;
 }
 
-export function createMediaService(sqlite: DatabaseSync, config: Config): MediaService {
+export function createMediaService(sqlite: DatabaseSync, config: Config, messages: MessageService): MediaService {
   const blobs = createBlobStore(config);
 
   /** The channel an attachment's message lives in, for the audit log. */
@@ -52,6 +67,30 @@ export function createMediaService(sqlite: DatabaseSync, config: Config): MediaS
           copies: row.copies,
         };
       });
+      return { media };
+    },
+
+    channelMedia(channelId, query, viewerId) {
+      // A locked channel is forbidden, a missing one is simply not found, exactly
+      // as reading its history answers.
+      if (!findChannel(sqlite, channelId)) {
+        throw new HttpError(404, 'channel_not_found', 'That channel does not exist.');
+      }
+      if (!canAccessChannel(sqlite, channelAccessFor(sqlite, viewerId), channelId)) {
+        throw new HttpError(403, 'channel_forbidden', 'You do not have access to that channel.');
+      }
+
+      const media: ChannelMediaItem[] = [];
+      for (const row of listChannelMedia(sqlite, channelId, {
+        limit: query.limit,
+        before: query.before,
+        beforeId: query.beforeId,
+      })) {
+        // The query already leaves out a soft-deleted message, so this only guards
+        // the type; it is rendered with the viewer, so their own reactions show.
+        const message = row.message_id ? messages.byId(row.message_id, viewerId) : null;
+        if (message) media.push({ attachment: toAttachment(row), message });
+      }
       return { media };
     },
 

@@ -262,6 +262,45 @@ export function listMedia(
   return rows as unknown as MediaRow[];
 }
 
+/**
+ * A page of one channel's images and videos, newest first, one row per stored
+ * attachment rather than per unique piece of content: the gallery shows each
+ * picture where it was posted. Soft-deleted messages are left out, since their
+ * media is no longer on display in the channel either, and an attachment with no
+ * message is never in a channel to begin with.
+ *
+ * The cursor mirrors the admin gallery's: `before` is an attachment's creation
+ * time and `beforeId` its id, which tiebreaks attachments made in the same moment.
+ */
+export function listChannelMedia(
+  sqlite: DatabaseSync,
+  channelId: string,
+  options: { limit: number; before?: string; beforeId?: string },
+): AttachmentRow[] {
+  const { limit, before, beforeId } = options;
+  const base = `SELECT a.* FROM attachments a
+                JOIN messages m ON m.id = a.message_id
+                WHERE m.channel_id = ? AND m.deleted_at IS NULL`;
+
+  const rows =
+    before && beforeId
+      ? sqlite
+          .prepare(
+            `${base}
+             AND (a.created_at < ?
+                  OR (a.created_at = ? AND a.rowid < (SELECT rowid FROM attachments WHERE id = ?)))
+             ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?`,
+          )
+          .all(channelId, before, before, beforeId, limit)
+      : before
+        ? sqlite
+            .prepare(`${base} AND a.created_at < ? ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?`)
+            .all(channelId, before, limit)
+        : sqlite.prepare(`${base} ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?`).all(channelId, limit);
+
+  return rows as unknown as AttachmentRow[];
+}
+
 /** Deletes every attachment sharing a content hash, returning how many went. */
 export function deleteAttachmentsByHash(sqlite: DatabaseSync, hash: string): number {
   const result = sqlite.prepare('DELETE FROM attachments WHERE hash = ?').run(hash);

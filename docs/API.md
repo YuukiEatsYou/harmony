@@ -1660,6 +1660,34 @@ no other attachment, emoji, avatar or saved gif — references the same bytes. T
 gallery's delete acts on, since removing a single copy would leave the rest, and the bytes, in
 place. Returns `204`, or `404 media_not_found`.
 
+#### `GET /api/v1/channels/:channelId/media` — `ViewChannels`
+
+One channel's own gallery: its images and videos, **newest first**. This is not the admin gallery
+scoped down — it is deliberately **not** grouped by content hash, so each stored attachment is
+listed where it was posted and the same picture sent twice appears twice. Only media on live
+messages is returned: an attachment whose message was deleted, or one never attached to a message,
+is left out. The caller must be able to read the channel, exactly as reading its history, so a
+locked channel answers `403 channel_forbidden` and a missing one `404 channel_not_found`.
+
+| Query | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `limit` | integer 1–100 | 50 | |
+| `before` | ISO 8601 string | — | Older than this timestamp |
+| `beforeId` | string | — | The attachment id `before` came from |
+
+The cursor is the admin gallery's: send the oldest item's attachment `createdAt` and `id` together.
+
+```json
+{
+  "media": [
+    { "attachment": { "...": "..." }, "message": { "...": "..." } }
+  ]
+}
+```
+
+Each item carries the whole `message`, so a tile can open it in context the way a search result
+does.
+
 ### Gifs and the picker
 
 The picker has three tabs. **Favorites** are private to the member who saved them, and a saved gif is

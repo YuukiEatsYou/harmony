@@ -1,5 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import { Permission, mediaQuerySchema, type MediaListResponse } from '@harmony/shared';
+import {
+  Permission,
+  channelMediaQuerySchema,
+  mediaQuerySchema,
+  type ChannelMediaResponse,
+  type MediaListResponse,
+} from '@harmony/shared';
 import { requirePermission } from '../auth/plugin.ts';
 import type { AuditService } from '../audit/service.ts';
 import { parseQuery } from '../http/validation.ts';
@@ -20,6 +26,19 @@ export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps):
     requirePermission(request, Permission.ManageServer);
     const query = parseQuery(mediaQuerySchema, request.query);
     const body: MediaListResponse = deps.service.list(query);
+    return body;
+  });
+
+  /**
+   * One channel's media gallery, for anyone who can see the channel. Deliberately
+   * not the admin gallery's permission: this is a view of a channel's own history,
+   * scoped to the channel the viewer is looking at, so it matches reading it.
+   */
+  app.get('/api/v1/channels/:id/media', async (request) => {
+    const auth = requirePermission(request, Permission.ViewChannels);
+    const { id } = request.params as { id: string };
+    const query = parseQuery(channelMediaQuerySchema, request.query);
+    const body: ChannelMediaResponse = deps.service.channelMedia(id, query, auth.user.id);
     return body;
   });
 

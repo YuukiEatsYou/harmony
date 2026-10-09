@@ -330,6 +330,21 @@ export interface MediaListResponse {
   media: MediaItem[];
 }
 
+/**
+ * One image or video posted in a channel, for that channel's media gallery. The
+ * whole message travels with it rather than just its id, so a tile can open the
+ * message in place and show it the way search and pins already do.
+ */
+export interface ChannelMediaItem {
+  attachment: Attachment;
+  message: Message;
+}
+
+/** A page of one channel's media, newest first. */
+export interface ChannelMediaResponse {
+  media: ChannelMediaItem[];
+}
+
 export interface RoleListResponse {
   roles: Role[];
 }

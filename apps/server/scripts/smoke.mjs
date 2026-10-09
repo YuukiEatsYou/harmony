@@ -7314,6 +7314,79 @@ try {
     (await req(`/media/${repeatedA.hash}`, { method: 'DELETE', token: ownerToken })).status === 404,
   );
 
+  // --- A channel's own media gallery ---
+  // Unlike the admin gallery this is scoped to one channel and not grouped, and
+  // any member who can read the channel may use it, not only an administrator.
+  const galleryChannel = (
+    await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'channel-gallery' } })
+  ).json;
+  const channelPng = await sharp({ create: { width: 11, height: 8, channels: 3, background: { r: 7, g: 77, b: 177 } } })
+    .png()
+    .toBuffer();
+  const channelPic = await uploadBytes(channelPng, 'in-channel.png');
+  const channelPicTwice = await uploadBytes(channelPng, 'in-channel-again.png');
+  const channelPicMessage = (
+    await req(`/channels/${galleryChannel.id}/messages`, {
+      method: 'POST',
+      token: ownerToken,
+      body: { content: 'a picture for the gallery', attachmentIds: [channelPic.id] },
+    })
+  ).json;
+  await req(`/channels/${galleryChannel.id}/messages`, {
+    method: 'POST',
+    token: ownerToken,
+    body: { content: 'the very same picture again', attachmentIds: [channelPicTwice.id] },
+  });
+  const channelMedia = await req(`/channels/${galleryChannel.id}/media`, { token: bobToken });
+  const channelItem = channelMedia.json?.media?.find((entry) => entry.attachment.id === channelPic.id);
+  check(
+    'a member reads a channel media gallery',
+    channelMedia.status === 200 && channelItem !== undefined,
+    `status ${channelMedia.status}`,
+  );
+  check('a channel media item carries its message', channelItem?.message?.id === channelPicMessage.id);
+  check(
+    'a channel media gallery lists every attachment without grouping',
+    (await req(`/channels/${galleryChannel.id}/media`, { token: ownerToken })).json?.media?.length === 2,
+  );
+  check(
+    'a channel media gallery pages with a limit',
+    (await req(`/channels/${galleryChannel.id}/media?limit=1`, { token: ownerToken })).json?.media?.length === 1,
+  );
+  check(
+    'a missing channel media gallery 404s',
+    (await req('/channels/no-such-channel/media', { token: ownerToken })).status === 404,
+  );
+
+  // A locked channel refuses its gallery the same way it refuses its history.
+  const galleryLockRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'GalleryLock' } });
+  const galleryLocked = (
+    await req('/channels', {
+      method: 'POST',
+      token: ownerToken,
+      body: { name: 'channel-gallery-locked', requiredRoleId: galleryLockRole.json.id },
+    })
+  ).json;
+  const lockedPic = await uploadBytes(
+    await sharp({ create: { width: 5, height: 5, channels: 3, background: { r: 210, g: 7, b: 77 } } })
+      .png()
+      .toBuffer(),
+    'locked-gallery.png',
+  );
+  await req(`/channels/${galleryLocked.id}/messages`, {
+    method: 'POST',
+    token: ownerToken,
+    body: { content: 'locked media', attachmentIds: [lockedPic.id] },
+  });
+  check(
+    'a locked channel refuses its media gallery (403)',
+    (await req(`/channels/${galleryLocked.id}/media`, { token: bobToken })).status === 403,
+  );
+  check(
+    'an administrator reads a locked channel media gallery',
+    (await req(`/channels/${galleryLocked.id}/media`, { token: ownerToken })).status === 200,
+  );
+
   // --- Backups and channel exports ---
   const backupPng = await sharp({
     create: { width: 9, height: 7, channels: 3, background: { r: 200, g: 10, b: 90 } },
