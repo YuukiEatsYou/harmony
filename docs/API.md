@@ -800,6 +800,31 @@ is captured at is the `screenShareHeight` and `screenShareFrameRate` settings, p
 `GET /api/v1/meta`; the relay never transcodes, so a higher bound is more bandwidth for the sharer
 and every viewer.
 
+A client — the bundled web client or a native one — drives this the same way, and the shape is a
+contract worth stating on its own, since implementing it means reading the WebRTC handshake rather
+than a route:
+
+- **The server always offers; the client only answers.** Every `VOICE_SIGNAL` is answered with
+  `POST /api/v1/channels/:channelId/voice/answer`. A client never offers, so there is no glare to
+  resolve, and ICE candidates ride inside the SDP, so there is no candidate relay.
+- **A re-offer arrives on the same connection** when somebody joins or leaves the room. It is
+  answered exactly like the first offer, so answer every offer you are sent.
+- **The transceiver layout is fixed.** From the server's side the member's connection has a
+  receive-only microphone line and a receive-only screen line, plus one send-only slot per other
+  member. So the client **sends** its own microphone on the first line and its own screen on the
+  second, and **receives** everyone else on the slots. Answer the offer's m-lines in the order they
+  arrive; do not reorder them.
+- **Flip the client's own screen line to `sendonly` before answering.** The server offers that line
+  receive-only, and an answerer with no track to send yet tends to settle it on `inactive`, after
+  which a later `replaceTrack` of the screen goes nowhere. This is the one step that is easy to miss.
+- **Each relayed track's stream id is the producing member's id**, which is how a track is matched to
+  the member it belongs to (a speaking or sharing indicator needs this).
+- **Codecs:** Opus for audio and VP8 for video, as the offer declares.
+
+The initial rosters are read with `GET /api/v1/voice`. There is no ICE-restart path: a connection
+that dies is rebuilt by leaving and joining again (a fresh `POST`), which is what the bundled client
+does when its own connection drops.
+
 #### `GET /api/v1/voice` — `ViewChannels`
 
 ```json
@@ -3188,9 +3213,12 @@ ws.onmessage = (event) => {
 - **No CORS.** The server sends no `Access-Control-Allow-Origin` header, so a browser client must
   be served from the same origin as the API. Bots and native clients are unaffected. Configurable
   CORS could be added later.
-- **One server per instance.** There are no guilds, DMs, friend lists, voice or video.
-- **Text channels only.** `Channel.type` is always `"text"`.
-- **No resume on the gateway.** Reconnect and refetch.
+- **One server per instance.** There are no guilds, DMs or friend lists.
+- **No resume on the gateway.** Reconnect and refetch. Voice connections fare better: a dead one is
+  rebuilt by leaving and joining again (see [Voice](#voice)).
+- **Native and headless clients are supported.** Authentication is a session cookie or a `Bearer`
+  token, the gateway is the same WebSocket, and the [Voice](#voice) negotiation is the same
+  contract a browser uses; nothing depends on the bundled web client.
 - **Reserved permissions.** `EmbedLinks` and `MentionEveryone` are defined in the bitfield but not
   enforced by any endpoint yet.
 - **Bridged content is best-effort.** Discord's webhooks cannot post real replies or reactions, so

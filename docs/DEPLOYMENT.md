@@ -259,6 +259,15 @@ the WebRTC candidate, which on a host whose interface carries its public IP (as 
 OVH) is already correct. A host behind another NAT should set
 `HARMONY_VOICE_PUBLIC_IP` to the address members reach it at.
 
+The relay also gathers a server-reflexive candidate against a public STUN server
+by default (Google's), so the process contacts it while a call is up; a host with a
+public IP does not need this, and there is no setting to change or disable it yet.
+Reachability is otherwise one-sided: the server is the public peer, so a member
+usually connects by sending to it even from behind a NAT. A member on a symmetric
+NAT or a carrier-grade NAT can still fail, and nothing in this release relays for
+them; a self-hosted STUN or TURN server would be the fix, wired into the client's
+ICE configuration. There is no such configuration exposed yet.
+
 ## Installing it as an app
 
 Harmony is a Progressive Web App, so it can be installed to a phone or desktop
