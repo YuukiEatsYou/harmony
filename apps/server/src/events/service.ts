@@ -381,14 +381,18 @@ export function createEventService(
 
     interested(auth, id) {
       const row = requireVisible(auth, id);
-      const total = countRsvps(sqlite, row.id);
-      const users = listInterestedUserIds(sqlite, row.id, EVENT_LIMITS.interestedPage).flatMap((userId) => {
+      // Visibility governs the count as well as the names: someone who can no
+      // longer see the event keeps their interest but is neither named nor
+      // counted, so the total never exceeds the list beside it.
+      const voters = listInterestedUserIds(sqlite, row.id).flatMap((userId) => {
         const userRow = findUserById(sqlite, userId);
-        // Someone who can no longer see the event is not named in it.
         if (!userRow || !canSee(channelAccessFor(sqlite, userId), row)) return [];
-        return [presentUser(sqlite, userRow)];
+        return [userRow];
       });
-      return { total, users };
+      return {
+        total: voters.length,
+        users: voters.slice(0, EVENT_LIMITS.interestedPage).map((userRow) => presentUser(sqlite, userRow)),
+      };
     },
 
     sweep(now = Date.now()) {

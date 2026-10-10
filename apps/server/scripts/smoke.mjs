@@ -6988,8 +6988,8 @@ try {
   await req(`/members/${bobId}/roles/${evVisibleRole.json.id}`, { method: 'DELETE', token: ownerToken });
   const secretInterestAfter = (await req(`/events/${secretEvent.id}/interested`, { token: ownerToken })).json;
   check(
-    'a member who lost access is no longer named, though their interest is kept',
-    secretInterestAfter.total === 1 && secretInterestAfter.users.length === 0,
+    'a member who lost access is no longer named or counted, though their interest is kept',
+    secretInterestAfter.total === 0 && secretInterestAfter.users.length === 0,
   );
 
   // Editing.

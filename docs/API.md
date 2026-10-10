@@ -1563,8 +1563,8 @@ always be withdrawn. Both are rate limited.
 #### `GET /api/v1/events/:id/interested` — `ViewChannels`
 
 `{ "total": number, "users": [User] }`: the names behind the count (up to 100, earliest first), left
-to members who can see the event. Someone who can no longer see a channel event is counted in `total`
-but not named.
+to members who can see the event. Someone who can no longer see a channel event is neither counted
+nor named.
 
 ### Reactions
 
