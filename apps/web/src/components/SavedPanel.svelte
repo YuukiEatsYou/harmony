@@ -10,6 +10,7 @@
   import { ApiError, api } from '../lib/api';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
+  import { gateway } from '../lib/gateway';
   import { emojis } from '../lib/emojis.svelte';
   import { members } from '../lib/members.svelte';
   import { parseMessage } from '../lib/message-text';
@@ -141,7 +142,7 @@
 
     // Follow the member's own saves made elsewhere, and edits or deletions of the
     // messages listed, without a reload.
-    return chat.onGatewayEvent((frame) => {
+    return gateway.onEvent((frame) => {
       if (frame.t === 'SAVED_MESSAGE_UPDATE') {
         const payload = frame.d as SavedMessageUpdatePayload;
         const rest = entries.filter((entry) => entry.message.id !== payload.messageId);

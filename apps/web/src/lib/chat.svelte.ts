@@ -30,7 +30,7 @@ import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
 import { drafts } from './drafts.svelte';
 import { playSound } from './sounds';
-import { GatewayClient, type GatewayFrame } from './gateway';
+import { gateway, type GatewayFrame } from './gateway';
 
 /** How many messages one history page holds, for both directions. */
 const historyPageSize = 50;
@@ -155,7 +155,6 @@ class ChatStore {
    */
   signedOutReason = $state<string | null>(null);
 
-  #gateway = new GatewayClient(GatewayClient.defaultUrl());
   #started = false;
   /** Whether a READY has already been seen, to tell a first connect from a reconnect. */
   #connected = false;
@@ -220,18 +219,10 @@ class ChatStore {
     this.messages = this.messages.map((message) => (message.id === messageId ? { ...message, poll } : message));
   }
 
-  /**
-   * Lets a panel follow live events for itself, such as the pins panel keeping
-   * its list in step with pins made elsewhere. Returns the unsubscribe.
-   */
-  onGatewayEvent(listener: (frame: GatewayFrame) => void): () => void {
-    return this.#gateway.onEvent(listener);
-  }
-
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
-    this.#gateway.onEvent((frame) => this.#handleEvent(frame));
+    gateway.onEvent((frame) => this.#handleEvent(frame));
     document.addEventListener('visibilitychange', this.#onVisibility);
     this.#scheduleTimeoutLift();
     await this.loadChannels();
@@ -244,13 +235,13 @@ class ChatStore {
     await roster.load();
     await commands.load();
     await voice.load().catch(() => {});
-    this.#gateway.connect();
+    gateway.connect();
   }
 
   stop(): void {
     this.#started = false;
     this.#connected = false;
-    this.#gateway.close();
+    gateway.close();
     document.removeEventListener('visibilitychange', this.#onVisibility);
     this.categories = [];
     this.channels = [];
@@ -302,7 +293,7 @@ class ChatStore {
    * while someone sitting at the newest message simply sees it follow along.
    */
   async resync(): Promise<void> {
-    this.#gateway.ensureConnected();
+    gateway.ensureConnected();
 
     // Resuming on a phone often means resuming with no usable network for a
     // moment, so the one refresh that would throw is caught rather than left to

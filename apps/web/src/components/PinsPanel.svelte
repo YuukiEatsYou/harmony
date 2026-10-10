@@ -10,6 +10,7 @@
   import { ApiError, api } from '../lib/api';
   import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
+  import { gateway } from '../lib/gateway';
   import { session } from '../lib/session.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
@@ -77,7 +78,7 @@
 
     // Pins come and go as ordinary message updates, so follow those while open:
     // someone else pinning, unpinning or deleting shows up without a reload.
-    return chat.onGatewayEvent((frame) => {
+    return gateway.onEvent((frame) => {
       if (frame.t === 'MESSAGE_UPDATE') {
         const message = frame.d as Message;
         if (message.channelId !== channelId) return;

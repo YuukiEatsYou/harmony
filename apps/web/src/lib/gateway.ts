@@ -210,3 +210,11 @@ export class GatewayClient {
     for (const listener of this.#listeners) listener(frame);
   }
 }
+
+/**
+ * The one gateway connection the app uses. Chat drives it (connect, close,
+ * reconnect); anything else that cares about live events subscribes here rather
+ * than reaching through chat, which has no business owning the socket's
+ * listeners.
+ */
+export const gateway = new GatewayClient(GatewayClient.defaultUrl());

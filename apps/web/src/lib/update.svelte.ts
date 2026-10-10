@@ -7,8 +7,7 @@ import {
   type UpdateStatus,
 } from '@harmony/shared';
 import { ApiError, api } from './api';
-import { chat } from './chat.svelte';
-import type { GatewayFrame } from './gateway';
+import { gateway, type GatewayFrame } from './gateway';
 import { session } from './session.svelte';
 
 /** The released version the owner put the notice away for, so it stays away. */
@@ -80,7 +79,7 @@ class UpdateState {
 
   start(): void {
     if (this.#unsubscribe) return;
-    this.#unsubscribe = chat.onGatewayEvent((frame) => this.#handleEvent(frame));
+    this.#unsubscribe = gateway.onEvent((frame) => this.#handleEvent(frame));
     void this.load();
   }
 

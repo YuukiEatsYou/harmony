@@ -7,7 +7,7 @@ import type {
 } from '@harmony/shared';
 import { api } from './api';
 import { chat } from './chat.svelte';
-import type { GatewayFrame } from './gateway';
+import { gateway, type GatewayFrame } from './gateway';
 import { session } from './session.svelte';
 import { playSound } from './sounds';
 
@@ -78,7 +78,7 @@ class SavedState {
 
   start(): void {
     if (this.#unsubscribe) return;
-    this.#unsubscribe = chat.onGatewayEvent((frame) => this.#handleEvent(frame));
+    this.#unsubscribe = gateway.onEvent((frame) => this.#handleEvent(frame));
     void this.load();
   }
 

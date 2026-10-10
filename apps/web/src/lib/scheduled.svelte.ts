@@ -8,7 +8,7 @@ import type {
 } from '@harmony/shared';
 import { api } from './api';
 import { chat } from './chat.svelte';
-import type { GatewayFrame } from './gateway';
+import { gateway, type GatewayFrame } from './gateway';
 import { removeScheduled, scheduledBadge, upsertScheduled } from './schedule-time';
 
 /** A line shown beside the header button: a delivery that failed, or a schedule just made. */
@@ -37,7 +37,7 @@ class ScheduledState {
 
   start(): void {
     if (this.#unsubscribe) return;
-    this.#unsubscribe = chat.onGatewayEvent((frame) => this.#handleEvent(frame));
+    this.#unsubscribe = gateway.onEvent((frame) => this.#handleEvent(frame));
     void this.load();
   }
 
