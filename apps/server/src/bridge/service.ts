@@ -144,6 +144,25 @@ const FORWARDED_MARKER = '*Forwarded*';
 const STICKER_LINK =
   /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\/stickers\/(\d+)\.(png|gif)(?:\?[^\s]*)?/gi;
 
+/** Splits like a reader sees characters, so a cut never lands inside one emoji. */
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * The last grapheme boundary at or before `index`, so a cut falls between
+ * characters. It looks a little past `index` because a cluster (a flag, a ZWJ
+ * emoji) can span the cut; clusters are short, so a small lookahead is enough.
+ */
+function lastGraphemeBoundary(text: string, index: number): number {
+  const slice = text.slice(0, Math.min(text.length, index + 32));
+  let at = 0;
+  for (const { index: start, segment } of graphemeSegmenter.segment(slice)) {
+    const end = start + segment.length;
+    if (end > index) break;
+    at = end;
+  }
+  return at;
+}
+
 export interface BridgeService {
   status(): BridgeResponse;
   /** Starts, stops or restarts the bot to match the saved settings. */
@@ -696,7 +715,8 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
    * Cuts text into pieces Discord accepts. Harmony allows longer messages than
    * Discord does, and cutting one short would lose the rest without a word. A
    * piece breaks at a line if it can, then at a space, so a word is only split
-   * down the middle when there is no other choice.
+   * down the middle when there is no other choice; even then a mention tag and
+   * a multi-code-point emoji are kept whole.
    */
   function splitForDiscord(text: string): string[] {
     const parts: string[] = [];
@@ -708,10 +728,16 @@ export function createBridgeService(deps: BridgeDeps): BridgeService {
       let cut = window.lastIndexOf('\n');
       if (cut < floor) cut = window.lastIndexOf(' ');
       if (cut < floor) {
-        cut = DISCORD_MAX_CONTENT;
-        // Never split an emoji or other character outside the basic plane.
-        const last = rest.charCodeAt(cut - 1);
-        if (last >= 0xd800 && last <= 0xdbff) cut--;
+        // Nothing to break on, so cut near the limit, but never through a
+        // Discord tag (<@id>, <#id>, <:name:id>) or a multi-code-point emoji:
+        // either stops working when torn in half. Break before an unclosed tag
+        // in the window, otherwise at the previous grapheme boundary.
+        const open = window.lastIndexOf('<');
+        if (open > window.lastIndexOf('>') && open >= floor) {
+          cut = open;
+        } else {
+          cut = lastGraphemeBoundary(rest, DISCORD_MAX_CONTENT);
+        }
       }
       parts.push(rest.slice(0, cut).trimEnd());
       rest = rest.slice(cut).replace(/^[\n ]/, '');

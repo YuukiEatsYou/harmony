@@ -1589,6 +1589,35 @@ try {
     findBridgeMessageByHarmonyId(db.sqlite, longMessage.id)?.discord_message_id === `discord-${mirrorsBeforeLong + 1}`,
   );
   check('the following parts are remembered as ours', hasSeenBridgeMessage(db.sqlite, `discord-${mirrorsBeforeLong + 2}`));
+  // A Discord tag straddling the limit must not be cut in half. The piece has
+  // no newline or space to break at, so it would otherwise cut at the raw limit
+  // and strand half of the mention.
+  const straddleText = `${'x'.repeat(1990)}<@123456789012345678>${'y'.repeat(50)}`;
+  const mirrorsBeforeTag = transport.state.mirrors.length;
+  messages.create(auth, channelId, straddleText, [], null);
+  await sleep(50);
+  const tagParts = transport.state.mirrors.slice(mirrorsBeforeTag);
+  check(
+    'a mention tag on the split boundary is kept whole',
+    tagParts.every((part) => part.content.length <= 2000) &&
+      tagParts.filter((part) => part.content.includes('<@123456789012345678>')).length === 1 &&
+      tagParts.map((part) => part.content).join('') === straddleText,
+    tagParts.map((part) => part.content.length).join(','),
+  );
+  // A multi-code-point emoji (here a ZWJ family) on the boundary is kept whole too.
+  const family = '\uD83D\uDC69\u200D\uD83D\uDC69\u200D\uD83D\uDC67';
+  const graphemeText = `${'z'.repeat(1995)}${family}${'q'.repeat(20)}`;
+  const mirrorsBeforeGrapheme = transport.state.mirrors.length;
+  messages.create(auth, channelId, graphemeText, [], null);
+  await sleep(50);
+  const graphemeParts = transport.state.mirrors.slice(mirrorsBeforeGrapheme);
+  check(
+    'a multi-code-point emoji on the split boundary is kept whole',
+    graphemeParts.every((part) => part.content.length <= 2000) &&
+      graphemeParts.filter((part) => part.content.includes(family)).length === 1 &&
+      graphemeParts.map((part) => part.content).join('') === graphemeText,
+    graphemeParts.map((part) => part.content.length).join(','),
+  );
   messages.edit(auth, longMessage.id, `${longText} edited`);
   await sleep(50);
   check(
