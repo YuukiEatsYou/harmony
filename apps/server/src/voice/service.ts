@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   GatewayEvent,
   Permission,
+  VOICE_OFFLINE_GRACE_MS,
   hasPermission,
   type VoiceSignalPayload,
   type VoiceState,
@@ -16,16 +17,6 @@ import type { ServerLogService } from '../log/service.ts';
 import type { GatewayHub } from '../realtime/hub.ts';
 import type { SettingsService } from '../settings/service.ts';
 import { createSfu } from './sfu.ts';
-
-/**
- * How long a member keeps their seat after their last gateway connection drops,
- * before they are actually removed. A phone changing networks loses that socket
- * too, and its media may be perfectly fine, so this gives the client a moment to
- * reconnect and ask for an ICE restart instead of being evicted and having to
- * rejoin. The media reaper is untouched by this: a connection that is genuinely
- * dead is still removed on its own schedule, whichever comes first.
- */
-const VOICE_OFFLINE_GRACE_MS = 10_000;
 
 /** One member's voice presence, as it is held in memory. */
 interface Membership {

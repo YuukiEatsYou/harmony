@@ -6,6 +6,7 @@ import type {
   VoiceState,
   VoiceStateUpdatePayload,
 } from '@harmony/shared';
+import { VOICE_MAX_RECOVER_ATTEMPTS, VOICE_RECOVER_DELAY_MS, VOICE_RECOVER_GRACE_MS } from '@harmony/shared';
 import { api } from './api';
 import { meta } from './meta.svelte';
 import { session } from './session.svelte';
@@ -31,17 +32,6 @@ import { playSound } from './sounds';
 const speakingLevel = 0.015;
 /** How often the speaking indicators are recomputed. */
 const speakingPollMs = 120;
-
-/*
- * A dropped connection is rebuilt rather than left silent. WebRTC often heals a
- * brief interruption on its own, so a disconnected state is given a moment
- * before it is treated as a loss, while a failed one is rebuilt at once. The
- * rebuild is the ordinary leave-and-join, so nothing here needs the server to
- * change: the member is briefly out of the room, then back.
- */
-const recoverGraceMs = 4000;
-const recoverDelayMs = 2500;
-const maxRecoverAttempts = 5;
 
 /**
  * Turns a failed join into something worth reading. A DOMException name is
@@ -505,7 +495,7 @@ class VoiceStore {
       return;
     }
     if (state === 'failed') this.#scheduleRecover(0);
-    else if (state === 'disconnected') this.#scheduleRecover(recoverGraceMs);
+    else if (state === 'disconnected') this.#scheduleRecover(VOICE_RECOVER_GRACE_MS);
   }
 
   #scheduleRecover(delayMs: number): void {
@@ -538,8 +528,8 @@ class VoiceStore {
     }
     this.#recoverAttempts += 1;
     if (this.#intended !== target) return;
-    if (this.#recoverAttempts < maxRecoverAttempts) {
-      this.#scheduleRecover(recoverDelayMs);
+    if (this.#recoverAttempts < VOICE_MAX_RECOVER_ATTEMPTS) {
+      this.#scheduleRecover(VOICE_RECOVER_DELAY_MS);
     } else {
       this.#intended = null;
       this.error = 'Voice connection lost. Rejoin the channel to try again.';

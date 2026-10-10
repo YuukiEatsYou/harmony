@@ -1,4 +1,5 @@
 import { MediaStream, MediaStreamTrack, RTCPeerConnection } from 'werift';
+import { VOICE_REAP_DISCONNECTED_MS, VOICE_REAP_FAILED_MS } from '@harmony/shared';
 
 /**
  * The server end of a voice room, as a selective forwarder. It terminates one
@@ -34,16 +35,6 @@ export interface SfuSignals {
   /** Sends an SDP offer for the member's connection; the client answers it. */
   sendOffer(userId: string, channelId: string, sdp: string): void;
 }
-
-/**
- * How long a dead connection is left to heal before it is reaped and its ICE port
- * released. A failed connection is past hope, so it goes sooner; a disconnected
- * one might still recover (a network blip, a client rebuilding its call), so it is
- * given much longer. Both are longer than the client's own recovery grace, so a
- * call that heals never has its member dropped out from under it.
- */
-const reapFailedMs = 8_000;
-const reapDisconnectedMs = 20_000;
 
 export interface Sfu {
   /** Adds a member to a room, negotiating their connection and the others'. */
@@ -341,7 +332,7 @@ export function createSfu(signals: SfuSignals, options: SfuOptions = {}): Sfu {
           if (peer.closed || peers.get(peer.userId) !== peer) return;
           log('voice_sfu_reap', { userId: peer.userId, state });
           void this.leave(peer.userId).then(() => options.onPeerLost?.(peer.userId));
-        }, state === 'failed' ? reapFailedMs : reapDisconnectedMs);
+        }, state === 'failed' ? VOICE_REAP_FAILED_MS : VOICE_REAP_DISCONNECTED_MS);
       });
       reconcile(peer);
       reofferRoom(channelId);

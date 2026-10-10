@@ -257,6 +257,14 @@ changed networks can reconnect and renegotiate rather than be evicted; the media
 reaper above stays the authority for a connection that is genuinely dead, and
 whichever fires first removes the member.
 
+The numbers behind every one of these graces live together in
+`packages/shared/src/voice-timing.ts` (`VOICE_RECOVER_*` and
+`VOICE_MAX_RECOVER_ATTEMPTS` for the client, `VOICE_OFFLINE_GRACE_MS` and the two
+reap values for the server), with the ordering they must keep written down: the
+client's recovery, retries included, has to finish inside the server's grace. The
+constants are not spread across the files that use them precisely because getting
+that order wrong is the bug that stranded a call on "Connecting…".
+
 The dropped connection also marks the member **detached**: their seat is held, but
 the client that was answering the relay is gone, so the media connection it left is
 presumed stale. A client that loads and finds itself detached — the page was
