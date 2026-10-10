@@ -156,6 +156,8 @@ class ChatStore {
   signedOutReason = $state<string | null>(null);
 
   #started = false;
+  /** Removes this store's gateway subscription on stop, so a later start does not double it. */
+  #gatewayUnsubscribe: (() => void) | null = null;
   /** Whether a READY has already been seen, to tell a first connect from a reconnect. */
   #connected = false;
   #typingTimer: ReturnType<typeof setInterval> | null = null;
@@ -222,7 +224,7 @@ class ChatStore {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
-    gateway.onEvent((frame) => this.#handleEvent(frame));
+    this.#gatewayUnsubscribe = gateway.onEvent((frame) => this.#handleEvent(frame));
     document.addEventListener('visibilitychange', this.#onVisibility);
     this.#scheduleTimeoutLift();
     await this.loadChannels();
@@ -241,6 +243,8 @@ class ChatStore {
   stop(): void {
     this.#started = false;
     this.#connected = false;
+    this.#gatewayUnsubscribe?.();
+    this.#gatewayUnsubscribe = null;
     gateway.close();
     document.removeEventListener('visibilitychange', this.#onVisibility);
     this.categories = [];
