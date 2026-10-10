@@ -39,7 +39,16 @@ function push(parts: DiffPart[], kind: DiffKind, text: string): void {
  * reported as one removal followed by one addition.
  */
 export function diffWords(before: string, after: string): DiffPart[] {
-  const cut = (text: string): string => (text.length > MAX_DIFF_CHARS ? text.slice(0, MAX_DIFF_CHARS) : text);
+  const cut = (text: string): string => {
+    if (text.length <= MAX_DIFF_CHARS) return text;
+    let end = MAX_DIFF_CHARS;
+    // A hard cut can land between the two halves of a character outside the
+    // basic plane; back off one unit so it falls before the character, not
+    // through it (a lone surrogate would render as a replacement glyph).
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+    return text.slice(0, end);
+  };
   const a = tokenize(cut(before));
   const b = tokenize(cut(after));
   const parts: DiffPart[] = [];

@@ -1248,6 +1248,13 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('and falls back to one removal and one addition', huge.filter((p) => p.kind === 'del').length === 1 && huge.filter((p) => p.kind === 'add').length === 1);
   const long = 'x'.repeat(MAX_DIFF_CHARS * 3);
   check('over-long text is cut to the cap', side(diffWords(long, long + 'y'), ['same', 'del']).length <= MAX_DIFF_CHARS);
+  // The cap falls one unit before an astral character, so a naive cut would
+  // keep its high surrogate and drop the low half.
+  const straddle = `${'x'.repeat(MAX_DIFF_CHARS - 1)}😀tail`;
+  check(
+    'a cut at the cap never leaves a lone surrogate half',
+    diffWords(straddle, straddle).every((p) => !/[\uD800-\uDBFF]$|^[\uDC00-\uDFFF]/.test(p.text)),
+  );
 }
 
 // --- Server gifs: tags, search, ordering and reordering ---
