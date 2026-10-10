@@ -46,6 +46,13 @@ export interface EmbedService {
    * with Manage Messages may do it. Returns the message as clients now see it.
    */
   suppress(auth: AuthContext, messageId: string): Promise<Message>;
+  /**
+   * Hands the service the way to renew a signed Discord link, once the bridge
+   * that can do it exists. The bridge resolves its own previews through this
+   * service, so the two cannot be built in each other's constructor; this seam
+   * sets the one dependency that goes the other way.
+   */
+  useDiscordRefresher(refresh: (url: string) => Promise<string | null>): void;
 }
 
 export interface EmbedServiceDeps {
@@ -55,11 +62,6 @@ export interface EmbedServiceDeps {
   attachments: AttachmentService;
   /** Renders a message for a broadcast, or null when it is gone. */
   renderMessage: (messageId: string) => Message | null;
-  /**
-   * Renews a Discord CDN link through the bridge, since Discord signs those and the
-   * signature expires. Absent while the bridge is not available.
-   */
-  refreshDiscordAttachment?: (url: string) => Promise<string | null>;
   log?: (message: string, detail?: unknown) => void;
   /** Replaces the check made before a gif is linked; for tests, which cannot reach a gif host. */
   verifyLinkedGif?: VerifyLinkedGif;
@@ -112,6 +114,11 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
   const cards = new Map<string, LinkEmbed | null>();
   const inFlight = new Map<string, Promise<Outcome>>();
   const log = deps.log ?? ((): void => {});
+  /**
+   * Set by useDiscordRefresher once the bridge exists. Null while it does not,
+   * which is also the honest answer for an instance with no bridge at all.
+   */
+  let refreshDiscordAttachment: ((url: string) => Promise<string | null>) | null = null;
 
   /**
    * Cache and in-flight keys include the user agent, so changing it takes effect
@@ -141,7 +148,7 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     const pending = inFlight.get(key);
     if (pending) return pending;
 
-    const job = fetchOutcome(url, userAgent, deps.settings.get().maxImageBytes, deps.refreshDiscordAttachment, log)
+    const job = fetchOutcome(url, userAgent, deps.settings.get().maxImageBytes, refreshDiscordAttachment ?? undefined, log)
       .catch((): Outcome => ({ kind: 'embed', embed: null }))
       .then((outcome) => {
         if (outcome.kind === 'embed') {
@@ -359,6 +366,10 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
         // not let a newcomer skip past a resolution that is still queued.
         if (queues.get(messageId) === run) queues.delete(messageId);
       });
+    },
+
+    useDiscordRefresher(refresh) {
+      refreshDiscordAttachment = refresh;
     },
   };
 }

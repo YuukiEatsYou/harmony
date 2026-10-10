@@ -217,10 +217,6 @@ const updateApplier = createUpdateApplier({
   onSuccess: () => void shutdown('update'),
 });
 
-// Set once the bridge exists, so a pasted Discord attachment link can be renewed
-// through Discord. Null until then, and while the bridge is offline.
-let refreshDiscordAttachment: ((url: string) => Promise<string | null>) | null = null;
-
 // Unfurls one link per message into a small preview. It listens for local
 // messages only and pushes updates straight to the gateway, so the bridge never
 // mistakes a preview for a user edit.
@@ -231,7 +227,6 @@ const embedService = createEmbedService({
   attachments: attachmentService,
   sources: gifSources,
   renderMessage: (messageId) => messageService.byId(messageId),
-  refreshDiscordAttachment: (url) => refreshDiscordAttachment?.(url) ?? Promise.resolve(null),
   log: (message, detail) => app.log.debug(detail ?? {}, message),
 });
 messageService.onMessageCreated((message) => embedService.resolve(message.id, message.content));
@@ -260,7 +255,7 @@ const bridge = createBridgeService({
 });
 
 // Hand the embed service the bridge it can renew Discord attachment links through.
-refreshDiscordAttachment = (url) => bridge.refreshDiscordAttachment(url);
+embedService.useDiscordRefresher((url) => bridge.refreshDiscordAttachment(url));
 
 // Copies the linked guild's custom emoji in on demand from the emoji panel.
 const emojiImport = createEmojiImportService({
