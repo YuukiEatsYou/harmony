@@ -511,7 +511,16 @@ main {
   background: var(--h-bg-elevated);
   border-radius: var(--h-radius-xl);
   border: 1px solid var(--h-border);
-  box-shadow: var(--h-shadow-xl);
+  /*
+   * The landing card is the one surface that carries an accent aura: it is the
+   * first thing a visitor sees, and the glow gives an otherwise featureless
+   * page a center of gravity. Restrained, so a light theme gets a soft tint
+   * rather than a halo. It is a shadow, not a background, so the card itself
+   * keeps its place on the elevation ladder.
+   */
+  box-shadow:
+    var(--h-shadow-xl),
+    0 0 80px color-mix(in srgb, var(--h-accent) 12%, transparent);
 }
 
 main header {
@@ -5448,6 +5457,12 @@ button.roster-member:hover {
   border-radius: var(--h-radius);
   box-shadow: var(--h-shadow-xl);
   object-fit: contain;
+  /*
+   * A fade, not a scale. The picture is grid-centered, which can land it on a
+   * half pixel; a transform entrance would re-rasterise it at that fractional
+     origin and read as the image settling a hair off when the animation ends.
+   */
+  animation: h-fade-in var(--h-duration-slow) var(--h-ease) both;
 }
 
 .lightbox-close {
@@ -5813,6 +5828,16 @@ button.danger:hover:not(:disabled) {
 .admin-body {
   animation: h-fade-up var(--h-duration-slow) var(--h-ease-out) backwards;
   animation-delay: 100ms;
+}
+
+/*
+ * The landing card rises gently on first paint. h-fade-up moves it with the
+ * independent translate property, so nothing is left behind to fight a later
+ * transform, and backwards fill leaves no state once it settles. The same
+ * rule covers the brief Loading card, which shares the <main> element.
+ */
+main {
+  animation: h-fade-up var(--h-duration-slower) var(--h-ease-out) backwards;
 }
 
 /* ---- Inputs ---- */

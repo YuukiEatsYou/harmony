@@ -821,8 +821,13 @@
     margin: 0.75rem -0.6rem 0;
     padding: 0.5rem 0.75rem;
     border-radius: var(--h-radius-sm);
-    background: var(--h-bg-deep);
-    border: 1px solid var(--h-border);
+    /* It rides over scrolled messages, so it takes the floating-layer glass
+       treatment rather than a solid well. */
+    background: var(--h-glass-bg);
+    -webkit-backdrop-filter: blur(var(--h-glass-blur));
+    backdrop-filter: blur(var(--h-glass-blur));
+    border: 1px solid var(--h-glass-border);
+    box-shadow: var(--h-shadow-lg);
     color: var(--h-text-muted);
     font-size: 0.85rem;
   }
