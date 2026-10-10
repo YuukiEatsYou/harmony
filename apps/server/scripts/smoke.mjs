@@ -2280,6 +2280,15 @@ try {
       'the current text is not part of the history',
       !hist.json?.edits?.some((e) => e.content === 'v2'),
     );
+    // Saving the same text again is not an edit: no new history row, no
+    // "(edited)" announcement (the echo would show it otherwise).
+    const noopEdit = await req(`/messages/${histMsg.id}`, { method: 'PATCH', token: bobToken, body: { content: 'v2' } });
+    const histAfterNoop = await edits(histMsg.id, bobToken);
+    check(
+      'saving the same text adds no history entry',
+      noopEdit.status === 200 && histAfterNoop.json?.edits?.length === 2,
+      `${noopEdit.status} ${JSON.stringify(histAfterNoop.json?.edits)}`,
+    );
     const missing = await edits('no-such-message', carolToken);
     const other = await edits(histMsg.id, carolToken);
     check(

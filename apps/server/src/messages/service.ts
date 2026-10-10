@@ -760,6 +760,11 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
       }
 
       const before = row.content;
+      // Saving without changing the text is not an edit: it must not grow the
+      // history, broadcast a change or write an audit entry. Discord reports link
+      // unfurls as updates this way, which is why editBridged guards identically.
+      if (before === content) return render(row, auth.user.id);
+
       const editedAt = new Date().toISOString();
       recordMessageEdit(sqlite, { messageId, editorId: auth.user.id, content: before, editedAt, source: 'harmony' });
       updateMessageContent(sqlite, messageId, content, editedAt);

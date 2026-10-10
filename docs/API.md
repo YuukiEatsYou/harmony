@@ -1003,7 +1003,9 @@ If the channel has a [slowmode](#slowmode) and you posted here too recently, thi
 ```
 
 Only the author may edit; anyone else, including administrators, gets `403 forbidden`. Returns the
-updated `Message` (with `editedAt` set) and fires `MESSAGE_UPDATE`. The [inbox](#mentions-and-replies)
+updated `Message` (with `editedAt` set) and fires `MESSAGE_UPDATE`. Submitting text identical to the
+current content is a no-op: the message comes back unchanged, with no history entry, no `editedAt`
+bump and no `MESSAGE_UPDATE`. The [inbox](#mentions-and-replies)
 follows the new text: someone named by the edit finds the message there, someone no longer named does
 not, and a reply stays a reply. Naming someone by editing does not make the channel unread for them.
 
