@@ -5472,7 +5472,7 @@ button.roster-member:hover {
 }
 
 /* ============================================================
-   MOTION SYSTEM — experimental try-out (not committed)
+   MOTION SYSTEM
    ============================================================
    A motion pass integrated on top of the sheet. Additive, and last in the
    file so it wins ties against the rules above.
@@ -5550,7 +5550,8 @@ button.roster-member:hover {
   50%      { box-shadow: 0 0 0 8px transparent; }
 }
 
-@keyframes h-shimmer {
+/* A sideways shake, for drawing the eye to something that was refused. */
+@keyframes h-shake {
   0%, 100% { transform: translateX(0); }
   20%      { transform: translateX(-4px); }
   40%      { transform: translateX(4px); }
