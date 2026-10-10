@@ -19,3 +19,7 @@ REVIEW_NOTES.md
 # Python bytecode from the example bot.
 __pycache__/
 *.pyc
+
+# Agent-generated working files.
+.agents/
+skills-lock.json
