@@ -92,6 +92,7 @@ import {
   upsertScheduled,
 } from '../src/lib/schedule-time.ts';
 import { firstUnreadIndex, muteLabel, newMessageCount, newMessagesLabel, pillCount } from '../src/lib/unread.ts';
+import { groupedRows, isGrouped } from '../src/lib/message-grouping.ts';
 import { formatTimestamp, formatTimestampTitle } from '../src/lib/timestamp.ts';
 import { draftPreview } from '../src/lib/composer-preview.ts';
 import { filterByName, filterUnicodeGroups } from '../src/lib/unicode-emoji.ts';
@@ -840,6 +841,31 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('one message is singular', newMessagesLabel(1, false, at(1), clock) === '1 new message since 12:01');
   check('a partial count gets a plus', newMessagesLabel(50, true, at(1), clock) === '50+ new messages since 12:01');
   check('pills cap at 99+', pillCount(5) === '5' && pillCount(99) === '99' && pillCount(100) === '99+');
+}
+
+// --- Message grouping ---
+{
+  const at = (minute) => `2026-01-01T12:${String(minute).padStart(2, '0')}:00.000Z`;
+  const msg = (id, minute, author = 'them', replyTo = null) => ({
+    id,
+    createdAt: at(minute),
+    author: author === null ? null : { id: author },
+    replyTo,
+  });
+
+  check('same author, close in time, is grouped', isGrouped(msg('a', 1), msg('b', 2)));
+  check('a gap past the window is not', !isGrouped(msg('a', 1), msg('b', 9)));
+  check('a different author is not', !isGrouped(msg('a', 1), msg('b', 2, 'other')));
+  check('a reply starts its own group', !isGrouped(msg('a', 1), msg('b', 2, 'them', { id: 'x' })));
+  check('a missing author is not grouped', !isGrouped(msg('a', 1, null), msg('b', 2)));
+  check('the first message of a list is not grouped', !isGrouped(undefined, msg('a', 1)));
+
+  const rows = groupedRows([msg('a', 1), msg('b', 2), msg('c', 3, 'other'), msg('d', 4, 'other')], null);
+  check(
+    'groupedRows marks continuations, not the first of a run',
+    rows.map((row) => row.grouped).join(',') === 'false,true,false,true',
+  );
+  check('the message under the new line starts a group', groupedRows([msg('a', 1), msg('b', 2)], 'b')[1].grouped === false);
 }
 
 // --- Composer preview ---

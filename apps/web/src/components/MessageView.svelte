@@ -7,6 +7,7 @@
   import { avatarUrl, initial } from '../lib/avatar';
   import { inlineSegmentsOf, parseMessage } from '../lib/message-text';
   import { firstUnreadIndex, newMessageCount, newMessagesLabel } from '../lib/unread';
+  import { groupedRows } from '../lib/message-grouping';
   import { emojis } from '../lib/emojis.svelte';
   import { gifs } from '../lib/gifs.svelte';
   import LinkedGif from './LinkedGif.svelte';
@@ -73,33 +74,12 @@
   // Custom emoji that can actually be rendered; deleted ones fall back to text.
   const knownEmojiIds = $derived(new Set(emojis.list.map((emoji) => emoji.id)));
 
-  /** Consecutive messages from one author within this window are grouped. */
-  const groupingWindowMs = 7 * 60 * 1000;
-
   /**
-   * Whether a message continues the previous one: same author, close in time,
-   * and not a reply (a reply always shows its own header, like Discord).
+   * Messages paired with whether they continue the previous one, computed in one
+   * place rather than per row so the flag cannot go stale as messages arrive.
+   * The message the "new" line sits above starts a fresh group, header and all.
    */
-  function isGrouped(previous: Message | undefined, message: Message): boolean {
-    if (!previous?.author || !message.author) return false;
-    if (message.replyTo) return false;
-    if (previous.author.id !== message.author.id) return false;
-    const gap = new Date(message.createdAt).getTime() - new Date(previous.createdAt).getTime();
-    return gap >= 0 && gap <= groupingWindowMs;
-  }
-
-  /**
-   * Messages paired with whether they continue the previous one. Computed in one
-   * place rather than per row, so the flag is always evaluated against the whole
-   * list and cannot go stale as messages arrive.
-   */
-  const rows = $derived.by(() =>
-    chat.messages.map((message, index) => ({
-      message,
-      // The first new message starts afresh under the "new" line, header and all.
-      grouped: message.id !== newDividerId && isGrouped(index > 0 ? chat.messages[index - 1] : undefined, message),
-    })),
-  );
+  const rows = $derived.by(() => groupedRows(chat.messages, newDividerId));
 
   // ---- The "new" line and the bar that points up at it ----
 
