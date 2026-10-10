@@ -48,6 +48,8 @@ const reconcileMaxPages = 10;
 const unreadJumpMaxPages = 20;
 /** The longest delay `setTimeout` honors; anything longer fires at once. */
 const maxTimerMs = 2 ** 31 - 1;
+/** How long emoji events wait, so the pruner's one-event-per-emoji burst reloads once. */
+const emojiReloadMs = 250;
 
 /** Whether two copies of a user would look any different beside a message. */
 function sameFace(a: User, b: User): boolean {
@@ -187,6 +189,8 @@ class ChatStore {
    */
   #liveMentions = new Map<string, string>();
   #unreadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Coalesces a burst of emoji events into one list reload. */
+  #emojiReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
   get activeChannel(): Channel | null {
     return this.channels.find((channel) => channel.id === this.activeChannelId) ?? null;
@@ -266,6 +270,8 @@ class ChatStore {
     this.#liveMentions.clear();
     if (this.#unreadRefreshTimer) clearTimeout(this.#unreadRefreshTimer);
     this.#unreadRefreshTimer = null;
+    if (this.#emojiReloadTimer) clearTimeout(this.#emojiReloadTimer);
+    this.#emojiReloadTimer = null;
     channelSettings.reset();
     if (this.#highlightTimer) clearTimeout(this.#highlightTimer);
     this.#highlightTimer = null;
@@ -960,6 +966,15 @@ class ChatStore {
     if (message.channelId === this.activeChannelId && me.notifyMinor) playSound('minor');
   }
 
+  /** Reloads the custom emoji list once, after a short settle. */
+  #reloadEmojisSoon(): void {
+    if (this.#emojiReloadTimer !== null) clearTimeout(this.#emojiReloadTimer);
+    this.#emojiReloadTimer = setTimeout(() => {
+      this.#emojiReloadTimer = null;
+      void emojis.load();
+    }, emojiReloadMs);
+  }
+
   #handleEvent(frame: GatewayFrame): void {
     // Voice is its own concern; hand its frames straight to the voice store.
     if (frame.t === 'VOICE_STATE_UPDATE' || frame.t === 'VOICE_SIGNAL') {
@@ -1161,7 +1176,9 @@ class ChatStore {
       }
       case 'EMOJI_CREATE':
       case 'EMOJI_DELETE':
-        void emojis.load();
+        // The pruner emits one delete per removed emoji, so a large prune would
+        // otherwise refetch the whole list for each one.
+        this.#reloadEmojisSoon();
         break;
       case 'SERVER_GIFS_UPDATE':
         gifs.serverChanged();
