@@ -148,8 +148,9 @@
   <div class="panel">
     <p class="muted">
       A bot is an account you own that acts through a token instead of a password, using the same API
-      and realtime connection as anyone else, limited to the permissions you give it here. Only you,
-      the owner, can see or change them.
+      and realtime connection as anyone else, limited to the permissions you give it here. Granting a
+      bot the Administrator permission makes its token effectively root on the instance, so give it
+      only what it needs. Only you, the owner, can see or change them.
     </p>
     {#if error}<p class="form-error">{error}</p>{/if}
     {#if token}
