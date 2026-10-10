@@ -2512,8 +2512,9 @@ partway. Restoring is described in [DEPLOYMENT.md](DEPLOYMENT.md#backups).
 
 Restricted to the owner, not just `Administrator`: the archive holds every password and session hash,
 the bridge bot token and the Discord sign-in secret. Anyone else gets `403 owner_only`. Only one backup
-is prepared at a time; a second request meanwhile gets `409 backup_in_progress`. Each download is
-recorded in the audit log as `backup_download`.
+is prepared at a time; a second request meanwhile gets `409 backup_in_progress`. The archive is **not
+encrypted** — it carries every credential in the clear, so store and move it accordingly. Each backup
+request is logged as `backup_download` when the download starts, so one aborted partway is logged too.
 
 #### `GET /api/v1/channels/:id/export` — `ManageServer`
 
@@ -2958,8 +2959,9 @@ counted from the last bridged message that carried one.
 avatars and the instance icon. Once it is exceeded, the pruner removes the oldest attachments until
 usage is back under `storageTargetBytes` (or the limit, if no target is set). Attachments are the
 only thing it removes for space, and it spares the ones on a pinned or saved message: it never
-deletes messages, and it stops as soon as a round of removals frees nothing, so a cap that the exempt
-content alone exceeds is left over rather than chased by deleting more.
+deletes messages. It stops as soon as a round of removals frees nothing, so a cap that the exempt
+content alone exceeds will have every other attachment removed and still sit above the limit — that
+overage is left as-is rather than chased by deleting more.
 
 ```ts
 type RetentionSettings = {
