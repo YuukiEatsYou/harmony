@@ -93,6 +93,7 @@ import {
 } from '../src/lib/schedule-time.ts';
 import { firstUnreadIndex, muteLabel, newMessageCount, newMessagesLabel, pillCount } from '../src/lib/unread.ts';
 import { groupedRows, isGrouped } from '../src/lib/message-grouping.ts';
+import { detectTrigger, rankMember, suggestionsFor } from '../src/lib/composer-suggest.ts';
 import { formatTimestamp, formatTimestampTitle } from '../src/lib/timestamp.ts';
 import { draftPreview } from '../src/lib/composer-preview.ts';
 import { filterByName, filterUnicodeGroups } from '../src/lib/unicode-emoji.ts';
@@ -866,6 +867,103 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
     rows.map((row) => row.grouped).join(',') === 'false,true,false,true',
   );
   check('the message under the new line starts a group', groupedRows([msg('a', 1), msg('b', 2)], 'b')[1].grouped === false);
+}
+
+// --- Composer autocomplete: triggers and suggestions ---
+{
+  const commands = [
+    {
+      id: 'c1',
+      name: 'timeout',
+      description: 'Times a member out',
+      requiredPermissions: '0',
+      bot: { id: 'b1', username: 'helper', displayName: 'Helper', avatarHash: null },
+    },
+  ];
+
+  const emojiTrigger = detectTrigger('hello :sm', 9, []);
+  check(
+    'an emoji trigger reads the fragment at the caret',
+    emojiTrigger?.kind === 'emoji' && emojiTrigger.start === 6 && emojiTrigger.query === 'sm',
+  );
+  const mentionTrigger = detectTrigger('hey @alice', 10, []);
+  check(
+    'a mention trigger reads the name',
+    mentionTrigger?.kind === 'mention' && mentionTrigger.query === 'alice' && mentionTrigger.moment === null,
+  );
+  const timeTrigger = detectTrigger('@in 2h', 6, []);
+  check('an @ that reads as a time carries the moment', timeTrigger?.kind === 'mention' && timeTrigger.moment !== null);
+  const channelTrigger = detectTrigger('go to #off', 10, []);
+  check('a channel trigger reads the name', channelTrigger?.kind === 'channel' && channelTrigger.query === 'off');
+  check('a built-in slash opens the popup', detectTrigger('/sh', 3, [])?.kind === 'slash');
+  check('a registered bot command opens it too', detectTrigger('/time', 5, commands)?.kind === 'slash');
+  check('an unknown slash word is plain text', detectTrigger('/usr', 4, commands) === null);
+  check('ordinary text is no trigger', detectTrigger('just talking', 12, commands) === null);
+
+  check(
+    'a prefix member ranks above a substring',
+    rankMember({ username: 'frida', displayName: null }, 'fri') === 0 &&
+      rankMember({ username: 'africa', displayName: null }, 'fri') === 1,
+  );
+  check('no match ranks last', rankMember({ username: 'bob', displayName: null }, 'fri') === 2);
+
+  const data = (over = {}) => ({
+    picker: [],
+    unicode: [],
+    ranked: [],
+    scores: new Map(),
+    commands: [],
+    channels: [],
+    users: [],
+    now: 0,
+    ...over,
+  });
+
+  check('no trigger means no suggestions', suggestionsFor(null, data()).length === 0);
+
+  const picker = [{ id: 'e1', name: 'smile' }, { id: 'e2', name: 'smirk' }];
+  const unicode = [{ emoji: '😀', name: 'grinning face' }];
+  const typedEmoji = suggestionsFor({ kind: 'emoji', start: 0, query: 'sm' }, data({ picker, unicode }));
+  check('a typed emoji query keeps only the custom matches', typedEmoji.length === 2 && typedEmoji[0].key === 'emoji:e1');
+  const bothEmoji = suggestionsFor({ kind: 'emoji', start: 0, query: 'gr' }, data({ picker: [{ id: 'e3', name: 'grin' }], unicode }));
+  check(
+    'a custom match comes before a unicode one for the same query',
+    bothEmoji[0]?.key === 'emoji:e3' && bothEmoji.some((row) => row.key === 'unicode:😀'),
+  );
+  const usedEmoji = suggestionsFor(
+    { kind: 'emoji', start: 0, query: '' },
+    data({ picker, unicode, ranked: [{ emoji: '😀', emojiId: null }] }),
+  );
+  check('a frequently used emoji leads a bare : list', usedEmoji[0]?.key === 'unicode:😀');
+
+  const channels = [{ id: 'a', name: 'general' }, { id: 'b', name: 'nerd' }];
+  const channelRows = suggestionsFor({ kind: 'channel', start: 0, query: 'ner' }, data({ channels }));
+  check('a channel prefix match sorts ahead of a substring', channelRows[0]?.label === '#nerd' && channelRows[1]?.label === '#general');
+
+  const users = [
+    { id: 'u1', username: 'frida', displayName: 'Frida' },
+    { id: 'u2', username: 'africa', displayName: null },
+    { id: 'u3', username: 'bob', displayName: 'Bob' },
+  ];
+  const mentionRows = suggestionsFor({ kind: 'mention', start: 0, query: 'fri', moment: null }, data({ users }));
+  check(
+    'a mention lists the prefix match before the substring, and drops non-matches',
+    mentionRows.length === 2 && mentionRows[0].key === 'mention:u1' && mentionRows[1].key === 'mention:u2',
+  );
+
+  const timeRows = suggestionsFor(
+    { kind: 'mention', start: 0, query: 'in 2h', moment: { epochMs: 7_200_000, kind: 'relative' } },
+    data({ now: 0 }),
+  );
+  check('a time trigger offers timestamp styles', timeRows.length > 0 && timeRows[0].key.startsWith('time:'));
+
+  const builtinRows = suggestionsFor({ kind: 'slash', start: 0, query: 'sh' }, data({}));
+  check('a built-in slash helper is offered', builtinRows.some((row) => row.key === 'slash:shrug'));
+  const botRows = suggestionsFor({ kind: 'slash', start: 0, query: 'time' }, data({ commands }));
+  check(
+    'a bot command is offered and names its bot',
+    botRows.some((row) => row.key === 'botcmd:c1' && row.commandId === 'c1' && row.detail.includes('Helper')),
+  );
 }
 
 // --- Composer preview ---

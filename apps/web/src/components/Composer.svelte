@@ -11,7 +11,6 @@
     type User,
   } from '@harmony/shared';
   import { ApiError, api } from '../lib/api';
-  import { avatarUrl, initial } from '../lib/avatar';
   import { chat } from '../lib/chat.svelte';
   import { commands } from '../lib/commands.svelte';
   import { registerComposerField } from '../lib/composer-field';
@@ -22,10 +21,9 @@
   import { members } from '../lib/members.svelte';
   import { roster } from '../lib/roster.svelte';
   import { meta } from '../lib/meta.svelte';
-  import type { IconName } from '../lib/icons';
   import { session } from '../lib/session.svelte';
-  import { applySlashCommand, matchSlashCommands, slashQuery } from '../lib/slash-commands';
-  import { parseTimeExpression, timestampChoices, type ParsedMoment } from '../lib/time-input';
+  import { detectTrigger, suggestionsFor, type Suggestion, type Trigger } from '../lib/composer-suggest';
+  import { applySlashCommand } from '../lib/slash-commands';
   import { loadUnicodeEmoji, type UnicodeEmoji } from '../lib/unicode-emoji';
   import { uploads } from '../lib/upload-queue.svelte';
   import EmojiPicker from './EmojiPicker.svelte';
@@ -37,10 +35,6 @@
 
   const acceptAttribute = ALLOWED_ATTACHMENT_TYPES.join(',');
   const maxAttachments = LIMITS.attachmentsPerMessage;
-  /** How many matches any autocomplete offers at once. */
-  const maxSuggestions = 8;
-  /** What may follow an `@` and still be the start of a member's name. */
-  const mentionQuery = /^[a-zA-Z0-9._-]{0,32}$/;
   /** How stale the member directory may be before a mention refreshes it. */
   const directoryMaxAgeMs = 30_000;
   /**
@@ -115,32 +109,6 @@
         // Leave it empty and let the next `:` try again.
         unicodeRequested = false;
       });
-  }
-
-  /**
-   * An `@` starts both a mention and a timestamp, so a mention trigger also
-   * carries the moment its text reads as, when it reads as one.
-   */
-  type Trigger =
-    | { kind: 'emoji'; start: number; query: string }
-    | { kind: 'mention'; start: number; query: string; moment: ParsedMoment | null }
-    | { kind: 'channel'; start: number; query: string }
-    | { kind: 'slash'; start: number; query: string };
-
-  /** One row in the autocomplete popup, whichever kind it is. */
-  interface Suggestion {
-    key: string;
-    label: string;
-    detail: string | null;
-    imageUrl: string | null;
-    initial: string | null;
-    /** A unicode emoji shown as its own glyph, rather than an image or an initial. */
-    emoji?: string | null;
-    icon: IconName | null;
-    /** The text inserted when the row is accepted. */
-    insert: string;
-    /** Set on a bot-command row: the registration this row stands for. */
-    commandId?: string;
   }
 
   /** A client-side size check, so an oversized file is refused before uploading. */
@@ -444,48 +412,6 @@
     maybeSendTyping(textInput?.value ?? '');
   }
 
-  /**
-   * Finds the `:name`, `@name`, `@time` or `#channel` fragment ending at the
-   * caret, delimited by the start of the line or whitespace, the way Discord
-   * triggers autocomplete.
-   */
-  function detectTrigger(text: string, caret: number): Trigger | null {
-    const before = text.slice(0, caret);
-
-    // A slash helper only exists as the first word of the message. A typed slash
-    // starts the popup when it could be a helper or a bot command.
-    const slash = slashQuery(before);
-    if (slash !== null && anySlashMatch(slash)) return { kind: 'slash', start: 0, query: slash };
-
-    const emoji = /(?:^|\s):([a-zA-Z0-9_]{0,32})$/.exec(before);
-    if (emoji) {
-      const query = emoji[1] ?? '';
-      return { kind: 'emoji', start: caret - query.length - 1, query };
-    }
-
-    // A time may hold spaces ("tomorrow 18:00") where a name cannot, so the
-    // fragment runs to the caret and is then asked whether it is either. When it
-    // is neither, it is ordinary text that happens to follow an `@`.
-    const mention = /(?:^|\s)@([^@\n]{0,40})$/.exec(before);
-    if (mention) {
-      const query = mention[1] ?? '';
-      const moment = parseTimeExpression(query, { now: Date.now() });
-      if (moment || mentionQuery.test(query)) {
-        return { kind: 'mention', start: caret - query.length - 1, query, moment };
-      }
-    }
-
-    // A channel name may contain a space, but the query stops at one: typing
-    // `#off` offers `Off Topic` rather than trying to pass the space through.
-    const channel = /(?:^|\s)#([^\s#]{0,63})$/.exec(before);
-    if (channel) {
-      const query = channel[1] ?? '';
-      return { kind: 'channel', start: caret - query.length - 1, query };
-    }
-
-    return null;
-  }
-
   function updateAutocomplete(): void {
     const input = textInput;
     if (!input) {
@@ -494,7 +420,7 @@
     }
 
     const caret = input.selectionStart ?? input.value.length;
-    const next = detectTrigger(input.value, caret);
+    const next = detectTrigger(input.value, caret, commands.list);
     // Reset the selection whenever the fragment being typed changes.
     if (
       next?.kind !== activeTrigger?.kind ||
@@ -511,15 +437,6 @@
     activeTrigger = next;
   }
 
-  /** Ranks a member: 0 for a prefix match, 1 for a substring, 2 for no match. */
-  function rankMember(user: User, needle: string): number {
-    const username = user.username.toLowerCase();
-    const display = (user.displayName ?? '').toLowerCase();
-    if (username.startsWith(needle) || display.startsWith(needle)) return 0;
-    if (username.includes(needle) || display.includes(needle)) return 1;
-    return 2;
-  }
-
   /**
    * Who can actually be mentioned here. Discord stand-in accounts only exist to
    * represent people on the other side of a bridged channel, so they are hidden
@@ -530,167 +447,19 @@
     return members.list.filter((user) => user.accountType !== 'ghost');
   });
 
-  const suggestions = $derived.by((): Suggestion[] => {
-    const trigger = activeTrigger;
-    if (!trigger) return [];
-    const needle = trigger.query.toLowerCase();
-
-    if (trigger.kind === 'emoji') {
-      const byName = [...emojis.picker].sort((a, b) => a.name.localeCompare(b.name));
-      const prefix = byName.filter((emoji) => emoji.name.toLowerCase().startsWith(needle));
-      const rest = needle
-        ? byName.filter(
-            (emoji) => !emoji.name.toLowerCase().startsWith(needle) && emoji.name.toLowerCase().includes(needle),
-          )
-        : [];
-      const server: Suggestion[] = [...prefix, ...rest].map((emoji) => ({
-        key: `emoji:${emoji.id}`,
-        label: `:${emoji.name}:`,
-        detail: null,
-        imageUrl: `/api/v1/emojis/${emoji.id}`,
-        initial: null,
-        icon: null,
-        insert: `:${emoji.name}: `,
-      }));
-
-      // Unicode emoji share the trigger. The instance's own come first, so a
-      // custom `:smile:` wins over the unicode one, and only a typed name brings
-      // them in: an empty query would otherwise drown the server emoji.
-      const unicode: Suggestion[] = needle
-        ? unicodeEmoji
-            .filter((emoji) => emoji.name.toLowerCase().includes(needle))
-            .sort((a, b) => {
-              const aPrefix = a.name.toLowerCase().startsWith(needle) ? 0 : 1;
-              const bPrefix = b.name.toLowerCase().startsWith(needle) ? 0 : 1;
-              return aPrefix - bPrefix || a.name.localeCompare(b.name);
-            })
-            .map((emoji) => ({
-              key: `unicode:${emoji.emoji}`,
-              label: emoji.name,
-              detail: null,
-              imageUrl: null,
-              initial: null,
-              emoji: emoji.emoji,
-              icon: null,
-              insert: `${emoji.emoji} `,
-            }))
-        : [];
-
-      // Emoji this member uses a lot rise: a bare `:` offers their top few, and
-      // a typed query keeps its order except that used matches go first (the
-      // sort is stable, so equal scores keep custom ahead of unicode).
-      const scores = emojiUsage.scores;
-      const scoreOf = (suggestion: Suggestion): number => scores.get(suggestion.key.replace(/^(?:emoji|unicode):/, '')) ?? 0;
-      const used: Suggestion[] = needle
-        ? []
-        : emojiUsage.ranked.slice(0, 6).map((entry) =>
-            entry.emojiId
-              ? {
-                  key: `emoji:${entry.emojiId}`,
-                  label: entry.emoji,
-                  detail: null,
-                  imageUrl: `/api/v1/emojis/${entry.emojiId}`,
-                  initial: null,
-                  icon: null,
-                  insert: `${entry.emoji} `,
-                }
-              : {
-                  key: `unicode:${entry.emoji}`,
-                  label: unicodeEmoji.find((e) => e.emoji === entry.emoji)?.name ?? entry.emoji,
-                  detail: null,
-                  imageUrl: null,
-                  initial: null,
-                  emoji: entry.emoji,
-                  icon: null,
-                  insert: `${entry.emoji} `,
-                },
-          );
-      const seen = new Set(used.map((suggestion) => suggestion.key));
-      const merged = [...used, ...[...server, ...unicode].filter((suggestion) => !seen.has(suggestion.key))];
-      return (needle ? merged.sort((a, b) => scoreOf(b) - scoreOf(a)) : merged).slice(0, maxSuggestions);
-    }
-
-    if (trigger.kind === 'slash') {
-      const builtins: Suggestion[] = matchSlashCommands(needle).map((command) => ({
-        key: `slash:${command.name}`,
-        label: command.usage,
-        detail: command.description,
-        imageUrl: null,
-        initial: null,
-        icon: null,
-        insert: `/${command.name} `,
-      }));
-      // Bot commands join the same list, each naming the bot it belongs to. Only
-      // one whose bot is online is offered: an offline bot cannot answer, and a
-      // command that silently does nothing is worse than not offering it.
-      const fromBots: Suggestion[] = commands.list
-        .filter((command) => command.name.startsWith(needle) && commandOnline(command))
-        .map((command) => ({
-          key: `botcmd:${command.id}`,
-          label: `/${command.name}`,
-          detail: `${command.description} · by ${command.bot.displayName ?? command.bot.username}`,
-          imageUrl: null,
-          initial: null,
-          icon: 'bot' as IconName,
-          insert: `/${command.name} `,
-          commandId: command.id,
-        }));
-      return [...builtins, ...fromBots];
-    }
-
-    if (trigger.kind === 'channel') {
-      const matches = chat.channels
-        .filter((channel) => channel.name.toLowerCase().includes(needle))
-        .sort((a, b) => {
-          const aPrefix = a.name.toLowerCase().startsWith(needle) ? 0 : 1;
-          const bPrefix = b.name.toLowerCase().startsWith(needle) ? 0 : 1;
-          return aPrefix - bPrefix || a.name.localeCompare(b.name);
-        })
-        .slice(0, maxSuggestions);
-      return matches.map((channel) => ({
-        key: `channel:${channel.id}`,
-        label: `#${channel.name}`,
-        detail: null,
-        imageUrl: null,
-        initial: null,
-        icon: null,
-        insert: `#${channel.name} `,
-      }));
-    }
-
-    const people: Suggestion[] = mentionQuery.test(trigger.query)
-      ? mentionableUsers
-          .map((user) => ({ user, rank: rankMember(user, needle) }))
-          .filter((entry) => entry.rank < 2)
-          .sort((a, b) => a.rank - b.rank || a.user.username.localeCompare(b.user.username))
-          .slice(0, maxSuggestions)
-          .map(({ user }) => ({
-            key: `mention:${user.id}`,
-            label: user.displayName ?? user.username,
-            detail: `@${user.username}`,
-            imageUrl: avatarUrl(user),
-            initial: initial(user),
-            icon: null,
-            insert: `@${user.username} `,
-          }))
-      : [];
-
-    // Members come first: whoever types `@fri` is more likely after Frida than
-    // Friday, and a time is never more than a few arrow presses below. When
-    // nobody matches, the times are all there is and lead on their own.
-    const times: Suggestion[] = trigger.moment
-      ? timestampChoices(trigger.moment, { now: Date.now() }).map((choice) => ({
-          key: `time:${choice.style}`,
-          label: choice.preview,
-          detail: choice.name,
-          imageUrl: null,
-          initial: null,
-          icon: 'clock',
-          insert: `${choice.token} `,
-        }))
-      : [];
-    return [...people, ...times];
-  });
+  const suggestions = $derived.by(() =>
+    suggestionsFor(activeTrigger, {
+      picker: emojis.picker,
+      unicode: unicodeEmoji,
+      ranked: emojiUsage.ranked,
+      scores: emojiUsage.scores,
+      // Only commands whose bot is online can be answered, so only those are offered.
+      commands: commands.list.filter(commandOnline),
+      channels: chat.channels,
+      users: mentionableUsers,
+      now: Date.now(),
+    }),
+  );
 
   /** Arrowing through a list longer than its box keeps the highlighted row in view. */
   $effect(() => {
@@ -799,12 +568,6 @@
    * message; if the send fails, the failed text is put back in front of it
    * rather than either one being lost.
    */
-  /** Whether a slash query could be a built-in helper or a bot command. */
-  function anySlashMatch(query: string): boolean {
-    const needle = query.toLowerCase();
-    return matchSlashCommands(needle).length > 0 || commands.list.some((command) => command.name.startsWith(needle));
-  }
-
   /** Whether the bot that owns a command currently holds a gateway connection. */
   function botOnline(id: string): boolean {
     return roster.members.some((entry) => entry.user.id === id && entry.online);
