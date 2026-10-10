@@ -4,6 +4,7 @@ import {
   Permission,
   addServerGifSchema,
   gifQuerySchema,
+  hasPermission,
   hideServerGifSchema,
   orderServerGifsSchema,
   updateServerGifSchema,
@@ -78,13 +79,19 @@ export function registerServerGifRoutes(app: FastifyInstance, deps: ServerGifRou
     return deps.service.pick(auth, id);
   });
 
-  /** The bytes of a curated or hidden row, for the picker and the admin grids. */
+  /** The bytes of a curated gif for the picker, or a hidden one for the admin grid. */
   app.get('/api/v1/gifs/server/:id/image', async (request, reply) => {
-    requirePermission(request, Permission.ViewChannels);
+    const auth = requirePermission(request, Permission.ViewChannels);
     const { id } = request.params as { id: string };
 
     const row = deps.service.find(id);
     if (!row) throw new HttpError(404, 'gif_not_found', 'That gif does not exist.');
+    // A hidden row is off the picker and named only in the admin view, so only
+    // those who curate the list may fetch its bytes. Report it missing rather
+    // than forbidden, so the route does not confirm that the id exists.
+    if (row.kind === 'hidden' && !hasPermission(auth.permissions, Permission.ManageEmojis)) {
+      throw new HttpError(404, 'gif_not_found', 'That gif does not exist.');
+    }
     const path = deps.service.filePathFor(row);
     if (!path) throw new HttpError(404, 'gif_missing', 'That gif is missing from storage.');
 

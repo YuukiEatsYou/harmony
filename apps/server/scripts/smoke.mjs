@@ -3468,6 +3468,13 @@ try {
       'server gifs: a curated gif is served to any member',
       curatedImage.status === 200 && curatedImage.headers.get('content-type') === 'image/gif',
     );
+    const hiddenImage = await imageOf(hiddenRow.id, bobToken);
+    const hiddenImageAdmin = await imageOf(hiddenRow.id, ownerToken);
+    check(
+      'server gifs: a hidden gif is not served to a plain member (404), only to a curator',
+      hiddenImage.status === 404 && hiddenImageAdmin.status === 200,
+      `member ${hiddenImage.status} curator ${hiddenImageAdmin.status}`,
+    );
     const picked = await req(`/gifs/server/${addB.json.id}/pick`, { method: 'POST', token: bobToken });
     check('server gifs: a member can pick one into a message', picked.status === 200 && picked.json?.hash === autoB.hash, `status ${picked.status}`);
     check(

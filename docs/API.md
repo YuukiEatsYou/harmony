@@ -1869,7 +1869,8 @@ Like `POST /gifs/pick` for a curated gif: returns a pending `Attachment` to send
 
 ##### `GET /api/v1/gifs/server/:id/image` — `ViewChannels`
 
-The bytes of a curated or hidden row, cached immutably by hash.
+The bytes of a curated row, cached immutably by hash. A hidden row is served only to a caller with
+`ManageEmojis` (it is named only in the admin view); for anyone else it is a `404`, like a missing id.
 
 #### `POST /api/v1/gifs/pick` — `AttachFiles`
 
