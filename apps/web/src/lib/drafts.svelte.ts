@@ -76,6 +76,23 @@ class Drafts {
     this.#persist();
   }
 
+  /**
+   * Wipes every draft, in memory and in this tab's storage. Called when the
+   * session ends so a logout leaves nothing behind for the next account.
+   */
+  reset(): void {
+    if (this.#persistTimer !== null) {
+      clearTimeout(this.#persistTimer);
+      this.#persistTimer = null;
+    }
+    this.#byKey = {};
+    try {
+      sessionStorage.removeItem(storageKey);
+    } catch {
+      // Blocked storage only means there was nothing to drop.
+    }
+  }
+
   #schedulePersist(): void {
     if (this.#persistTimer !== null) clearTimeout(this.#persistTimer);
     this.#persistTimer = setTimeout(() => {

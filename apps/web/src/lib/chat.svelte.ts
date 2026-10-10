@@ -28,6 +28,7 @@ import { nameColors } from './name-colors.svelte';
 import { voice } from './voice.svelte';
 import { session } from './session.svelte';
 import { channelSettings } from './channel-settings.svelte';
+import { drafts } from './drafts.svelte';
 import { playSound } from './sounds';
 import { GatewayClient, type GatewayFrame } from './gateway';
 
@@ -278,6 +279,10 @@ class ChatStore {
     commands.reset();
     nameColors.reset();
     voice.reset();
+    // Unsent messages are keyed by member, so they never leak to the next
+    // account in this tab, but a logout should not leave them sitting in
+    // session storage either.
+    drafts.reset();
   }
 
   /**
