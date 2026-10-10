@@ -218,13 +218,19 @@
     font-size: 0.9rem;
   }
 
+  /*
+   * Removed and added text take the shared status colors, not one-off values.
+   * The tokens here used to be --h-danger/--h-success, which nothing defines,
+   * so the hardcoded fallbacks always won and the diff drifted from the error
+   * and success colors used everywhere else.
+   */
   del {
-    color: var(--h-danger, #e5484d);
+    color: var(--h-error);
     text-decoration: line-through;
   }
 
   ins {
-    color: var(--h-success, #30a46c);
+    color: var(--h-ok);
     text-decoration: underline;
   }
 </style>
