@@ -354,7 +354,7 @@ registerMemberRoutes(app, {
   users: userService,
   bridge,
 });
-registerInviteRoutes(app, db);
+registerInviteRoutes(app, { db, auth: authService });
 registerChannelRoutes(app, { db, hub, bridge, settings: settingsService, importer: channelImport, serverLog });
 registerMessageRoutes(app, { service: messageService });
 registerSearchRoutes(app, { service: messageService });

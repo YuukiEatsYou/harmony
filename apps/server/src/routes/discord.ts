@@ -2,11 +2,15 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
   GatewayEvent,
   Permission,
+  discordFinishSchema,
+  discordStartSchema,
   updateDiscordAuthSchema,
+  type AuthResponse,
   type DiscordAuthResponse,
+  type DiscordStartResponse,
 } from '@harmony/shared';
 import type { Config } from '../config.ts';
-import type { DiscordOAuthService } from '../auth/discord-oauth.ts';
+import type { DiscordIdentity, DiscordOAuthService } from '../auth/discord-oauth.ts';
 import type { AuthService } from '../auth/service.ts';
 import { requireAuth, requirePermission } from '../auth/plugin.ts';
 import type { Database } from '../db/index.ts';
@@ -14,8 +18,11 @@ import { findUserById } from '../db/users.ts';
 import { STATE_TTL_MS } from '../auth/discord-oauth.ts';
 import {
   clearDiscordFlowCookie,
+  clearDiscordResumeCookie,
   discordFlowCookieName,
+  discordResumeCookieName,
   setDiscordFlowCookie,
+  setDiscordResumeCookie,
   setSessionCookie,
 } from '../http/cookies.ts';
 import { HttpError } from '../http/errors.ts';
@@ -46,9 +53,35 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
   // Creating accounts is held to the same pace as registering one.
   const signupLimiter = createRateLimiter({ limit: 10, windowMs: 60_000 });
 
+  /**
+   * The invite errors a new-account Discord sign-in can raise. Seeing one means
+   * the Discord identity is verified but the sign-up cannot go ahead, so it is
+   * parked for the code rather than thrown away. `account_banned` and
+   * `discord_id_taken` are deliberately absent: neither is fixed by a code.
+   */
+  const INVITE_ERROR_CODES = new Set(['invite_required', 'invalid_invite', 'invite_expired', 'invite_exhausted']);
+
   /** Sends the browser back to the app with a short code the client explains. */
   function backTo(reply: FastifyReply, params: Record<string, string>): FastifyReply {
     return reply.redirect(`/?${new URLSearchParams(params).toString()}`);
+  }
+
+  /**
+   * Everything a completed Discord sign-in does once the session exists: import
+   * the Discord picture when the account has none, and tell the gateway the
+   * member changed. Shared by the callback and the resumed sign-up, so an
+   * account created through the resume is not avatar-less. Best-effort: a
+   * picture must never hold up a sign-in.
+   */
+  async function applyDiscordIdentity(session: AuthResponse, identity: DiscordIdentity, created: boolean): Promise<void> {
+    let changed = created;
+    if (!session.user.avatarHash && identity.avatarUrl) {
+      const data = await deps.oauth.downloadAvatar(identity.avatarUrl).catch(() => null);
+      if (data && (await deps.users.setAvatarFromData(session.user.id, data).catch(() => null))) {
+        changed = true;
+      }
+    }
+    if (changed) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: session.user.id });
   }
 
   function publicConfig(): DiscordAuthResponse {
@@ -78,6 +111,11 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
    * Starts the Discord flow. `intent=link` connects a Discord account to the
    * signed-in member; the default is to sign in with it. A browser lands here by
    * navigation, so failures come back as a redirect rather than a JSON error.
+   *
+   * This carries no invite code: a sign-in with one is started through the POST
+   * below, so the code never rides in the URL the browser records or the server
+   * logs. A sign-in without a code (an instance that does not require invites)
+   * can still navigate here, and lands the same way.
    */
   app.get('/api/v1/auth/discord', async (request, reply) => {
     if (!deps.oauth.enabled()) return backTo(reply, { discord_error: 'disabled' });
@@ -87,13 +125,32 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
     // Linking is a change to an account, so it must be started by its owner.
     if (intent === 'link' && !request.auth) return backTo(reply, { discord_error: 'not_signed_in' });
 
-    const invite = (request.query as { invite?: string }).invite?.trim().slice(0, 200) || null;
     const flow = deps.oauth.authorizeUrl(intent, {
-      inviteCode: intent === 'login' ? invite : null,
       userId: intent === 'link' ? (request.auth?.user.id ?? null) : null,
     });
     setDiscordFlowCookie(reply, deps.config, flow.binding, STATE_TTL_MS / 1000);
     return reply.redirect(flow.url);
+  });
+
+  /**
+   * Starts a Discord sign-in, returning the authorize URL as JSON so the client
+   * follows it itself. The invite code travels in the body rather than the query
+   * string, so it stays out of browser history and the access log; that is the
+   * whole reason this exists beside the navigation above. The flow cookie is set
+   * on this response, so the callback is still tied to the browser that started
+   * it.
+   */
+  app.post('/api/v1/auth/discord', async (request, reply) => {
+    if (!deps.oauth.enabled()) {
+      throw new HttpError(404, 'discord_auth_disabled', 'Discord sign-in is not available.');
+    }
+    startLimiter.check(request.ip);
+
+    const input = parseBody(discordStartSchema, request.body ?? {});
+    const flow = deps.oauth.authorizeUrl('login', { inviteCode: input.invite ?? null, userId: null });
+    setDiscordFlowCookie(reply, deps.config, flow.binding, STATE_TTL_MS / 1000);
+    const body: DiscordStartResponse = { url: flow.url };
+    return body;
   });
 
   /**
@@ -155,25 +212,59 @@ export function registerDiscordRoutes(app: FastifyInstance, deps: DiscordRouteDe
         request.headers['user-agent'] ?? null,
       );
       setSessionCookie(reply, deps.config, session.token);
-      // Give the account the picture from Discord, unless it already has one (a
-      // stand-in's picture, or one the member chose). Best-effort: a picture must
-      // never hold up a sign-in.
-      let changed = created;
-      if (!session.user.avatarHash && result.identity.avatarUrl) {
-        const data = await deps.oauth.downloadAvatar(result.identity.avatarUrl).catch(() => null);
-        if (data && (await deps.users.setAvatarFromData(session.user.id, data).catch(() => null))) {
-          changed = true;
-        }
-      }
-      if (changed) deps.hub.dispatch(GatewayEvent.MemberUpdate, { userId: session.user.id });
+      await applyDiscordIdentity(session, result.identity, created);
       return backTo(reply, { discord: created ? 'signed_up' : 'signed_in' });
     } catch (error) {
+      // A verified identity with an unusable invite is not lost. Park it against
+      // a one-use record and hand the browser back so the app asks for the code
+      // alone — no second Discord trip.
+      if (error instanceof HttpError && error.statusCode === 403 && INVITE_ERROR_CODES.has(error.code)) {
+        const token = deps.oauth.rememberResume(result.identity);
+        setDiscordResumeCookie(reply, deps.config, token, STATE_TTL_MS / 1000);
+        return backTo(reply, { discord_error: error.code, discord_resume: '1' });
+      }
       // These are all things the person can act on, so they get their own code.
       if (error instanceof HttpError && error.statusCode === 403) {
         return backTo(reply, { discord_error: error.code });
       }
       return backTo(reply, { discord_error: 'failed' });
     }
+  });
+
+  /**
+   * Finishes a Discord sign-up the callback parked for an invite. The verified
+   * identity never left the server; the browser only proves it is the one that
+   * ran the flow, by presenting the HttpOnly resume cookie.
+   */
+  app.post('/api/v1/auth/discord/finish', async (request, reply) => {
+    signupLimiter.check(request.ip);
+    const input = parseBody(discordFinishSchema, request.body);
+
+    const token = request.cookies[discordResumeCookieName(deps.config)] ?? null;
+    const identity = token ? deps.oauth.peekResume(token) : null;
+    if (!token || !identity) {
+      clearDiscordResumeCookie(reply, deps.config);
+      throw new HttpError(403, 'discord_resume_expired', 'Your Discord sign-in has expired. Please start again.');
+    }
+
+    let result: { auth: AuthResponse; created: boolean };
+    try {
+      result = deps.auth.signInWithDiscord(identity, input.inviteCode, request.headers['user-agent'] ?? null);
+    } catch (error) {
+      // A wrong, expired or used-up code keeps the verified identity in place,
+      // so the person only re-enters the code. The record is forgotten once a
+      // sign-up actually succeeds, and swept once it expires.
+      if (error instanceof HttpError && error.statusCode === 403 && INVITE_ERROR_CODES.has(error.code)) throw error;
+      deps.oauth.forgetResume(token);
+      clearDiscordResumeCookie(reply, deps.config);
+      throw error;
+    }
+
+    deps.oauth.forgetResume(token);
+    clearDiscordResumeCookie(reply, deps.config);
+    setSessionCookie(reply, deps.config, result.auth.token);
+    await applyDiscordIdentity(result.auth, identity, result.created);
+    return result.auth;
   });
 
   /** Clears the caller's own Discord link. What was merged in stays merged. */

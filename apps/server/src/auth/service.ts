@@ -60,6 +60,15 @@ export interface AuthService {
   register(input: RegisterInput, userAgent: string | null): Promise<AuthResponse>;
   login(input: LoginInput, userAgent: string | null): Promise<AuthResponse>;
   /**
+   * Throws unless `code` may be used to join right now, mirroring what `register`
+   * checks before it consumes a code: the first account bootstraps the instance
+   * and an instance that does not require invites ignores the code. No side
+   * effects — nothing is consumed. This is the pre-flight behind
+   * `POST /api/v1/invites/check`, which the client uses so a bad code is
+   * reported before any auth attempt rather than after a Discord round trip.
+   */
+  verifyInvite(code: string | null | undefined): void;
+  /**
    * Issues a session for an account without a password check, for Discord
    * sign-in where ownership was already proven. Returns null for a banned or
    * missing account.
@@ -69,9 +78,10 @@ export interface AuthService {
    * Signs in with a proven Discord identity, creating the account on first
    * visit. A new account has no password. A bridge stand-in for the same Discord
    * user is folded into it, so their history becomes theirs. Throws for a banned
-   * account and, where invites are required, for a missing or unusable code. An
-   * id already held by any account other than a stand-in is refused rather than
-   * merged.
+   * account and, where invites are required, for a missing or unusable code —
+   * except for the first account, which bootstraps the instance and is its owner,
+   * needing no invite, exactly as `register` treats it. An id already held by any
+   * account other than a stand-in is refused rather than merged.
    */
   signInWithDiscord(
     identity: DiscordIdentity,
@@ -80,6 +90,28 @@ export interface AuthService {
   ): { auth: AuthResponse; created: boolean };
   logout(token: string): void;
   resolveToken(token: string): AuthContext | null;
+}
+
+/**
+ * Throws unless the code may be used to join; returns the code to consume.
+ *
+ * This is the authoritative invite check, shared by `register`,
+ * `signInWithDiscord` and the pre-flight `verifyInvite` so the three cannot
+ * drift. It has no side effects — `register` and `signInWithDiscord` increment
+ * `uses` only after the account is created.
+ */
+export function resolveInvite(sqlite: DatabaseSync, code: string | null | undefined): string {
+  if (!code) throw new HttpError(403, 'invite_required', 'An invite code is required to register.');
+
+  const invite = findInvite(sqlite, code);
+  if (!invite) throw new HttpError(403, 'invalid_invite', 'That invite code is not valid.');
+  if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
+    throw new HttpError(403, 'invite_expired', 'That invite code has expired.');
+  }
+  if (invite.max_uses != null && invite.uses >= invite.max_uses) {
+    throw new HttpError(403, 'invite_exhausted', 'That invite code has already been used up.');
+  }
+  return invite.code;
 }
 
 export function createAuthService(sqlite: DatabaseSync, config: Config, settings: SettingsService): AuthService {
@@ -102,17 +134,7 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
 
   /** Throws unless the code may be used to join; returns the code to consume. */
   function checkInvite(code: string | null | undefined): string {
-    if (!code) throw new HttpError(403, 'invite_required', 'An invite code is required to register.');
-
-    const invite = findInvite(sqlite, code);
-    if (!invite) throw new HttpError(403, 'invalid_invite', 'That invite code is not valid.');
-    if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
-      throw new HttpError(403, 'invite_expired', 'That invite code has expired.');
-    }
-    if (invite.max_uses != null && invite.uses >= invite.max_uses) {
-      throw new HttpError(403, 'invite_exhausted', 'That invite code has already been used up.');
-    }
-    return invite.code;
+    return resolveInvite(sqlite, code);
   }
 
   /** A free login name built from the Discord one, which may not fit our rules. */
@@ -145,6 +167,17 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
   }
 
   return {
+    verifyInvite(code) {
+      // Mirror register exactly, or the pre-flight would reject a code that
+      // registration would accept. The first account bootstraps the instance,
+      // so it needs no invite; and an instance that does not require invites
+      // ignores the code entirely. (Revealing "this instance is unclaimed" to a
+      // prober is worthless: anyone can register and own such an instance.)
+      if (countUsers(sqlite) === 0) return;
+      if (!settings.get().requireInvite) return;
+      resolveInvite(sqlite, code);
+    },
+
     async register(input, userAgent) {
       if (findUserByUsername(sqlite, input.username)) {
         throw new HttpError(409, 'username_taken', 'That username is already taken.');
@@ -217,12 +250,19 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
       // A stand-in's ban follows it into the account that replaces it.
       if (existing && findBan(sqlite, existing.id)) throw banned;
 
-      const inviteToConsume = settings.get().requireInvite ? checkInvite(inviteCode) : null;
+      // Mirror register: the very first account bootstraps the instance, so it
+      // needs no invite and is its owner. Ownership matters as much as the
+      // invite: without it an OAuth-seeded userless instance would create a
+      // non-owner first account and no later account could ever become owner.
+      // The pre-flight `verifyInvite` skips it the same way, so a code can never
+      // read as valid there and then park here on a userless instance.
+      const isFirstUser = countUsers(sqlite) === 0;
+      const inviteToConsume = !isFirstUser && settings.get().requireInvite ? checkInvite(inviteCode) : null;
 
       // Everything below is synchronous, so nothing can slip in between the checks
       // and the inserts.
       const id = randomUUID();
-      insertUser(sqlite, { id, username: freeUsername(identity.username), passwordHash: NO_PASSWORD, isOwner: false });
+      insertUser(sqlite, { id, username: freeUsername(identity.username), passwordHash: NO_PASSWORD, isOwner: isFirstUser });
       try {
         // Keep what the bridge already knew about them; the merge drops that row.
         updateUserProfile(sqlite, id, {

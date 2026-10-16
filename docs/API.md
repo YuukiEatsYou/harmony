@@ -88,9 +88,9 @@ every request in one of two ways:
 - **Session cookie** — set automatically by register/login, for browser clients on the same
   origin. The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when the instance runs over TLS.
 
-The first account ever registered becomes the server owner (`isOwner: true`) and is exempt from the
-invite requirement. Every later registration may require a valid invite code, depending on the
-instance's `requireInvite` setting (see `GET /api/v1/meta`).
+The first account ever created — by registration or by Discord sign-in — becomes the server owner
+(`isOwner: true`) and is exempt from the invite requirement. Every later account may require a valid
+invite code, depending on the instance's `requireInvite` setting (see `GET /api/v1/meta`).
 
 Tokens expire after `HARMONY_SESSION_TTL_DAYS` (default 30 days) or when you logout.
 
@@ -582,7 +582,9 @@ the owner can spot one.
 
 `username` is 2–32 characters from `A-Z a-z 0-9 . _ -`. `password` is 8–200 characters.
 `inviteCode` is required only when the instance requires invites (`403 invite_required`) and is
-ignored for the very first account. Returns an `AuthResponse`:
+ignored for the very first account. A client should verify the code first with
+`POST /api/v1/invites/check`, so a bad code is reported before the account is attempted; the route
+checks it again here. Returns an `AuthResponse`:
 
 ```json
 { "user": { "...": "..." }, "token": "harmony_session_token" }
@@ -620,9 +622,10 @@ account from their profile. It uses the same Discord application as the
 [bridge](#discord-bridge): register the callback URL shown in **Admin → Bridge** under *OAuth2 →
 Redirects* in the Discord developer portal, then save the client id and secret there.
 
-The flow is OAuth2 authorization code with PKCE and a one-time `state`. Both endpoints below end in
-a browser navigation, so they redirect back into the app with a short outcome code in the query
-string (`?discord=linked`, `?discord_error=taken`, and so on) rather than returning JSON.
+The flow is OAuth2 authorization code with PKCE and a one-time `state`. Starting a sign-in returns
+the authorize URL as JSON for the client to follow; the callback still lands by navigation, so a
+finished or failed flow redirects back into the app with a short outcome code in the query string
+(`?discord=linked`, `?discord_error=taken`, and so on).
 
 #### `GET /api/v1/discord/auth` — `ManageServer`
 
@@ -638,10 +641,25 @@ the flow cannot run without one. The secret is write-only: it is never returned.
 
 #### `GET /api/v1/auth/discord` — no auth
 
-Starts the flow and redirects to Discord. `intent=link` connects a Discord account to the
-signed-in member and must be started while signed in; the default is `intent=login`. A login may
-carry `invite=<code>`, which is used only if it ends up creating an account and invites are required. Either way the
-browser leaves the app, so a failure is a redirect back to `/?discord_error=…`.
+Starts the flow by navigation and redirects to Discord. `intent=link` connects a Discord account to
+the signed-in member and must be started while signed in; the default is `intent=login`. It carries
+no invite code — a code is supplied through the POST below, so it never rides in the URL the browser
+records or the server logs. The browser leaves the app, so a failure is a redirect back to
+`/?discord_error=…`.
+
+#### `POST /api/v1/auth/discord` — no auth, rate limited
+
+Starts a Discord sign-in and returns the authorize URL for the client to follow. The invite code
+travels in the body, not the query string:
+
+```json
+{ "invite": "abc123" }
+```
+
+`invite` is optional and used only if the flow ends up creating an account and invites are required.
+The response is `{ "url": "https://discord.com/oauth2/authorize?…" }`; the browser binding cookie is
+set on this response just as on the GET. Errors come back as JSON rather than a redirect, e.g.
+`404 discord_auth_disabled` when Discord sign-in is not configured or enabled.
 
 #### `GET /api/v1/auth/discord/callback` — no auth
 
@@ -650,11 +668,33 @@ ownership-proving path a manually entered id could never be — then redirects t
 For a `login` intent it signs in the member whose account already carries that Discord id
 (`/?discord=signed_in`). Otherwise it creates one (`/?discord=signed_up`): a username derived from the
 Discord one, the Discord display name, their Discord picture as the avatar (unless it
-already has one), no password (`hasPassword: false`), never the owner. A
-bridge stand-in for the same Discord user is folded into the new account, keeping its history. The
-same checks as registering apply: where invites are required a missing or unusable code redirects to
-`/?discord_error=invite_required|invalid_invite|invite_expired|invite_exhausted`, and a banned
-account (or banned stand-in) to `account_banned`.
+already has one), and no password (`hasPassword: false`). The very first account on a userless
+instance becomes the owner, exactly as `register` treats it; every later one is not. A bridge
+stand-in for the same Discord user is folded into the new account, keeping its history.
+
+Where invites are required, a missing or unusable code does not throw the verified identity away: it
+is parked against a one-use, ten-minute record and the browser is sent to
+`/?discord_error=invite_required|invalid_invite|invite_expired|invite_exhausted&discord_resume=1`, with
+an HttpOnly resume cookie. The app then asks for the code alone and finishes through
+`POST /api/v1/auth/discord/finish` — no second Discord round trip. A banned account (or banned
+stand-in) still redirects to `/?discord_error=account_banned`, without parking anything.
+
+#### `POST /api/v1/auth/discord/finish` — no auth, rate limited
+
+Finishes a Discord sign-up the callback parked for an invite.
+
+```json
+{ "inviteCode": "abc123" }
+```
+
+The verified Discord identity is held server-side; the browser proves it is the one that ran the flow
+with the HttpOnly resume cookie the callback set. The body carries only the code. On success the record
+is cleared, the session cookie is set, the Discord avatar is imported if the account has none, and
+`MEMBER_UPDATE` fires — exactly as on the callback — and the response is an `AuthResponse`.
+
+Errors: `403 invite_required` / `invalid_invite` / `invite_expired` / `invite_exhausted` (the parked
+identity is kept, so the code can be corrected and retried within the ten-minute window), `403
+discord_resume_expired` (there is no live record — start again), `403 account_banned`.
 
 #### `DELETE /api/v1/users/@me/discord` — auth
 
@@ -2908,6 +2948,22 @@ Names use 1–32 of `a-z`, `0-9`, `-` or `_`; a reserved helper name or a repeat
 refresh its completion list. Returns the bot's own list.
 
 ### Invites
+
+#### `POST /api/v1/invites/check` — no auth, rate limited (20/min per address)
+
+The pre-flight check the sign-in screen uses before it commits to a registration or hands the browser
+to Discord. POST rather than GET, so a code stays out of access logs and browser history.
+
+```json
+{ "code": "abc123" }
+```
+
+Passes → `200 { "valid": true }`. Refused → `403` with one of `invalid_invite`, `invite_expired`,
+`invite_exhausted` in the standard error body. It mirrors `POST /api/v1/auth/register` exactly,
+including the first-account bootstrap (on an instance with no accounts, any code reads as valid) and
+`requireInvite=false` (any code passes). It has no side effects: `uses` is never incremented, and the
+registration or Discord sign-in that follows re-checks the code authoritatively, so a code that passes
+here can still be spent or expire before it is used.
 
 #### `GET /api/v1/invites` — `ManageServer`
 

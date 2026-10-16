@@ -272,6 +272,17 @@ try {
   );
   check('HSTS is withheld over plain HTTP', hardened.get('strict-transport-security') === null);
 
+  // --- Pre-flight invite check, before anyone exists ---
+  // Mirrors register's bootstrap: the first account needs no code, so on an
+  // unclaimed instance any code reads as valid. (It reveals that the instance is
+  // unclaimed; anyone could register and own it anyway.)
+  const bootstrapCheck = await req('/invites/check', { method: 'POST', body: { code: 'no-such-code' } });
+  check(
+    'the invite check accepts any code on an unclaimed instance',
+    bootstrapCheck.status === 200 && bootstrapCheck.json?.valid === true,
+    `${bootstrapCheck.status} ${JSON.stringify(bootstrapCheck.json)}`,
+  );
+
   // --- Auth ---
   const owner = await req('/auth/register', {
     method: 'POST',
@@ -296,6 +307,64 @@ try {
 
   const invite = await req('/invites', { method: 'POST', token: ownerToken, body: {} });
   check('owner creates an invite', invite.status === 200 && typeof invite.json?.code === 'string');
+
+  // --- The pre-flight invite check ---
+  // It shares its logic with register, so the states a person can be shown are
+  // the same codes, and checking a code must not spend it.
+  const inviteCheckOk = await req('/invites/check', { method: 'POST', body: { code: invite.json?.code } });
+  check(
+    'a valid code passes the pre-flight check',
+    inviteCheckOk.status === 200 && inviteCheckOk.json?.valid === true,
+    `${inviteCheckOk.status} ${JSON.stringify(inviteCheckOk.json)}`,
+  );
+  const inviteCheckBad = await req('/invites/check', { method: 'POST', body: { code: 'definitely-not-a-code' } });
+  check(
+    'an unknown code is refused as invalid',
+    inviteCheckBad.status === 403 && inviteCheckBad.json?.error?.code === 'invalid_invite',
+    `${inviteCheckBad.status} ${JSON.stringify(inviteCheckBad.json)}`,
+  );
+  const inviteCheckEmpty = await req('/invites/check', { method: 'POST', body: { code: '' } });
+  check('an empty code is a validation error (400)', inviteCheckEmpty.status === 400, `status ${inviteCheckEmpty.status}`);
+  const afterCheck = await req('/invites', { token: ownerToken });
+  check(
+    'the pre-flight check does not consume the code',
+    afterCheck.json?.invites?.find((row) => row.code === invite.json?.code)?.uses === 0,
+    JSON.stringify(afterCheck.json?.invites),
+  );
+
+  // Expired and exhausted codes are reported distinctly. The clock cannot be
+  // reached through the API, so both are written straight into the database.
+  const inviteDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  insertInvite(inviteDb, {
+    code: 'expired-code',
+    createdBy: me.json.user.id,
+    createdAt: staleAt,
+    expiresAt: staleAt,
+    maxUses: null,
+  });
+  insertInvite(inviteDb, {
+    code: 'used-up-code',
+    createdBy: me.json.user.id,
+    createdAt: new Date().toISOString(),
+    expiresAt: null,
+    maxUses: 1,
+  });
+  inviteDb.prepare('UPDATE invites SET uses = 1 WHERE code = ?').run('used-up-code');
+  inviteDb.close();
+
+  const inviteCheckExpired = await req('/invites/check', { method: 'POST', body: { code: 'expired-code' } });
+  check(
+    'an expired code is reported as expired',
+    inviteCheckExpired.status === 403 && inviteCheckExpired.json?.error?.code === 'invite_expired',
+    `${inviteCheckExpired.status} ${JSON.stringify(inviteCheckExpired.json)}`,
+  );
+  const inviteCheckExhausted = await req('/invites/check', { method: 'POST', body: { code: 'used-up-code' } });
+  check(
+    'a used-up code is reported as exhausted',
+    inviteCheckExhausted.status === 403 && inviteCheckExhausted.json?.error?.code === 'invite_exhausted',
+    `${inviteCheckExhausted.status} ${JSON.stringify(inviteCheckExhausted.json)}`,
+  );
 
   const noInvite = await req('/auth/register', { method: 'POST', body: { username: 'bob', password: 'hunter2hunter2' } });
   check('registration without invite rejected (403)', noInvite.status === 403, `status ${noInvite.status}`);
@@ -5315,7 +5384,7 @@ try {
   check('the new account has no password', fresh.auth.user.hasPassword === false && freshRow.password_hash === '!no-password');
   check('its username is made valid from the Discord name', freshRow.username === 'NewPerson');
   check('it carries the Discord id and name', freshRow.discord_id === '700000000000000001' && freshRow.display_name === 'New P');
-  check('a Discord sign-up is never the owner', freshRow.is_owner === 0);
+  check('a Discord sign-up on a populated instance is not the owner', freshRow.is_owner === 0);
 
   const again = discordAuth.signInWithDiscord(discordIdentity('700000000000000001', 'whatever'), null, null);
   check('signing in again finds the same account', again.created === false && again.auth.user.id === fresh.auth.user.id);
@@ -5490,9 +5559,91 @@ try {
       "a flow with another flow's binding is refused",
       (await refusal(other, oauth.authorizeUrl('link').binding)) === 'discord_state',
     );
+
+    // A verified identity parked for an invite. The token is the only thing the
+    // browser holds; the identity stays server-side, and once the sign-up is
+    // done the token resolves to nothing.
+    const resumeToken = oauth.rememberResume(completed.identity);
+    check('parking an identity returns a long random token', resumeToken.length >= 43, `length ${resumeToken.length}`);
+    check('the parked identity is read back by its token', oauth.peekResume(resumeToken)?.id === '700000000000000009');
+    check('an unknown resume token resolves to nothing', oauth.peekResume('not-a-real-token') === null);
+    oauth.forgetResume(resumeToken);
+    check('forgetting the token drops the parked identity', oauth.peekResume(resumeToken) === null);
   } finally {
     globalThis.fetch = realFetch;
   }
+
+  // The first account bootstraps the instance, so neither the pre-flight nor a
+  // Discord sign-in may demand an invite for it. `register` and `verifyInvite`
+  // skip the invite when no real account exists yet, and `signInWithDiscord`
+  // must agree with them, or a valid pre-flight would park on invite_required.
+  const firstDir = mkdtempSync(join(tmpdir(), 'harmony-first-'));
+  const firstStore = new Database({
+    dataDir: firstDir,
+    dbFile: join(firstDir, 'harmony.db'),
+    uploadDir: join(firstDir, 'uploads'),
+  });
+  const firstAuth = createAuthService(firstStore.sqlite, { sessionTtlDays: 1 }, { get: () => ({ requireInvite: true }) });
+  let firstPreflight = null;
+  try {
+    firstAuth.verifyInvite(null);
+  } catch (error) {
+    firstPreflight = error;
+  }
+  let firstDiscord = null;
+  try {
+    firstDiscord = firstAuth.signInWithDiscord(discordIdentity('710000000000000001', 'bootstrap'), null, null);
+  } catch (error) {
+    firstDiscord = error;
+  }
+  check('the pre-flight passes with no invite on a userless instance', firstPreflight === null, String(firstPreflight));
+  check(
+    'a first Discord sign-in needs no invite, matching register',
+    firstDiscord?.created === true && !!firstDiscord?.auth?.token,
+    String(firstDiscord),
+  );
+  let secondDiscord = null;
+  try {
+    firstAuth.signInWithDiscord(discordIdentity('710000000000000002', 'second'), null, null);
+  } catch (error) {
+    secondDiscord = error;
+  }
+  check('once an account exists a Discord sign-in needs the invite again', secondDiscord?.code === 'invite_required');
+  check(
+    'the first Discord account on a userless instance is the owner (OBS-1)',
+    firstDiscord?.auth?.user?.isOwner === true,
+    String(firstDiscord?.auth?.user?.isOwner),
+  );
+  firstStore.close();
+  rmSync(firstDir, { recursive: true, force: true });
+
+  // Ownership bootstrap (OBS-1, split out of YUC-118): `register` makes the very
+  // first account the owner, and `signInWithDiscord` must do the same, or an
+  // OAuth-seeded userless instance would come up with a non-owner first account
+  // and no later account could ever become owner - bricked administration. Run on
+  // a throwaway instance with invites off, so a second sign-in can land and be
+  // checked against the first.
+  const bootstrapDir = mkdtempSync(join(tmpdir(), 'harmony-owner-'));
+  const bootstrapStore = new Database({
+    dataDir: bootstrapDir,
+    dbFile: join(bootstrapDir, 'harmony.db'),
+    uploadDir: join(bootstrapDir, 'uploads'),
+  });
+  const bootstrapAuth = createAuthService(bootstrapStore.sqlite, { sessionTtlDays: 1 }, { get: () => ({ requireInvite: false }) });
+  const bootstrapFirst = bootstrapAuth.signInWithDiscord(discordIdentity('720000000000000001', 'firstowner'), null, null);
+  check(
+    'the first Discord sign-in on a userless instance is the owner',
+    bootstrapFirst.created === true && bootstrapFirst.auth.user.isOwner === true,
+    JSON.stringify(bootstrapFirst.auth.user),
+  );
+  const bootstrapSecond = bootstrapAuth.signInWithDiscord(discordIdentity('720000000000000002', 'secondowner'), null, null);
+  check(
+    'a later Discord sign-in is not the owner',
+    bootstrapSecond.created === true && bootstrapSecond.auth.user.isOwner === false,
+    JSON.stringify(bootstrapSecond.auth.user),
+  );
+  bootstrapStore.close();
+  rmSync(bootstrapDir, { recursive: true, force: true });
 
   ghostStore.close();
   rmSync(ghostDir, { recursive: true, force: true });
@@ -8822,22 +8973,43 @@ try {
     (await req('/meta')).json?.discordAuthEnabled === true,
   );
 
-  // Starting the flow hands the browser to Discord, with PKCE and a state.
-  const discordStart = await fetch(`${BASE}/auth/discord`, { redirect: 'manual' });
-  const discordStartTo = discordStart.headers.get('location') ?? '';
+  // Starting a sign-in is a POST so the invite code travels in the request body,
+  // never the URL; the client follows the authorize URL the response carries.
+  const startDiscordSignIn = async (invite) => {
+    const response = await fetch(`${BASE}/auth/discord`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(invite === undefined ? {} : { invite }),
+    });
+    const body = await response.json().catch(() => ({}));
+    return { status: response.status, url: body?.url ?? '', cookies: response.headers.getSetCookie?.() ?? [] };
+  };
+
+  const discordStart = await startDiscordSignIn();
+  const discordStartTo = discordStart.url;
   check(
-    'starting Discord sign-in redirects to Discord with PKCE',
-    discordStart.status >= 300 &&
-      discordStart.status < 400 &&
+    'starting Discord sign-in returns a PKCE authorize URL',
+    discordStart.status === 200 &&
       discordStartTo.startsWith('https://discord.com/oauth2/authorize') &&
       discordStartTo.includes('client_id=123456789012345678') &&
       discordStartTo.includes('code_challenge_method=S256'),
     `${discordStart.status} ${discordStartTo}`,
   );
 
+  // The invite code rides in the body, so it cannot land in browser history or
+  // the access log the way a query parameter would.
+  const invitedStart = await startDiscordSignIn('invite-canary');
+  check(
+    'the invite code never appears in the Discord start URL',
+    invitedStart.status === 200 &&
+      invitedStart.url.startsWith('https://discord.com/oauth2/authorize') &&
+      !invitedStart.url.includes('invite-canary'),
+    `${invitedStart.status} ${invitedStart.url}`,
+  );
+
   // The flow is bound to the browser that started it, so a callback URL handed
   // to someone else is worthless.
-  const flowCookie = discordStart.headers.getSetCookie?.().find((value) => value.startsWith('harmony_session_discord=')) ?? '';
+  const flowCookie = discordStart.cookies.find((value) => value.startsWith('harmony_session_discord=')) ?? '';
   check(
     'starting Discord sign-in sets an HttpOnly browser binding',
     flowCookie.includes('HttpOnly') && flowCookie.includes('Path=/api/v1/auth/discord'),
@@ -8849,8 +9021,8 @@ try {
     'a callback without the binding is refused',
     (unbound.headers.get('location') ?? '').includes('discord_error=failed'),
   );
-  const secondStart = await fetch(`${BASE}/auth/discord`, { redirect: 'manual' });
-  const secondState = new URL(secondStart.headers.get('location') ?? '').searchParams.get('state');
+  const secondStart = await startDiscordSignIn();
+  const secondState = new URL(secondStart.url).searchParams.get('state');
   const wrongBinding = await fetch(`${BASE}/auth/discord/callback?code=stolen&state=${secondState}`, {
     redirect: 'manual',
     headers: { cookie: 'harmony_session_discord=someone-elses' },
@@ -8859,6 +9031,33 @@ try {
     'a callback with another browser binding is refused',
     (wrongBinding.headers.get('location') ?? '').includes('discord_error=failed'),
   );
+
+  // The resumed sign-up. There is no parked identity here (a real flow needs
+  // Discord to call back), so the guard is what this exercises: without the
+  // one-use cookie the code alone cannot finish, and the person is told to
+  // start again rather than left hanging.
+  const finishNoRecord = await req('/auth/discord/finish', { method: 'POST', body: { inviteCode: 'anything' } });
+  check(
+    'finishing without a parked Discord identity is refused',
+    finishNoRecord.status === 403 && finishNoRecord.json?.error?.code === 'discord_resume_expired',
+    `${finishNoRecord.status} ${JSON.stringify(finishNoRecord.json)}`,
+  );
+  const finishForged = await req('/auth/discord/finish', {
+    method: 'POST',
+    body: { inviteCode: 'anything' },
+    cookie: 'harmony_session_discord_resume=not-a-real-token',
+  });
+  check(
+    'finishing with an unknown resume token is refused',
+    finishForged.status === 403 && finishForged.json?.error?.code === 'discord_resume_expired',
+    `${finishForged.status} ${JSON.stringify(finishForged.json)}`,
+  );
+  const finishNoCode = await fetch(`${BASE}/auth/discord/finish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  check('finishing without a code is a validation error (400)', finishNoCode.status === 400, `status ${finishNoCode.status}`);
 
   // Linking an account must start from a signed-in member.
   const anonLink = await fetch(`${BASE}/auth/discord?intent=link`, { redirect: 'manual' });
