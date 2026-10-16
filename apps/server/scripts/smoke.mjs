@@ -5524,6 +5524,45 @@ try {
   raceStore.close();
   rmSync(raceDir, { recursive: true, force: true });
 
+  // The same race must not also hand out a second invite-free join. On a
+  // requireInvite instance with zero accounts, two concurrent registrations with
+  // no invite code both saw a userless instance before the hash (countUsers === 0)
+  // and both skipped the invite check, so one became the owner and the other
+  // joined as a plain member without a code. The exemption is now decided in the
+  // same synchronous block as ownership, so exactly one registration is created
+  // here - the owner - and the loser fails with invite_required, leaving no
+  // account and no widened owner set behind.
+  const inviteRaceDir = mkdtempSync(join(tmpdir(), 'harmony-invite-race-'));
+  const inviteRaceStore = new Database({
+    dataDir: inviteRaceDir,
+    dbFile: join(inviteRaceDir, 'harmony.db'),
+    uploadDir: join(inviteRaceDir, 'uploads'),
+  });
+  const inviteRaceAuth = createAuthService(
+    inviteRaceStore.sqlite,
+    { sessionTtlDays: 1 },
+    { get: () => ({ requireInvite: true }) },
+  );
+  const inviteRaceResults = await Promise.allSettled([
+    inviteRaceAuth.register({ username: 'invite-racer-one', password: 'hunter2hunter2' }, null),
+    inviteRaceAuth.register({ username: 'invite-racer-two', password: 'hunter2hunter2' }, null),
+  ]);
+  const inviteRaceResolved = inviteRaceResults.filter((result) => result.status === 'fulfilled').length;
+  const inviteRaceRejected = inviteRaceResults.filter(
+    (result) => result.status === 'rejected' && result.reason?.code === 'invite_required',
+  ).length;
+  const inviteRaceOwners = inviteRaceStore.sqlite.prepare('SELECT COUNT(*) AS n FROM users WHERE is_owner = 1').get().n;
+  const inviteRaceAccounts = inviteRaceStore.sqlite
+    .prepare("SELECT COUNT(*) AS n FROM users WHERE account_type = 'user'")
+    .get().n;
+  check(
+    'two concurrent first registrations on an invite-only instance create one owner and reject the other',
+    inviteRaceResolved === 1 && inviteRaceRejected === 1 && inviteRaceAccounts === 1 && inviteRaceOwners === 1,
+    `resolved ${inviteRaceResolved}, rejected ${inviteRaceRejected}, accounts ${inviteRaceAccounts}, owners ${inviteRaceOwners}`,
+  );
+  inviteRaceStore.close();
+  rmSync(inviteRaceDir, { recursive: true, force: true });
+
   // Migration 43 backstops that rule in the schema. Applied to a database that
   // already carries two owner rows (the damage the race could do), it keeps the
   // earliest account and demotes the rest, then the partial unique index refuses
