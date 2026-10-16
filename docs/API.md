@@ -90,7 +90,12 @@ every request in one of two ways:
 
 The first account ever registered becomes the server owner (`isOwner: true`) and is exempt from the
 invite requirement. Every later registration may require a valid invite code, depending on the
-instance's `requireInvite` setting (see `GET /api/v1/meta`).
+instance's `requireInvite` setting (see `GET /api/v1/meta`). There is ever at most one owner: the
+database enforces it with a partial unique index, and the first-account decision is taken in the
+same synchronous step as the insert, so two registrations racing on a userless instance cannot both
+become owner. That same step decides the invite exemption, so at most one registration per userless
+instance skips the invite requirement: a racing request that did not win the bootstrap is treated as
+an ordinary join and rejected with `403 invite_required` when no valid code was supplied.
 
 Tokens expire after `HARMONY_SESSION_TTL_DAYS` (default 30 days) or when you logout.
 

@@ -150,16 +150,41 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
         throw new HttpError(409, 'username_taken', 'That username is already taken.');
       }
 
-      // The very first account bootstraps the instance and becomes the owner.
-      const isFirstUser = countUsers(sqlite) === 0;
+      // An invite, when required, is checked before the hash so an obviously
+      // absent or bad code fails fast. The first account bootstraps the instance:
+      // it needs no invite and becomes the owner. This read only settles the
+      // invite question, because the password hash below yields the event loop
+      // and the instance may be claimed while we wait; both the ownership decision
+      // and the invite exemption are decided again next to the insert.
+      const userlessForInvite = countUsers(sqlite) === 0;
       let inviteCodeToConsume: string | null = null;
 
-      if (!isFirstUser && settings.get().requireInvite) {
+      if (!userlessForInvite && settings.get().requireInvite) {
         inviteCodeToConsume = checkInvite(input.inviteCode);
       }
 
       const id = randomUUID();
       const passwordHash = await hashPassword(input.password);
+
+      // Count and insert share one synchronous block, with no await between them,
+      // so two concurrent first registrations can never both read an empty
+      // instance and both become the owner. The count is deliberately taken here
+      // rather than before the hash: the earlier read is stale once the hash
+      // yields. `idx_users_single_owner` (migration 43) is the backstop that fails
+      // closed if this invariant is ever broken again.
+      const isFirstUser = countUsers(sqlite) === 0;
+
+      // The invite exemption rides the same decision. The pre-hash read may have
+      // seen a userless instance and skipped the invite check, but once that read
+      // is stale (another registration won the bootstrap) this request is an
+      // ordinary join and still needs a code. Re-checking here, in the same
+      // synchronous block as the insert, keeps at most one registration per
+      // userless instance exempt from the invite requirement. A genuine first
+      // account is left alone: no invite can exist before the owner does.
+      if (!isFirstUser && settings.get().requireInvite && !inviteCodeToConsume) {
+        throw new HttpError(403, 'invite_required', 'An invite code is required to register.');
+      }
+
       insertUser(sqlite, { id, username: input.username, passwordHash, isOwner: isFirstUser });
       if (inviteCodeToConsume) incrementInviteUses(sqlite, inviteCodeToConsume);
 
