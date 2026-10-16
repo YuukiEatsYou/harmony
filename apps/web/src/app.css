@@ -352,7 +352,8 @@ button.link:hover:not(:disabled) {
   text-decoration: underline;
 }
 
-a.button-link {
+a.button-link,
+button.button-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -368,7 +369,11 @@ a.button-link {
               box-shadow var(--h-duration) var(--h-ease);
 }
 
-a.button-link:hover {
+a.button-link:hover,
+button.button-link:hover:not(:disabled) {
+  /* Re-assert the gradient: the shared button hover rule scores higher and
+     would otherwise flatten the Discord button to a solid accent. */
+  background: var(--h-accent-gradient);
   filter: brightness(1.1);
   box-shadow: 0 4px 20px var(--h-accent-glow);
 }
@@ -564,6 +569,30 @@ form {
   font-size: 0.85rem;
 }
 
+/*
+ * The invite code and the pre-flight result under it. The border/box around the
+ * field is the shared input style; only the note and its two status colors are
+ * added, so a light theme reads the same as the rest of the panel.
+ */
+.invite-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.field-note {
+  margin: 0;
+  color: var(--h-text-muted);
+  font-size: 0.8rem;
+}
+
+.field-note.ok {
+  color: var(--h-ok);
+}
+
+.field-note.err {
+  color: var(--h-error);
+}
+
 .switch {
   margin: 1rem 0 0;
   color: var(--h-text-muted);
@@ -595,7 +624,8 @@ form {
   background: var(--h-border);
 }
 
-main a.button-link {
+main a.button-link,
+main button.button-link {
   width: 100%;
 }
 

@@ -61,6 +61,19 @@ export interface DiscordOAuthService {
     /** For a link flow, the member who started it. */
     userId: string | null;
   }>;
+  /**
+   * Parks a verified Discord identity so the browser can supply the invite code
+   * afterwards without running Discord again. Returns the opaque token the
+   * browser is handed (in an HttpOnly cookie); only the token's hash is kept, so
+   * the identity itself never round-trips through a cookie or a URL. One use in
+   * practice: the record is forgotten as soon as the sign-up completes, and it
+   * expires no later than a flow does.
+   */
+  rememberResume(identity: DiscordIdentity): string;
+  /** The identity behind a resume token, if it is still live. Does not consume it. */
+  peekResume(token: string): DiscordIdentity | null;
+  /** Forgets a resume token, once the sign-up has completed or been abandoned. */
+  forgetResume(token: string): void;
   /** Fetches a Discord picture's bytes, for importing it as a Harmony avatar. */
   downloadAvatar(url: string): Promise<Buffer | null>;
 }
@@ -166,6 +179,18 @@ export function createDiscordOAuthService(settings: SettingsService): DiscordOAu
     return createHash('sha256').update(binding).digest();
   }
 
+  /**
+   * Verified Discord identities parked for an invite code, keyed by the hash of
+   * the token the browser holds. In memory like `pending`: a record lives for
+   * minutes, and losing it on a restart only makes somebody press the button
+   * again. The identity is never written anywhere the browser can read.
+   */
+  const resumes = new Map<string, { identity: DiscordIdentity; expiresAt: number }>();
+
+  function hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
   function resolve(): ResolvedConfig | null {
     const auth = settings.getDiscordAuth();
     const redirectUri = settings.discordRedirectUri();
@@ -177,6 +202,9 @@ export function createDiscordOAuthService(settings: SettingsService): DiscordOAu
     const now = Date.now();
     for (const [state, entry] of pending) {
       if (entry.expiresAt <= now) pending.delete(state);
+    }
+    for (const [tokenHash, entry] of resumes) {
+      if (entry.expiresAt <= now) resumes.delete(tokenHash);
     }
   }
 
@@ -243,6 +271,24 @@ export function createDiscordOAuthService(settings: SettingsService): DiscordOAu
       const accessToken = await exchangeCode(config, code, entry.verifier);
       const identity = await fetchIdentity(accessToken);
       return { intent: entry.intent, identity, inviteCode: entry.inviteCode, userId: entry.userId };
+    },
+
+    rememberResume(identity) {
+      sweep();
+      const token = randomBytes(32).toString('base64url');
+      resumes.set(hashToken(token), { identity, expiresAt: Date.now() + STATE_TTL_MS });
+      return token;
+    },
+
+    peekResume(token) {
+      sweep();
+      const entry = resumes.get(hashToken(token));
+      if (!entry || entry.expiresAt <= Date.now()) return null;
+      return entry.identity;
+    },
+
+    forgetResume(token) {
+      resumes.delete(hashToken(token));
     },
 
     async downloadAvatar(url) {

@@ -1,13 +1,43 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { Permission, createInviteSchema } from '@harmony/shared';
+import { Permission, createInviteSchema, inviteCheckSchema, type InviteCheckResponse } from '@harmony/shared';
 import { requirePermission } from '../auth/plugin.ts';
+import type { AuthService } from '../auth/service.ts';
 import type { Database } from '../db/index.ts';
 import { findInvite, insertInvite, listInvites, toInvite, deleteInvite } from '../db/invites.ts';
 import { HttpError } from '../http/errors.ts';
+import { createRateLimiter } from '../http/rate-limit.ts';
 import { parseBody } from '../http/validation.ts';
 
-export function registerInviteRoutes(app: FastifyInstance, db: Database): void {
+export interface InviteRouteDeps {
+  db: Database;
+  auth: AuthService;
+}
+
+export function registerInviteRoutes(app: FastifyInstance, deps: InviteRouteDeps): void {
+  const db = deps.db;
+
+  // A code is short, and a client checks one as somebody types, so this is
+  // generous for a person and still blunts a scripted sweep. Per-IP.
+  const checkLimiter = createRateLimiter({ limit: 20, windowMs: 60_000 });
+
+  /**
+   * The pre-flight invite check. Unauthenticated on purpose: it is used from the
+   * sign-in screen, before there is a session. POST rather than GET so the code
+   * never lands in access logs or browser history.
+   *
+   * It mirrors `register` exactly through `verifyInvite`, and consumes nothing —
+   * a code that passes here can still be spent or expire before the registration
+   * that follows, which re-checks it authoritatively.
+   */
+  app.post('/api/v1/invites/check', async (request) => {
+    checkLimiter.check(request.ip);
+    const input = parseBody(inviteCheckSchema, request.body);
+    deps.auth.verifyInvite(input.code);
+    const body: InviteCheckResponse = { valid: true };
+    return body;
+  });
+
   app.get('/api/v1/invites', async (request) => {
     // Anyone with `CreateInvites` may mint codes, but seeing every invite is a management view.
     requirePermission(request, Permission.ManageServer);

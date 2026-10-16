@@ -34,6 +34,15 @@ export interface MeResponse {
   permissions: string;
 }
 
+/**
+ * Response for `POST /api/v1/invites/check`. A code that cannot be used is a
+ * 403 in the standard error body, carrying one of the `invite_*` codes, so the
+ * client reuses the same copy for the pre-flight as for a failed registration.
+ */
+export interface InviteCheckResponse {
+  valid: true;
+}
+
 /** Response for an administrator editing another member's account. */
 export interface MemberUpdateResponse {
   user: LinkedUser;
@@ -199,6 +208,16 @@ export interface DiscordAuthResponse {
    * the instance has no public base URL set (in which case the flow cannot run).
    */
   redirectUri: string | null;
+}
+
+/**
+ * Response for `POST /api/v1/auth/discord`: the Discord authorize URL the
+ * browser should be sent to. Returned as JSON rather than a redirect so an
+ * invite code can travel in the request body and stay out of the URL — browser
+ * history, and the access log Fastify writes for a navigation.
+ */
+export interface DiscordStartResponse {
+  url: string;
 }
 
 /** Response for `PUT` / `DELETE /api/v1/icon`. */
