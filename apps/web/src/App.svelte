@@ -27,6 +27,16 @@
    */
   let notice = $state<{ text: string; kind: 'ok' | 'error' } | null>(null);
   /**
+   * A Discord callback that stopped on the invite. Its message belongs on the
+   * code, which the auth panel owns, so it is passed there rather than shown in
+   * the banner: the panel opens on the register view, or on the one-more-thing
+   * step when the server parked a verified identity.
+   */
+  let authDiscordError = $state<string | null>(null);
+  let authDiscordResume = $state(false);
+  /** An invite code handed over in the URL, which opens the register view. */
+  let authInvite = $state('');
+  /**
    * The owner whose setup has already been looked up. A plain variable, not
    * `$state`: it is bookkeeping for the effect below, not something to render.
    */
@@ -50,6 +60,8 @@
     denied: 'Discord sign-in was cancelled.',
     failed: 'Discord sign-in could not be completed. Please try again.',
   };
+  /** The invite codes above are handled by the auth panel, not the banner. */
+  const DISCORD_INVITE_ERRORS = new Set(['invite_required', 'invalid_invite', 'invite_expired', 'invite_exhausted']);
 
   onMount(async () => {
     const metaPromise = meta.load();
@@ -64,14 +76,24 @@
     loading = false;
 
     // The Discord callback lands here by navigation, so its outcome is a query
-    // parameter. Read it once, then strip it so a reload does not replay it.
+    // parameter. Read it once, then strip it so a reload does not replay it. An
+    // invite link's code is read the same way and kept in the field.
     const params = new URLSearchParams(window.location.search);
     const ok = params.get('discord');
     const error = params.get('discord_error');
-    if (ok || error) {
+    const invite = params.get('invite')?.trim() ?? '';
+    const resume = params.get('discord_resume') === '1';
+
+    if (invite) authInvite = invite;
+    if (error && DISCORD_INVITE_ERRORS.has(error)) {
+      authDiscordError = error;
+      authDiscordResume = resume;
+    } else if (ok || error) {
       notice = error
         ? { text: DISCORD_ERROR[error] ?? 'Discord sign-in failed.', kind: 'error' }
         : { text: DISCORD_OK[ok ?? ''] ?? 'Discord connected.', kind: 'ok' };
+    }
+    if (invite || ok || error || resume) {
       window.history.replaceState(null, '', window.location.pathname + window.location.hash);
     }
   });
@@ -146,5 +168,5 @@
   <Lightbox />
   <ScreenShare />
 {:else}
-  <AuthPanel />
+  <AuthPanel invite={authInvite} discordError={authDiscordError} discordResume={authDiscordResume} />
 {/if}

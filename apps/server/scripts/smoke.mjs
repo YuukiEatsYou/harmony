@@ -272,6 +272,17 @@ try {
   );
   check('HSTS is withheld over plain HTTP', hardened.get('strict-transport-security') === null);
 
+  // --- Pre-flight invite check, before anyone exists ---
+  // Mirrors register's bootstrap: the first account needs no code, so on an
+  // unclaimed instance any code reads as valid. (It reveals that the instance is
+  // unclaimed; anyone could register and own it anyway.)
+  const bootstrapCheck = await req('/invites/check', { method: 'POST', body: { code: 'no-such-code' } });
+  check(
+    'the invite check accepts any code on an unclaimed instance',
+    bootstrapCheck.status === 200 && bootstrapCheck.json?.valid === true,
+    `${bootstrapCheck.status} ${JSON.stringify(bootstrapCheck.json)}`,
+  );
+
   // --- Auth ---
   const owner = await req('/auth/register', {
     method: 'POST',
@@ -296,6 +307,64 @@ try {
 
   const invite = await req('/invites', { method: 'POST', token: ownerToken, body: {} });
   check('owner creates an invite', invite.status === 200 && typeof invite.json?.code === 'string');
+
+  // --- The pre-flight invite check ---
+  // It shares its logic with register, so the states a person can be shown are
+  // the same codes, and checking a code must not spend it.
+  const inviteCheckOk = await req('/invites/check', { method: 'POST', body: { code: invite.json?.code } });
+  check(
+    'a valid code passes the pre-flight check',
+    inviteCheckOk.status === 200 && inviteCheckOk.json?.valid === true,
+    `${inviteCheckOk.status} ${JSON.stringify(inviteCheckOk.json)}`,
+  );
+  const inviteCheckBad = await req('/invites/check', { method: 'POST', body: { code: 'definitely-not-a-code' } });
+  check(
+    'an unknown code is refused as invalid',
+    inviteCheckBad.status === 403 && inviteCheckBad.json?.error?.code === 'invalid_invite',
+    `${inviteCheckBad.status} ${JSON.stringify(inviteCheckBad.json)}`,
+  );
+  const inviteCheckEmpty = await req('/invites/check', { method: 'POST', body: { code: '' } });
+  check('an empty code is a validation error (400)', inviteCheckEmpty.status === 400, `status ${inviteCheckEmpty.status}`);
+  const afterCheck = await req('/invites', { token: ownerToken });
+  check(
+    'the pre-flight check does not consume the code',
+    afterCheck.json?.invites?.find((row) => row.code === invite.json?.code)?.uses === 0,
+    JSON.stringify(afterCheck.json?.invites),
+  );
+
+  // Expired and exhausted codes are reported distinctly. The clock cannot be
+  // reached through the API, so both are written straight into the database.
+  const inviteDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  insertInvite(inviteDb, {
+    code: 'expired-code',
+    createdBy: me.json.user.id,
+    createdAt: staleAt,
+    expiresAt: staleAt,
+    maxUses: null,
+  });
+  insertInvite(inviteDb, {
+    code: 'used-up-code',
+    createdBy: me.json.user.id,
+    createdAt: new Date().toISOString(),
+    expiresAt: null,
+    maxUses: 1,
+  });
+  inviteDb.prepare('UPDATE invites SET uses = 1 WHERE code = ?').run('used-up-code');
+  inviteDb.close();
+
+  const inviteCheckExpired = await req('/invites/check', { method: 'POST', body: { code: 'expired-code' } });
+  check(
+    'an expired code is reported as expired',
+    inviteCheckExpired.status === 403 && inviteCheckExpired.json?.error?.code === 'invite_expired',
+    `${inviteCheckExpired.status} ${JSON.stringify(inviteCheckExpired.json)}`,
+  );
+  const inviteCheckExhausted = await req('/invites/check', { method: 'POST', body: { code: 'used-up-code' } });
+  check(
+    'a used-up code is reported as exhausted',
+    inviteCheckExhausted.status === 403 && inviteCheckExhausted.json?.error?.code === 'invite_exhausted',
+    `${inviteCheckExhausted.status} ${JSON.stringify(inviteCheckExhausted.json)}`,
+  );
 
   const noInvite = await req('/auth/register', { method: 'POST', body: { username: 'bob', password: 'hunter2hunter2' } });
   check('registration without invite rejected (403)', noInvite.status === 403, `status ${noInvite.status}`);
@@ -5490,6 +5559,16 @@ try {
       "a flow with another flow's binding is refused",
       (await refusal(other, oauth.authorizeUrl('link').binding)) === 'discord_state',
     );
+
+    // A verified identity parked for an invite. The token is the only thing the
+    // browser holds; the identity stays server-side, and once the sign-up is
+    // done the token resolves to nothing.
+    const resumeToken = oauth.rememberResume(completed.identity);
+    check('parking an identity returns a long random token', resumeToken.length >= 43, `length ${resumeToken.length}`);
+    check('the parked identity is read back by its token', oauth.peekResume(resumeToken)?.id === '700000000000000009');
+    check('an unknown resume token resolves to nothing', oauth.peekResume('not-a-real-token') === null);
+    oauth.forgetResume(resumeToken);
+    check('forgetting the token drops the parked identity', oauth.peekResume(resumeToken) === null);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -8859,6 +8938,33 @@ try {
     'a callback with another browser binding is refused',
     (wrongBinding.headers.get('location') ?? '').includes('discord_error=failed'),
   );
+
+  // The resumed sign-up. There is no parked identity here (a real flow needs
+  // Discord to call back), so the guard is what this exercises: without the
+  // one-use cookie the code alone cannot finish, and the person is told to
+  // start again rather than left hanging.
+  const finishNoRecord = await req('/auth/discord/finish', { method: 'POST', body: { inviteCode: 'anything' } });
+  check(
+    'finishing without a parked Discord identity is refused',
+    finishNoRecord.status === 403 && finishNoRecord.json?.error?.code === 'discord_resume_expired',
+    `${finishNoRecord.status} ${JSON.stringify(finishNoRecord.json)}`,
+  );
+  const finishForged = await req('/auth/discord/finish', {
+    method: 'POST',
+    body: { inviteCode: 'anything' },
+    cookie: 'harmony_session_discord_resume=not-a-real-token',
+  });
+  check(
+    'finishing with an unknown resume token is refused',
+    finishForged.status === 403 && finishForged.json?.error?.code === 'discord_resume_expired',
+    `${finishForged.status} ${JSON.stringify(finishForged.json)}`,
+  );
+  const finishNoCode = await fetch(`${BASE}/auth/discord/finish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  check('finishing without a code is a validation error (400)', finishNoCode.status === 400, `status ${finishNoCode.status}`);
 
   // Linking an account must start from a signed-in member.
   const anonLink = await fetch(`${BASE}/auth/discord?intent=link`, { redirect: 'manual' });

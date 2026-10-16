@@ -34,6 +34,15 @@ export interface MeResponse {
   permissions: string;
 }
 
+/**
+ * Response for `POST /api/v1/invites/check`. A code that cannot be used is a
+ * 403 in the standard error body, carrying one of the `invite_*` codes, so the
+ * client reuses the same copy for the pre-flight as for a failed registration.
+ */
+export interface InviteCheckResponse {
+  valid: true;
+}
+
 /** Response for an administrator editing another member's account. */
 export interface MemberUpdateResponse {
   user: LinkedUser;

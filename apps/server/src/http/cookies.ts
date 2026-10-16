@@ -41,6 +41,30 @@ export function clearDiscordFlowCookie(reply: FastifyReply, config: Config): voi
   reply.clearCookie(discordFlowCookieName(config), { path: DISCORD_FLOW_PATH });
 }
 
+/**
+ * A verified Discord identity parked until the browser supplies the invite code.
+ * Mirrors the flow cookie: HttpOnly, scoped to the Discord routes, and never
+ * exposed to script or a URL. The record itself lives in the OAuth service; this
+ * carries only the opaque token that names it.
+ */
+export function discordResumeCookieName(config: Config): string {
+  return `${config.cookieName}_discord_resume`;
+}
+
+export function setDiscordResumeCookie(reply: FastifyReply, config: Config, value: string, maxAgeSeconds: number): void {
+  reply.setCookie(discordResumeCookieName(config), value, {
+    path: DISCORD_FLOW_PATH,
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: config.cookieSecure,
+    maxAge: maxAgeSeconds,
+  });
+}
+
+export function clearDiscordResumeCookie(reply: FastifyReply, config: Config): void {
+  reply.clearCookie(discordResumeCookieName(config), { path: DISCORD_FLOW_PATH });
+}
+
 export function clearSessionCookie(reply: FastifyReply, config: Config): void {
   reply.clearCookie(config.cookieName, { path: '/' });
 }

@@ -31,6 +31,22 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
+/**
+ * The pre-flight invite check: the client verifies a code before it commits to
+ * a registration or hands the browser to Discord. Non-empty only — the client
+ * never checks an empty field, and a code is looked up verbatim (base64url is
+ * case-sensitive, so it is never folded).
+ */
+export const inviteCheckSchema = z.object({ code: z.string().min(1).max(200) });
+export type InviteCheckInput = z.infer<typeof inviteCheckSchema>;
+
+/**
+ * Finishing a Discord sign-up that was parked for an invite: the identity is
+ * already verified and held server-side, so only the code is supplied here.
+ */
+export const discordFinishSchema = z.object({ inviteCode: z.string().min(1).max(200) });
+export type DiscordFinishInput = z.infer<typeof discordFinishSchema>;
+
 /** Seconds a member must wait between messages in a channel; 0 means off. */
 const slowmodeSeconds = z.number().int().min(0).max(MAX_SLOWMODE_SECONDS).optional();
 
