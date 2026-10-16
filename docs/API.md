@@ -90,7 +90,10 @@ every request in one of two ways:
 
 The first account ever registered becomes the server owner (`isOwner: true`) and is exempt from the
 invite requirement. Every later registration may require a valid invite code, depending on the
-instance's `requireInvite` setting (see `GET /api/v1/meta`).
+instance's `requireInvite` setting (see `GET /api/v1/meta`). An invite's `maxUses` cap is enforced
+where the code is consumed, in the same database transaction as the account insert: two
+registrations racing on the last use cannot both join, and a use is not spent when the insert
+fails.
 
 Tokens expire after `HARMONY_SESSION_TTL_DAYS` (default 30 days) or when you logout.
 

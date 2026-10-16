@@ -32,7 +32,7 @@ import {
   insertSession,
   touchSession,
 } from '../db/sessions.ts';
-import { findInvite, incrementInviteUses } from '../db/invites.ts';
+import { consumeInviteUse, findInvite, incrementInviteUses } from '../db/invites.ts';
 import { findBotByToken, touchBotToken } from '../db/bot_tokens.ts';
 import { findBan } from '../db/bans.ts';
 import type { DiscordIdentity } from './discord-oauth.ts';
@@ -154,14 +154,35 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
       const isFirstUser = countUsers(sqlite) === 0;
       let inviteCodeToConsume: string | null = null;
 
+      // The code is checked before the hash so an obviously absent, invalid or
+      // expired one fails fast, without paying for a password hash.
       if (!isFirstUser && settings.get().requireInvite) {
         inviteCodeToConsume = checkInvite(input.inviteCode);
       }
 
       const id = randomUUID();
       const passwordHash = await hashPassword(input.password);
-      insertUser(sqlite, { id, username: input.username, passwordHash, isOwner: isFirstUser });
-      if (inviteCodeToConsume) incrementInviteUses(sqlite, inviteCodeToConsume);
+
+      // The hash above yields the event loop, so the invite read that admitted
+      // this request is stale by now: two registrations presenting the same code
+      // can both pass checkInvite before either consumes a use. Consumption is
+      // therefore the capacity check itself, not a separate increment that trusts
+      // an earlier read. It runs in the same transaction as the insert, so the
+      // check and the consumption cannot be split, and a failed insert (a
+      // duplicate username, say) rolls the use back instead of burning it. Only
+      // one of two racing requests can take the last use while the row still has
+      // room; the other is refused here.
+      sqlite.exec('BEGIN');
+      try {
+        if (inviteCodeToConsume && !consumeInviteUse(sqlite, inviteCodeToConsume)) {
+          throw new HttpError(403, 'invite_exhausted', 'That invite code has already been used up.');
+        }
+        insertUser(sqlite, { id, username: input.username, passwordHash, isOwner: isFirstUser });
+        sqlite.exec('COMMIT');
+      } catch (error) {
+        sqlite.exec('ROLLBACK');
+        throw error;
+      }
 
       const row = findUserById(sqlite, id);
       if (!row) throw new HttpError(500, 'internal_error', 'Failed to load the new account.');

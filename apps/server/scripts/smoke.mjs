@@ -5497,6 +5497,58 @@ try {
   ghostStore.close();
   rmSync(ghostDir, { recursive: true, force: true });
 
+  // A max_uses invite is a capacity control, and the capacity check must not be
+  // split from the consumption by the password hash. The old register read the
+  // invite before the hash and incremented it after the insert, so two concurrent
+  // registrations holding the same single-use code both passed the pre-hash read
+  // and both joined. This asserts the cap holds where the check and the consume
+  // are one step: exactly one registration is created, the other is refused with
+  // invite_exhausted, and the code's uses ends at its max. It fails on the old
+  // register (resolved 2, uses 2) and passes once consumption is the check.
+  const inviteMaxDir = mkdtempSync(join(tmpdir(), 'harmony-invite-max-'));
+  const inviteMaxStore = new Database({
+    dataDir: inviteMaxDir,
+    dbFile: join(inviteMaxDir, 'harmony.db'),
+    uploadDir: join(inviteMaxDir, 'uploads'),
+  });
+  insertUser(inviteMaxStore.sqlite, {
+    id: 'invite-max-owner',
+    username: 'invite-max-owner',
+    passwordHash: 'not-a-real-hash',
+    isOwner: true,
+  });
+  insertInvite(inviteMaxStore.sqlite, {
+    code: 'single-use',
+    createdBy: 'invite-max-owner',
+    createdAt: new Date().toISOString(),
+    expiresAt: null,
+    maxUses: 1,
+  });
+  const inviteMaxAuth = createAuthService(
+    inviteMaxStore.sqlite,
+    { sessionTtlDays: 1 },
+    { get: () => ({ requireInvite: true }) },
+  );
+  const inviteMaxResults = await Promise.allSettled([
+    inviteMaxAuth.register({ username: 'invite-max-one', password: 'hunter2hunter2', inviteCode: 'single-use' }, null),
+    inviteMaxAuth.register({ username: 'invite-max-two', password: 'hunter2hunter2', inviteCode: 'single-use' }, null),
+  ]);
+  const inviteMaxResolved = inviteMaxResults.filter((result) => result.status === 'fulfilled').length;
+  const inviteMaxExhausted = inviteMaxResults.filter(
+    (result) => result.status === 'rejected' && result.reason?.code === 'invite_exhausted',
+  ).length;
+  const inviteMaxUses = inviteMaxStore.sqlite.prepare("SELECT uses FROM invites WHERE code = 'single-use'").get()?.uses;
+  const inviteMaxAccounts = inviteMaxStore.sqlite
+    .prepare("SELECT COUNT(*) AS n FROM users WHERE account_type = 'user'")
+    .get().n;
+  check(
+    'a single-use invite admits one of two concurrent registrations',
+    inviteMaxResolved === 1 && inviteMaxExhausted === 1 && inviteMaxUses === 1 && inviteMaxAccounts === 2,
+    `resolved ${inviteMaxResolved}, exhausted ${inviteMaxExhausted}, uses ${inviteMaxUses}, accounts ${inviteMaxAccounts}`,
+  );
+  inviteMaxStore.close();
+  rmSync(inviteMaxDir, { recursive: true, force: true });
+
   // --- Slowmode ---
   const slowChannel = await req('/channels', {
     method: 'POST',
