@@ -5497,6 +5497,42 @@ try {
   ghostStore.close();
   rmSync(ghostDir, { recursive: true, force: true });
 
+  // A username is guarded by the unique index, not by the pre-hash lookup: the
+  // hash yields the event loop, so two concurrent registrations for the same
+  // name both pass the lookup and reach the insert. The loser must surface the
+  // same stable 409 the ordinary path uses, not a 500 from the raw constraint
+  // error. Runs on an open instance with no accounts, so both callers are the
+  // first user and an invite is never in play. Fails on the unfixed register
+  // (one 200, one raw SQLite error) and passes once the insert is wrapped.
+  const dupDir = mkdtempSync(join(tmpdir(), 'harmony-dup-username-'));
+  const dupStore = new Database({
+    dataDir: dupDir,
+    dbFile: join(dupDir, 'harmony.db'),
+    uploadDir: join(dupDir, 'uploads'),
+  });
+  const dupAuth = createAuthService(dupStore.sqlite, { sessionTtlDays: 1 }, { get: () => ({ requireInvite: false }) });
+  const dupResults = await Promise.allSettled([
+    dupAuth.register({ username: 'racer', password: 'hunter2hunter2' }, null),
+    dupAuth.register({ username: 'racer', password: 'hunter2hunter2' }, null),
+  ]);
+  const dupWon = dupResults.filter((result) => result.status === 'fulfilled').length;
+  const dupLost = dupResults.filter(
+    (result) =>
+      result.status === 'rejected' &&
+      result.reason?.statusCode === 409 &&
+      result.reason?.code === 'username_taken',
+  ).length;
+  const dupAccounts = dupStore.sqlite
+    .prepare("SELECT COUNT(*) AS n FROM users WHERE account_type = 'user'")
+    .get().n;
+  check(
+    'a raced duplicate username yields one account and one 409 username_taken',
+    dupWon === 1 && dupLost === 1 && dupAccounts === 1,
+    `won ${dupWon}, lost ${dupLost}, other ${dupResults.length - dupWon - dupLost}, accounts ${dupAccounts}`,
+  );
+  dupStore.close();
+  rmSync(dupDir, { recursive: true, force: true });
+
   // --- Slowmode ---
   const slowChannel = await req('/channels', {
     method: 'POST',
