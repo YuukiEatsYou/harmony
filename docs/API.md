@@ -591,6 +591,10 @@ ignored for the very first account. Returns an `AuthResponse`:
 Possibly errors: `409 username_taken`, `403 invite_required` / `invalid_invite` /
 `invite_expired` / `invite_exhausted`.
 
+A username is held by a unique index, so two registrations racing for the same
+name still answer with one success and one `409 username_taken`; the loser never
+gets a 500 from the index.
+
 #### `POST /api/v1/auth/login` — no auth, rate limited
 
 ```json

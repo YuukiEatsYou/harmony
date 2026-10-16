@@ -17,6 +17,7 @@ import {
   findUserById,
   findUserByUsername,
   insertUser,
+  isDuplicateUsernameError,
   parsePermissionBits,
   mergeUsers,
   presentLinkedUser,
@@ -146,6 +147,9 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
 
   return {
     async register(input, userAgent) {
+      // An early, friendlier check. It is not the guard: the password hash below
+      // yields the event loop, so a concurrent registration with the same name
+      // can pass this and reach the insert first (see the catch there).
       if (findUserByUsername(sqlite, input.username)) {
         throw new HttpError(409, 'username_taken', 'That username is already taken.');
       }
@@ -160,7 +164,18 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
 
       const id = randomUUID();
       const passwordHash = await hashPassword(input.password);
-      insertUser(sqlite, { id, username: input.username, passwordHash, isOwner: isFirstUser });
+      try {
+        insertUser(sqlite, { id, username: input.username, passwordHash, isOwner: isFirstUser });
+      } catch (error) {
+        // The username unique index is the real guard against a duplicate: the
+        // lookup above can be raced while this request awaits the hash. Surface
+        // the loser with the same stable code the ordinary path uses rather than
+        // letting the raw constraint error become a 500.
+        if (isDuplicateUsernameError(error)) {
+          throw new HttpError(409, 'username_taken', 'That username is already taken.');
+        }
+        throw error;
+      }
       if (inviteCodeToConsume) incrementInviteUses(sqlite, inviteCodeToConsume);
 
       const row = findUserById(sqlite, id);

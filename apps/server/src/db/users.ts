@@ -512,6 +512,25 @@ export function insertUser(
     .run(input.id, input.username, input.passwordHash, input.isOwner ? 1 : 0, new Date().toISOString());
 }
 
+/**
+ * Whether a write to `users` lost a race against the username unique index.
+ *
+ * Callers look the name up first for a friendlier error, but that lookup can be
+ * raced by a concurrent request: the index is the real guard. Translating this
+ * failure lets a loser answer with the same stable 409 a caller's own check
+ * would have produced, instead of a raw SQLite error surfacing as a 500.
+ */
+export function isDuplicateUsernameError(error: unknown): boolean {
+  const err = error as { code?: unknown; message?: unknown } | null;
+  return (
+    err !== null &&
+    typeof err === 'object' &&
+    err.code === 'ERR_SQLITE_ERROR' &&
+    typeof err.message === 'string' &&
+    err.message.includes('UNIQUE constraint failed: users.username')
+  );
+}
+
 /** Every bot the owner has set up, oldest first. */
 export function listBots(sqlite: DatabaseSync): UserRow[] {
   return sqlite
