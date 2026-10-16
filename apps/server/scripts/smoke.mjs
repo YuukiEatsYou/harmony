@@ -5494,6 +5494,61 @@ try {
     globalThis.fetch = realFetch;
   }
 
+  // Two concurrent first registrations against a userless instance must not both
+  // become owner. The old register read the account count, then awaited the
+  // password hash, then inserted: with the read and the insert split by that
+  // await, both requests observed an empty instance (countUsers === 0) and both
+  // wrote is_owner = 1. This asserts both registrations still succeed and exactly
+  // one owner exists. It fails on the old code - two owners, or a unique-index
+  // violation once the backstop exists - and passes once the count is taken in
+  // the same synchronous block as the insert.
+  const raceDir = mkdtempSync(join(tmpdir(), 'harmony-owner-race-'));
+  const raceStore = new Database({
+    dataDir: raceDir,
+    dbFile: join(raceDir, 'harmony.db'),
+    uploadDir: join(raceDir, 'uploads'),
+  });
+  const raceAuth = createAuthService(raceStore.sqlite, { sessionTtlDays: 1 }, { get: () => ({ requireInvite: false }) });
+  const raceResults = await Promise.allSettled([
+    raceAuth.register({ username: 'racer-one', password: 'hunter2hunter2' }, null),
+    raceAuth.register({ username: 'racer-two', password: 'hunter2hunter2' }, null),
+  ]);
+  const raceResolved = raceResults.filter((result) => result.status === 'fulfilled').length;
+  const raceOwners = raceStore.sqlite.prepare('SELECT COUNT(*) AS n FROM users WHERE is_owner = 1').get().n;
+  const raceAccounts = raceStore.sqlite.prepare("SELECT COUNT(*) AS n FROM users WHERE account_type = 'user'").get().n;
+  check(
+    'two concurrent first registrations leave exactly one owner',
+    raceResolved === 2 && raceAccounts === 2 && raceOwners === 1,
+    `resolved ${raceResolved}, accounts ${raceAccounts}, owners ${raceOwners}`,
+  );
+  raceStore.close();
+  rmSync(raceDir, { recursive: true, force: true });
+
+  // Migration 43 backstops that rule in the schema. Applied to a database that
+  // already carries two owner rows (the damage the race could do), it keeps the
+  // earliest account and demotes the rest, then the partial unique index refuses
+  // any further owner row, so a reintroduced race fails closed.
+  const dupe = new DatabaseSync(':memory:');
+  dupe.exec('CREATE TABLE users (id TEXT PRIMARY KEY, is_owner INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);');
+  const putUser = dupe.prepare('INSERT INTO users (id, is_owner, created_at) VALUES (?, ?, ?)');
+  putUser.run('later', 1, '2024-01-02T00:00:00.000Z');
+  putUser.run('earliest', 1, '2024-01-01T00:00:00.000Z');
+  putUser.run('member', 0, '2024-01-03T00:00:00.000Z');
+  migrations.find((migration) => migration.version === 43).up(dupe);
+  const keptOwner = dupe.prepare('SELECT id FROM users WHERE is_owner = 1').all();
+  let forcedOwnerError = null;
+  try {
+    putUser.run('forced', 1, '2024-01-04T00:00:00.000Z');
+  } catch (error) {
+    forcedOwnerError = error;
+  }
+  check(
+    'migration 43 settles a duplicate owner and refuses a new one',
+    keptOwner.length === 1 && keptOwner[0].id === 'earliest' && forcedOwnerError !== null,
+    `kept ${JSON.stringify(keptOwner)}, error ${forcedOwnerError}`,
+  );
+  dupe.close();
+
   ghostStore.close();
   rmSync(ghostDir, { recursive: true, force: true });
 

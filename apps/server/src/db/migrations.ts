@@ -1145,4 +1145,31 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 43,
+    name: 'single_owner',
+    up(db) {
+      /*
+       * At most one account may be the owner, and the database says so rather
+       * than only the code that creates the first account. Under concurrent first
+       * registrations an instance could otherwise grow two owner rows; a partial
+       * unique index on the flag turns that into a failed insert instead of a
+       * second owner, so any future reintroduction of the race fails closed.
+       *
+       * A database that already carries the damage would refuse to start when the
+       * index is built, so a conflicting state is settled first. The earliest
+       * account by created_at is kept as the owner and any later one is demoted:
+       * only the flag changes, the account and everything it owns stay, and it is
+       * reversible. Only a real account is ever the owner - bots and stand-ins are
+       * inserted with the flag clear - so no bot or ghost is affected.
+       */
+      const owner = db
+        .prepare('SELECT id FROM users WHERE is_owner = 1 ORDER BY created_at, id LIMIT 1')
+        .get() as { id: string } | undefined;
+      if (owner) {
+        db.prepare('UPDATE users SET is_owner = 0 WHERE is_owner = 1 AND id <> ?').run(owner.id);
+      }
+      db.exec('CREATE UNIQUE INDEX idx_users_single_owner ON users(is_owner) WHERE is_owner = 1');
+    },
+  },
 ];
