@@ -5384,7 +5384,7 @@ try {
   check('the new account has no password', fresh.auth.user.hasPassword === false && freshRow.password_hash === '!no-password');
   check('its username is made valid from the Discord name', freshRow.username === 'NewPerson');
   check('it carries the Discord id and name', freshRow.discord_id === '700000000000000001' && freshRow.display_name === 'New P');
-  check('a Discord sign-up is never the owner', freshRow.is_owner === 0);
+  check('a Discord sign-up on a populated instance is not the owner', freshRow.is_owner === 0);
 
   const again = discordAuth.signInWithDiscord(discordIdentity('700000000000000001', 'whatever'), null, null);
   check('signing in again finds the same account', again.created === false && again.auth.user.id === fresh.auth.user.id);
@@ -5609,8 +5609,41 @@ try {
     secondDiscord = error;
   }
   check('once an account exists a Discord sign-in needs the invite again', secondDiscord?.code === 'invite_required');
+  check(
+    'the first Discord account on a userless instance is the owner (OBS-1)',
+    firstDiscord?.auth?.user?.isOwner === true,
+    String(firstDiscord?.auth?.user?.isOwner),
+  );
   firstStore.close();
   rmSync(firstDir, { recursive: true, force: true });
+
+  // Ownership bootstrap (OBS-1, split out of YUC-118): `register` makes the very
+  // first account the owner, and `signInWithDiscord` must do the same, or an
+  // OAuth-seeded userless instance would come up with a non-owner first account
+  // and no later account could ever become owner - bricked administration. Run on
+  // a throwaway instance with invites off, so a second sign-in can land and be
+  // checked against the first.
+  const bootstrapDir = mkdtempSync(join(tmpdir(), 'harmony-owner-'));
+  const bootstrapStore = new Database({
+    dataDir: bootstrapDir,
+    dbFile: join(bootstrapDir, 'harmony.db'),
+    uploadDir: join(bootstrapDir, 'uploads'),
+  });
+  const bootstrapAuth = createAuthService(bootstrapStore.sqlite, { sessionTtlDays: 1 }, { get: () => ({ requireInvite: false }) });
+  const bootstrapFirst = bootstrapAuth.signInWithDiscord(discordIdentity('720000000000000001', 'firstowner'), null, null);
+  check(
+    'the first Discord sign-in on a userless instance is the owner',
+    bootstrapFirst.created === true && bootstrapFirst.auth.user.isOwner === true,
+    JSON.stringify(bootstrapFirst.auth.user),
+  );
+  const bootstrapSecond = bootstrapAuth.signInWithDiscord(discordIdentity('720000000000000002', 'secondowner'), null, null);
+  check(
+    'a later Discord sign-in is not the owner',
+    bootstrapSecond.created === true && bootstrapSecond.auth.user.isOwner === false,
+    JSON.stringify(bootstrapSecond.auth.user),
+  );
+  bootstrapStore.close();
+  rmSync(bootstrapDir, { recursive: true, force: true });
 
   ghostStore.close();
   rmSync(ghostDir, { recursive: true, force: true });

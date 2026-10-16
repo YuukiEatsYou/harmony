@@ -88,9 +88,9 @@ every request in one of two ways:
 - **Session cookie** — set automatically by register/login, for browser clients on the same
   origin. The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when the instance runs over TLS.
 
-The first account ever registered becomes the server owner (`isOwner: true`) and is exempt from the
-invite requirement. Every later registration may require a valid invite code, depending on the
-instance's `requireInvite` setting (see `GET /api/v1/meta`).
+The first account ever created — by registration or by Discord sign-in — becomes the server owner
+(`isOwner: true`) and is exempt from the invite requirement. Every later account may require a valid
+invite code, depending on the instance's `requireInvite` setting (see `GET /api/v1/meta`).
 
 Tokens expire after `HARMONY_SESSION_TTL_DAYS` (default 30 days) or when you logout.
 
@@ -668,8 +668,9 @@ ownership-proving path a manually entered id could never be — then redirects t
 For a `login` intent it signs in the member whose account already carries that Discord id
 (`/?discord=signed_in`). Otherwise it creates one (`/?discord=signed_up`): a username derived from the
 Discord one, the Discord display name, their Discord picture as the avatar (unless it
-already has one), no password (`hasPassword: false`), never the owner. A
-bridge stand-in for the same Discord user is folded into the new account, keeping its history.
+already has one), and no password (`hasPassword: false`). The very first account on a userless
+instance becomes the owner, exactly as `register` treats it; every later one is not. A bridge
+stand-in for the same Discord user is folded into the new account, keeping its history.
 
 Where invites are required, a missing or unusable code does not throw the verified identity away: it
 is parked against a one-use, ten-minute record and the browser is sent to

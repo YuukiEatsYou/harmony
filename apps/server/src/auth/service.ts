@@ -79,9 +79,9 @@ export interface AuthService {
    * visit. A new account has no password. A bridge stand-in for the same Discord
    * user is folded into it, so their history becomes theirs. Throws for a banned
    * account and, where invites are required, for a missing or unusable code —
-   * except for the first account, which bootstraps the instance and needs none,
-   * exactly as `register` treats it. An id already held by any account other
-   * than a stand-in is refused rather than merged.
+   * except for the first account, which bootstraps the instance and is its owner,
+   * needing no invite, exactly as `register` treats it. An id already held by any
+   * account other than a stand-in is refused rather than merged.
    */
   signInWithDiscord(
     identity: DiscordIdentity,
@@ -251,16 +251,18 @@ export function createAuthService(sqlite: DatabaseSync, config: Config, settings
       if (existing && findBan(sqlite, existing.id)) throw banned;
 
       // Mirror register: the very first account bootstraps the instance, so it
-      // needs no invite. The pre-flight `verifyInvite` skips it the same way, so
-      // a code can never read as valid there and then park here on a userless
-      // instance.
+      // needs no invite and is its owner. Ownership matters as much as the
+      // invite: without it an OAuth-seeded userless instance would create a
+      // non-owner first account and no later account could ever become owner.
+      // The pre-flight `verifyInvite` skips it the same way, so a code can never
+      // read as valid there and then park here on a userless instance.
       const isFirstUser = countUsers(sqlite) === 0;
       const inviteToConsume = !isFirstUser && settings.get().requireInvite ? checkInvite(inviteCode) : null;
 
       // Everything below is synchronous, so nothing can slip in between the checks
       // and the inserts.
       const id = randomUUID();
-      insertUser(sqlite, { id, username: freeUsername(identity.username), passwordHash: NO_PASSWORD, isOwner: false });
+      insertUser(sqlite, { id, username: freeUsername(identity.username), passwordHash: NO_PASSWORD, isOwner: isFirstUser });
       try {
         // Keep what the bridge already knew about them; the merge drops that row.
         updateUserProfile(sqlite, id, {

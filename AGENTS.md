@@ -246,9 +246,9 @@ npm workspaces monorepo; every package is ESM TypeScript.
   `User.hasPassword`) and can adopt a stand-in the same way.
 - Search is a deliberate `LIKE` substring scan over the channels the viewer can
   see, with no FTS index.
-- The first registered account becomes the owner. Env vars (`.env.example`) only
-  supply initial defaults; runtime settings live in the DB and are edited in the
-  admin panel.
+- The first account created — by registration or by Discord sign-in — becomes the
+  owner. Env vars (`.env.example`) only supply initial defaults; runtime settings
+  live in the DB and are edited in the admin panel.
 
 ## Web conventions
 
