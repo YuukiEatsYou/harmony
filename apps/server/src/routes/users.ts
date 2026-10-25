@@ -5,8 +5,10 @@ import {
   GatewayEvent,
   Permission,
   changePasswordSchema,
+  changelogSeenSchema,
   permissionsToString,
   updateProfileSchema,
+  type ChangelogSeenResponse,
   type MeResponse,
 } from '@harmony/shared';
 import { resolvePermissions } from '../auth/permissions.ts';
@@ -96,6 +98,26 @@ export function registerUserRoutes(app: FastifyInstance, deps: UserRouteDeps): v
       auth.sessionId,
     );
     return { ok: true };
+  });
+
+  /**
+   * The newest release whose "What's new" notes the caller has been shown. It is
+   * kept here rather than in the browser so the notes appear once per member,
+   * not once per device. Private to the member, so neither route announces
+   * anything.
+   */
+  app.get('/api/v1/users/@me/changelog', async (request) => {
+    const auth = requireAuth(request);
+    const body: ChangelogSeenResponse = { seen: deps.users.changelogSeen(auth.user.id) };
+    return body;
+  });
+
+  /** Records that the caller was shown a release's notes; an older version than the one stored changes nothing. */
+  app.put('/api/v1/users/@me/changelog', async (request, reply) => {
+    const auth = requireAuth(request);
+    const input = parseBody(changelogSeenSchema, request.body);
+    deps.users.markChangelogSeen(auth.user.id, input.version);
+    return reply.status(204).send();
   });
 
   app.put('/api/v1/users/@me/avatar', async (request) => {

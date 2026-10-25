@@ -340,10 +340,16 @@ settings that are still unbuilt.
   the same parameters).
 - **Web client launch URL.** The web client reads `channel` and `message` on
   load: it opens `channel`, and when `message` names a message still in history
-  it scrolls to and flashes it, then strips both parameters so a reload does not
-  replay the link. A channel or message the instance does not know falls back to
+  it scrolls to and flashes it, however far back it sits, then strips both
+  parameters so a reload does not replay the link. A message on the newest page
+  is simply scrolled to; an older one is fetched with the page around it
+  (`GET /channels/:id/messages?around=<id>`, one request), joined to the newest
+  messages when the two meet and otherwise shown as an older stretch the reader
+  scrolls on from. A channel or message the instance does not know falls back to
   the normal default (the configured default channel, at its newest messages)
-  rather than leaving a blank screen.
+  rather than leaving a blank screen. The same link, with the instance's origin
+  in front, is what the client copies as a link to a message (`messageLink` in
+  `apps/web/src/lib/launch-params.ts`).
 
 ## Security and privacy
 

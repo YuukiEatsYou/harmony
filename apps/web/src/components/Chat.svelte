@@ -3,26 +3,28 @@
   import type { Message } from '@harmony/shared';
   import { chat } from '../lib/chat.svelte';
   import { dragHasFiles, mediaFilesFrom } from '../lib/files';
+  import { ownedBy, readEntry } from '../lib/channel-history';
+  import { eventsPanel, galleryPanel, scheduledPanel } from '../lib/lazy-panels';
   import { hasLaunchTarget, parseLaunchParams, withoutLaunchParams } from '../lib/launch-params';
   import { events } from '../lib/events.svelte';
   import { saved } from '../lib/saved.svelte';
   import { scheduled } from '../lib/scheduled.svelte';
   import { session } from '../lib/session.svelte';
+  import { modKey } from '../lib/shortcuts.svelte';
   import { ui } from '../lib/ui.svelte';
   import { update } from '../lib/update.svelte';
   import { uploads } from '../lib/upload-queue.svelte';
+  import ChannelHistory from './ChannelHistory.svelte';
   import ChannelSidebar from './ChannelSidebar.svelte';
   import Composer from './Composer.svelte';
-  import EventsPanel from './EventsPanel.svelte';
-  import GalleryPanel from './GalleryPanel.svelte';
   import HeaderActions from './HeaderActions.svelte';
   import Icon from './Icon.svelte';
   import KeyboardShortcuts from './KeyboardShortcuts.svelte';
+  import LazyPanel from './LazyPanel.svelte';
   import MemberList from './MemberList.svelte';
   import MessageView from './MessageView.svelte';
   import PinsPanel from './PinsPanel.svelte';
   import SavedPanel from './SavedPanel.svelte';
-  import ScheduledPanel from './ScheduledPanel.svelte';
   import UnreadBadge from './UnreadBadge.svelte';
 
   onMount(() => {
@@ -32,13 +34,23 @@
     // the channel cannot be resolved until chat.start has loaded the channel
     // list, and stripped only once they have been handled so a reload does not
     // replay the link.
+    //
+    // Without a link, a reload reopens the channel it left: the browser keeps
+    // each history entry's state across a reload, and ChannelHistory writes the
+    // open channel into it.
     const launch = parseLaunchParams(window.location.search);
+    // An entry written by someone who has since signed out of this tab is not
+    // theirs to reopen for whoever signs in next.
+    const entry = readEntry(window.history.state);
+    const reopen = entry && ownedBy(entry, session.user?.id ?? null) ? entry.channelId : null;
+    const target = hasLaunchTarget(launch) ? launch : { channelId: reopen, messageId: null };
     void chat
-      .start(launch)
+      .start(target)
       .then(() => {
         if (!hasLaunchTarget(launch)) return;
+        // The entry's state is kept, since it is what back and forward walk.
         window.history.replaceState(
-          null,
+          window.history.state,
           '',
           window.location.pathname + withoutLaunchParams(window.location.search) + window.location.hash,
         );
@@ -172,7 +184,7 @@
           class="inbox-open"
           class:has-mentions={chat.mentionChannelIds.length > 0}
           aria-label="Mentions and replies"
-          title="Mentions and replies"
+          title={`Mentions and replies (${modKey}+I)`}
           onclick={() => ui.openInbox()}
         >
           <Icon name="inbox" size={20} />
@@ -182,17 +194,20 @@
           type="button"
           class="search-open"
           aria-label="Search messages"
-          title="Search messages"
+          title={`Search messages (${modKey}+F)`}
           onclick={() => ui.openSearch()}
         >
           <Icon name="search" size={20} />
         </button>
+        <!-- Shown at every width: a drawer on a phone, and on a wide screen it puts the list away. -->
         <button
-          class="drawer-toggle"
+          class="members-toggle"
           type="button"
-          aria-label="Show members"
-          aria-expanded={ui.rosterOpen}
-          onclick={() => ui.toggleRoster()}
+          aria-label="Member list"
+          title={`${ui.membersShown ? 'Hide members' : 'Show members'} (${modKey}+U)`}
+          aria-controls="member-list"
+          aria-expanded={ui.membersShown}
+          onclick={() => ui.toggleMembers()}
         >
           <Icon name="users" size={20} />
         </button>
@@ -255,6 +270,7 @@
   {/if}
 
   <MemberList />
+  <ChannelHistory />
   <KeyboardShortcuts />
   <UnreadBadge />
 
@@ -265,13 +281,20 @@
     <SavedPanel onclose={() => ui.closeSaved()} />
   {/if}
   {#if ui.scheduledOpen}
-    <ScheduledPanel onclose={() => ui.closeScheduled()} />
+    <LazyPanel module={scheduledPanel} label="scheduled messages" onclose={() => ui.closeScheduled()}>
+      {#snippet children(ScheduledPanel)}<ScheduledPanel onclose={() => ui.closeScheduled()} />{/snippet}
+    </LazyPanel>
   {/if}
   {#if ui.eventsOpen}
-    <EventsPanel onclose={() => ui.closeEvents()} />
+    <LazyPanel module={eventsPanel} label="events" onclose={() => ui.closeEvents()}>
+      {#snippet children(EventsPanel)}<EventsPanel onclose={() => ui.closeEvents()} />{/snippet}
+    </LazyPanel>
   {/if}
   {#if ui.gallery}
-    <GalleryPanel channel={ui.gallery} onclose={() => ui.closeGallery()} />
+    {@const channel = ui.gallery}
+    <LazyPanel module={galleryPanel} label="the media gallery" onclose={() => ui.closeGallery()}>
+      {#snippet children(GalleryPanel)}<GalleryPanel {channel} onclose={() => ui.closeGallery()} />{/snippet}
+    </LazyPanel>
   {/if}
 
   {#if ui.sidebarOpen || ui.rosterOpen}

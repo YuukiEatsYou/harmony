@@ -71,6 +71,11 @@ export interface EmbedServiceDeps {
    */
   isFetchable?: (url: string) => Promise<boolean>;
   /**
+   * Replaces the guarded fetch the resolver downloads pages and pictures with.
+   * Defaults to the real one; for tests, which cannot reach a host.
+   */
+  fetch?: typeof fetch;
+  /**
    * Pairs each gif address with the copy held of it. Optional so a resolver can
    * be built without one (it then behaves as it did before the pairing existed).
    */
@@ -120,6 +125,7 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
   const inFlight = new Map<string, Promise<Outcome>>();
   const log = deps.log ?? ((): void => {});
   const isFetchable = deps.isFetchable ?? defaultIsFetchable;
+  const fetchFn = deps.fetch ?? guardedFetch;
   /**
    * Set by useDiscordRefresher once the bridge exists. Null while it does not,
    * which is also the honest answer for an instance with no bridge at all.
@@ -154,7 +160,14 @@ export function createEmbedService(deps: EmbedServiceDeps): EmbedService {
     const pending = inFlight.get(key);
     if (pending) return pending;
 
-    const job = fetchOutcome(url, userAgent, deps.settings.get().maxImageBytes, refreshDiscordAttachment ?? undefined, log)
+    const job = fetchOutcome(
+      url,
+      userAgent,
+      deps.settings.get().maxImageBytes,
+      refreshDiscordAttachment ?? undefined,
+      log,
+      fetchFn,
+    )
       .catch((): Outcome => ({ kind: 'embed', embed: null }))
       .then((outcome) => {
         if (outcome.kind === 'embed') {
@@ -434,6 +447,7 @@ async function fetchOutcome(
   /** Renews a Discord CDN link through the bridge, when there is one. */
   refreshDiscord: ((url: string) => Promise<string | null>) | undefined,
   log: (message: string, detail?: unknown) => void,
+  fetchFn: typeof fetch,
 ): Promise<Outcome> {
   let target: URL;
   try {
@@ -482,7 +496,7 @@ async function fetchOutcome(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await guardedFetch(target, {
+      const response = await fetchFn(target, {
         redirect: 'manual',
         signal: controller.signal,
         // The picture is asked for first, and the page only as a fallback. Some
@@ -537,7 +551,7 @@ async function fetchOutcome(
       // card that would only repeat the page's own words is left off. The page is
       // kept as the message's link, so hiding it behind the picture still works.
       if (isGifPage(target) && embed.imageUrl) {
-        const kept = await fetchImageBytes(embed.imageUrl, userAgent, maxImageBytes, log);
+        const kept = await fetchImageBytes(embed.imageUrl, userAgent, maxImageBytes, log, fetchFn);
         if (kept) return { kind: 'image', url, contentType: kept.contentType, data: kept.data };
       }
       return { kind: 'embed', embed };
@@ -580,6 +594,7 @@ async function fetchImageBytes(
   userAgent: string,
   maxImageBytes: number,
   log: (message: string, detail?: unknown) => void,
+  fetchFn: typeof fetch,
 ): Promise<{ contentType: string; data: Buffer } | null> {
   let target: URL;
   try {
@@ -595,7 +610,7 @@ async function fetchImageBytes(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await guardedFetch(target, {
+      const response = await fetchFn(target, {
         redirect: 'manual',
         signal: controller.signal,
         headers: { 'user-agent': userAgent, accept: 'image/*' },

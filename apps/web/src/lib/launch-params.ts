@@ -45,6 +45,17 @@ export function withoutLaunchParams(search: string): string {
   return rest.length > 0 ? `?${rest}` : '';
 }
 
+/**
+ * The absolute link to one message, for copying and sharing: the instance's own
+ * address with the same two parameters a notification tap carries, so opening
+ * it anywhere takes the reader to the message, however far back it sits. Each
+ * id is encoded, so whatever an id holds reads back unchanged.
+ */
+export function messageLink(origin: string, channelId: string, messageId: string): string {
+  const base = origin.replace(/\/+$/, '');
+  return `${base}/?channel=${encodeURIComponent(channelId)}&message=${encodeURIComponent(messageId)}`;
+}
+
 /** A present, non-blank id, or null; an absent or blank parameter means "not named". */
 function nonEmpty(value: string | null): string | null {
   const trimmed = value?.trim() ?? '';

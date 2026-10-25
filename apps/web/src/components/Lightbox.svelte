@@ -4,9 +4,11 @@
 
   // Escape closes it, as it does every other panel. The event is stopped so a
   // key that reached the app underneath (the composer, a search box) does not
-  // also act on it.
+  // also act on it, and marked as used, so the app-wide Escape leaves the panel
+  // the picture was opened from (the gallery, say) open beneath it.
   function onKeydown(event: KeyboardEvent): void {
     if (event.key === 'Escape' && lightbox.url) {
+      event.preventDefault();
       event.stopPropagation();
       lightbox.close();
     }

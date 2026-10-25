@@ -738,8 +738,9 @@ and neither do the caller's own messages: a channel whose only new message was d
 again.
 
 `readMarkers` gives, for each listed channel the caller has ever read, the timestamp of the newest
-message they had seen. A client compares it with message timestamps to draw a "new" line above the
-first message after it when the channel is opened. Channels never read are absent.
+message they had seen, or the moment just before the message they marked it unread from. A client
+compares it with message timestamps to draw a "new" line above the first message after it when the
+channel is opened. Channels never read are absent.
 
 Mutes and notification levels do not change any of these lists, which describe what is unread, not
 what is worth a notification; see [Channel notification settings](#channel-notification-settings).
@@ -750,6 +751,34 @@ Records that the caller has read a channel, up to its newest message rather than
 so a message arriving in the same moment still counts as new. Returns `204`. Posting a message marks
 its channel read by itself, and a channel with no messages is never unread. `403 channel_forbidden`
 for a locked channel, `404` for one that does not exist.
+
+#### `POST /api/v1/channels/:id/unread` — `ViewChannels`
+
+```json
+{ "messageId": "..." }
+```
+
+Marks a channel unread from one of its messages, as Discord's Alt+click does: the caller's read
+marker is set to one millisecond before that message, back or forward from wherever it was, so the
+channel is unread from the message on and everything before it counts as read. Reading only ever
+moves the marker forward, so this is the one way to move it back. Returns `200` with the caller's read
+state for the channel afterwards, worked out by the same queries as `GET /channels`, so a client can
+apply it without refetching the list:
+
+```json
+{ "channelId": "...", "readAt": "2026-01-01T11:59:59.999Z", "unread": true, "mentionCount": 2 }
+```
+
+`readAt` is what `readMarkers` now holds for the channel. `unread` is whether it is in
+`unreadChannelIds`: the caller's own messages never count, so marking unread from their own last
+message leaves the channel read. `mentionCount` is its `mentionCounts` entry (0 when it has none):
+the mentions and replies aimed at the caller from that message on. The marker is a timestamp, so a
+message sharing the chosen message's millisecond counts as unread too, even one just before it. The
+change is the caller's alone and is not broadcast; their other devices pick it up at their next
+channel-list refresh, and opening the channel, posting in it or `POST /read` marks it read again.
+`403 channel_forbidden` for a locked channel, `404 channel_not_found` for one that does not exist, and
+`404 message_not_found` for a message that does not exist, has been deleted or is in another channel,
+the same answer in all three cases.
 
 #### `POST /api/v1/channels` — `ManageChannels`
 
@@ -1055,13 +1084,17 @@ A deleted message still counts, so deleting your own does not clear the wait.
 
 #### `GET /api/v1/channels/:id/messages` — `ViewChannels`
 
-Returns up to 100 messages in ascending order (oldest first).
+Returns up to 100 messages in ascending order (oldest first). Without a cursor that is the channel's
+newest page.
 
 | Query | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `limit` | integer 1–100 | 50 | |
 | `before` | ISO 8601 string | — | Return messages older than this timestamp |
 | `beforeId` | string | — | Id of the message `before` came from |
+| `after` | ISO 8601 string | — | Return the messages just newer than this timestamp |
+| `afterId` | string | — | Id of the message `after` came from |
+| `around` | message id | — | Return the page centred on this message |
 
 ```json
 { "messages": [ /* Message */ ] }
@@ -1071,6 +1104,25 @@ To page backwards, pass the `createdAt` **and** the `id` of the oldest message y
 `before` and `beforeId`. The id matters: `createdAt` only has millisecond precision, so a burst of
 messages (a bridge history import, for instance) can share a timestamp, and a timestamp-only cursor
 would skip the rest of that millisecond.
+
+To page forwards, from an older stretch back towards the present, pass the `createdAt` and `id` of
+the newest message you have as `after` and `afterId`. The page is the `limit` messages that follow
+it, still oldest first; a page shorter than `limit` reaches the channel's newest message.
+
+`around` opens history at one message however far back it sits, which is what a link to a message
+needs. The page holds the message itself, up to `floor(limit / 2)` messages before it and up to the
+rest of the limit after it (with the default 50: 25 before, the message, 24 after). Neither side
+borrows from the other where the channel begins or ends, so a side that comes back short says the
+page reached the channel's first or newest message; `historyAroundSplit` in `packages/shared` gives
+the two numbers for a limit. Everything else is as for any page: the same order, the same rendering,
+and the same per-viewer fields (`reactions[].me`, `saved`, `poll.myVotes`). A message id that does
+not exist, has been deleted, or belongs to another channel is `404 message_not_found`, the same
+answer in all three cases, so it reveals nothing about other channels.
+
+`before`/`beforeId`, `after`/`afterId` and `around` each name a different page, so combining
+`around` with any cursor, or `after` with `before`, is `400 validation_error`. Like any page, a
+channel the caller cannot see is `403 channel_forbidden` and one that does not exist `404
+channel_not_found`, checked before the message is looked up.
 
 #### `POST /api/v1/channels/:id/messages` — `SendMessages`
 
@@ -2165,6 +2217,32 @@ Changes your own password. `currentPassword` must match, else `403 wrong_passwor
 subject to the registration policy (at least 8 characters). Every **other** session is ended and its
 gateway connection closed (close code `4004`), so an old token stops working at once, while the
 device making the change stays signed in. Returns `{ "ok": true }`.
+
+#### `GET /api/v1/users/@me/changelog` — auth
+
+```json
+{ "seen": "2.9.0" }
+```
+
+The newest release whose "What's new" notes you have been shown, or `null` for none. The notes
+themselves ship with the client, as `CHANGELOG` in
+[`packages/shared/src/changelog.ts`](../packages/shared/src/changelog.ts); this only says how far you
+have read, so a client shows the newest entry when it is newer than `seen` and records it straight
+away. A new account starts at the newest entry, so nobody is greeted with notes about changes from
+before they arrived; an account that existed before this was added starts at `null`. It is private to
+you: nothing is broadcast when it changes.
+
+#### `PUT /api/v1/users/@me/changelog` — auth
+
+```json
+{ "version": "2.9.0" }
+```
+
+Records that you were shown a release's notes. `version` is three dotted numbers with no leading
+zeros (`400 validation_error` otherwise), compared as numbers. It is only stored when it is newer than
+what is stored already, so the marker never moves back: sending an older version is accepted and
+changes nothing. A version newer than the release the server runs is refused with
+`400 unknown_version`. Returns `204` with no body.
 
 #### `PUT /api/v1/users/@me/avatar` — auth
 
@@ -3346,7 +3424,9 @@ Dispatched frames use `op: 0` with a `t` name and `d` payload:
 
 `MEMBER_UPDATE` fires for a member's own profile and avatar changes as well as administrator edits,
 role changes, timeouts, kicks and bans, so a client should refetch the roster (and its own profile,
-when the `userId` is its own) whenever it sees one.
+when the `userId` is its own) whenever it sees one. These events, and the `ROLE_*` ones, tend to
+arrive in runs, one per affected member or role, so a client may wait for a short pause and refetch
+once for the whole run, as the web client does (about 300 ms).
 
 `CHANNEL_DELETE` and `CATEGORY_DELETE` reach every member who could see the channel or category
 before it went. They are also how a member learns they have **lost access**: when an administrator

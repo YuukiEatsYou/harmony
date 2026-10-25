@@ -7,7 +7,7 @@
 //
 // Run with: npm run smoke --workspace @harmony/server
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -18,7 +18,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import sharp from 'sharp';
-import { Permission, HARMONY_VERSION, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
+import { Permission, HARMONY_VERSION, latestChangelog, listEmbeddableUrls, unwrapSuppressedLinks, deriveTheme, relativeLuminance, DEFAULT_ACCENT, DEFAULT_BACKGROUND } from '@harmony/shared';
 import { isPrivateAddress, parseEmbedMetadata } from '../src/embeds/metadata.ts';
 import { guardedFetch, resolvePublicHost } from '../src/embeds/guard.ts';
 import { isDiscordAttachment, isGifPage, isGiphyPage, tweetStatusId, youtubeVideoId } from '../src/embeds/providers.ts';
@@ -53,7 +53,8 @@ import { sanitizeDetail, sanitizeLogText } from '../src/log/sanitize.ts';
 import { createHttpPushSender } from '../src/push/sender.ts';
 
 const serverDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 8791;
+// Overridable so two runs (parallel checkouts, a CI matrix) do not collide on one port.
+const PORT = Number(process.env.HARMONY_SMOKE_PORT) || 8791;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const BASE = `${ORIGIN}/api/v1`;
 const HEARTBEAT_MS = 1000;
@@ -1341,6 +1342,71 @@ try {
     body: { endpoint: '', platform: 'android' },
   });
   check('an empty push endpoint is rejected (400)', pushBad.status === 400, `status ${pushBad.status}`);
+
+  // --- What's new: the release notes a member has seen ---
+  const latestNotes = latestChangelog()?.version ?? null;
+  const getSeen = async (token) => (await req('/users/@me/changelog', { token })).json?.seen;
+  const putSeen = (version, token = bobToken) => req('/users/@me/changelog', { method: 'PUT', token, body: { version } });
+  check('reading the seen notes requires auth (401)', (await req('/users/@me/changelog')).status === 401);
+  check(
+    'recording seen notes requires auth (401)',
+    (await req('/users/@me/changelog', { method: 'PUT', body: { version: '1.0.0' } })).status === 401,
+  );
+  const ownerSeen = await req('/users/@me/changelog', { token: ownerToken });
+  check(
+    'the very first account starts at the latest notes',
+    ownerSeen.status === 200 && latestNotes !== null && ownerSeen.json?.seen === latestNotes,
+    JSON.stringify(ownerSeen.json),
+  );
+  check('an account registered with an invite starts there too', (await getSeen(bobToken)) === latestNotes);
+
+  // An account from before the column existed has seen nothing.
+  const seenDb = new DatabaseSync(join(dataDir, 'harmony.db'));
+  seenDb.prepare('UPDATE users SET changelog_seen = NULL WHERE id = ?').run(bob.json.user.id);
+  seenDb.close();
+  check('an account that has seen no notes reads as null', (await getSeen(bobToken)) === null);
+
+  const seenForward = await putSeen('2.0.10');
+  check('recording seen notes answers 204', seenForward.status === 204 && seenForward.json === null, `status ${seenForward.status}`);
+  check('and is stored', (await getSeen(bobToken)) === '2.0.10');
+  const seenBack = await putSeen('2.0.9');
+  check('an older version is accepted', seenBack.status === 204, `status ${seenBack.status}`);
+  check('but never moves it back, compared as numbers rather than text', (await getSeen(bobToken)) === '2.0.10');
+  await putSeen(HARMONY_VERSION);
+  check('a newer version moves it forward', (await getSeen(bobToken)) === HARMONY_VERSION);
+
+  const [runningMajor] = HARMONY_VERSION.split('.');
+  const unreleased = await putSeen(`${Number(runningMajor) + 1}.0.0`);
+  check(
+    'a version newer than this server runs is refused (400)',
+    unreleased.status === 400 && unreleased.json?.error?.code === 'unknown_version',
+    `${unreleased.status} ${JSON.stringify(unreleased.json)}`,
+  );
+  check('and changes nothing', (await getSeen(bobToken)) === HARMONY_VERSION);
+  for (const bad of ['2.9', 'v2.9.0', 'latest', '']) {
+    const refused = await putSeen(bad);
+    check(
+      `a malformed version (${JSON.stringify(bad)}) is refused (400)`,
+      refused.status === 400 && refused.json?.error?.code === 'validation_error',
+      `status ${refused.status}`,
+    );
+  }
+  check(
+    'a request with no version is refused (400)',
+    (await req('/users/@me/changelog', { method: 'PUT', token: bobToken, body: {} })).status === 400,
+  );
+  check("one member's notes are their own", (await getSeen(ownerToken)) === latestNotes);
+
+  // The migration leaves every account that already exists at null, which is
+  // how everyone sees the notes of the release that brings this in, once.
+  const preChangelog = new DatabaseSync(':memory:');
+  preChangelog.exec("CREATE TABLE users (id TEXT PRIMARY KEY); INSERT INTO users (id) VALUES ('old-account');");
+  migrations.find((migration) => migration.name === 'changelog_seen').up(preChangelog);
+  check(
+    'an account from before the migration starts with nothing seen',
+    preChangelog.prepare("SELECT changelog_seen FROM users WHERE id = 'old-account'").get()?.changelog_seen === null,
+  );
+  preChangelog.close();
 
   // --- Push delivery ---
   // A tiny receiver stands in for the distributor the install registered with: the
@@ -2885,10 +2951,36 @@ try {
     body: '',
   });
   check('an empty JSON body is a 400, not a 500', emptyJson.status === 400, `status ${emptyJson.status}`);
-  const hugeJson = await fetch(`${BASE}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'x'.repeat(2 * 1024 * 1024) }),
+  // The server refuses an oversized body from its declared length, before reading
+  // any of it, and closes the connection. Uploading the body anyway raced that
+  // close: the write could fail with EPIPE before the answer was read, which made
+  // this check fail at random. So only the headers are sent, declaring a body
+  // over the limit, and the answer is awaited; a server that waited for the body
+  // instead would time out here and fail the check.
+  const hugeJson = await new Promise((resolveResponse, rejectResponse) => {
+    const outgoing = httpRequest(`${BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': String(2 * 1024 * 1024) },
+    });
+    const timer = setTimeout(() => {
+      outgoing.destroy();
+      rejectResponse(new Error('no answer to an oversized body within 5s'));
+    }, 5000);
+    outgoing.on('response', (response) => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => (text += chunk));
+      response.on('end', () => {
+        clearTimeout(timer);
+        outgoing.destroy();
+        resolveResponse({ status: response.statusCode, json: async () => JSON.parse(text) });
+      });
+    });
+    outgoing.on('error', (error) => {
+      clearTimeout(timer);
+      rejectResponse(error);
+    });
+    outgoing.flushHeaders();
   });
   const hugeJsonBody = await hugeJson.json();
   check(
@@ -5385,6 +5477,7 @@ try {
   check('its username is made valid from the Discord name', freshRow.username === 'NewPerson');
   check('it carries the Discord id and name', freshRow.discord_id === '700000000000000001' && freshRow.display_name === 'New P');
   check('a Discord sign-up is never the owner', freshRow.is_owner === 0);
+  check('a Discord sign-up starts at the latest notes', freshRow.changelog_seen === latestChangelog()?.version);
 
   const again = discordAuth.signInWithDiscord(discordIdentity('700000000000000001', 'whatever'), null, null);
   check('signing in again finds the same account', again.created === false && again.auth.user.id === fresh.auth.user.id);
@@ -5425,6 +5518,11 @@ try {
         adopted.auth.user.id,
   );
   check('and keeps the name the bridge gave it', adopted.auth.user.displayName === 'Bridge Name');
+  check(
+    'and starts at the latest notes, like any new account',
+    ghostStore.sqlite.prepare('SELECT changelog_seen FROM users WHERE id = ?').get(adopted.auth.user.id)?.changelog_seen ===
+      latestChangelog()?.version,
+  );
 
   // A ban on the stand-in follows the person.
   insertGhostUser(ghostStore.sqlite, {
@@ -6112,6 +6210,296 @@ try {
     await req(`/channels/${countsLocked.json.id}`, { method: 'DELETE', token: ownerToken });
     await req(`/roles/${countsRole.json.id}`, { method: 'DELETE', token: ownerToken });
     await req(`/channels/${countsRoom}`, { method: 'DELETE', token: ownerToken });
+  }
+
+  // --- History around a message, and after one ---
+  // A link to a message however far back opens with one request for the page
+  // centred on it, and a reader carries on towards the present with the page
+  // after the newest one they hold.
+  {
+    const aroundRoom = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'aroundroom' } }))
+      .json.id;
+    const otherRoom = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'aroundother' } }))
+      .json.id;
+    const posted = [];
+    for (let i = 0; i < 30; i++) posted.push((await postIn(aroundRoom, ownerToken, { content: `around ${i}` })).json);
+    const elsewhere = (await postIn(otherRoom, ownerToken, { content: 'not in aroundroom' })).json;
+    const historyOf = (query, token = bobToken, channelId = aroundRoom) =>
+      req(`/channels/${channelId}/messages?${new URLSearchParams(query)}`, { token });
+    const numbers = (res) => (res.json?.messages ?? []).map((message) => message.content.replace('around ', '')).join(',');
+    const ids = (res) => (res.json?.messages ?? []).map((message) => message.id).join(',');
+    const range = (from, to) => Array.from({ length: to - from + 1 }, (_, k) => String(from + k)).join(',');
+
+    const centred = await historyOf({ around: posted[15].id, limit: '10' });
+    check(
+      'a page around a message is centred on it: five before, it, four after',
+      centred.status === 200 && numbers(centred) === range(10, 19),
+      numbers(centred),
+    );
+    check('the page around a message holds no more than the limit', centred.json?.messages?.length === 10);
+    check(
+      'the default page around a message reaches as far as the channel allows',
+      numbers(await historyOf({ around: posted[15].id })) === range(0, 29),
+    );
+    check('a page of one around a message is the message itself', numbers(await historyOf({ around: posted[15].id, limit: '1' })) === '15');
+    const nearOldest = await historyOf({ around: posted[2].id, limit: '10' });
+    check(
+      'near the oldest message the older side comes back short and the newer side does not borrow',
+      numbers(nearOldest) === range(0, 6),
+      numbers(nearOldest),
+    );
+    const nearNewest = await historyOf({ around: posted[28].id, limit: '10' });
+    check(
+      'near the newest message the newer side comes back short',
+      numbers(nearNewest) === range(23, 29),
+      numbers(nearNewest),
+    );
+    check(
+      'a page around a message is in the same order as an ordinary page',
+      ids(nearNewest) === ids(await historyOf({ limit: '7' })),
+    );
+
+    // The same viewer-specific fields as any page: a reaction of their own, a
+    // save, and a poll vote.
+    await req(`/messages/${posted[15].id}/reactions`, { method: 'POST', token: bobToken, body: { emoji: '👍' } });
+    await req(`/users/@me/saved/${posted[15].id}`, { method: 'PUT', token: bobToken });
+    const aroundPoll = (
+      await req(`/channels/${aroundRoom}/polls`, {
+        method: 'POST',
+        token: ownerToken,
+        body: { question: 'Around or about?', options: [{ text: 'Around' }, { text: 'About' }], allowMultiple: false, durationHours: 24 },
+      })
+    ).json;
+    await req(`/messages/${aroundPoll.id}/poll/votes`, {
+      method: 'PUT',
+      token: bobToken,
+      body: { optionIds: [aroundPoll.poll.options[0].id] },
+    });
+    const forBob = (await historyOf({ around: posted[15].id, limit: '3' })).json?.messages?.[1];
+    check(
+      "a page around a message marks the viewer's own reaction and save",
+      forBob?.id === posted[15].id && forBob.reactions.some((r) => r.emoji === '👍' && r.me === true) && forBob.saved === true,
+    );
+    const forOwner = (await historyOf({ around: posted[15].id, limit: '3' }, ownerToken)).json?.messages?.[1];
+    check(
+      'and not for anyone else',
+      forOwner?.reactions?.some((r) => r.emoji === '👍' && r.me === false) && forOwner.saved === false,
+    );
+    const pollForBob = (await historyOf({ around: aroundPoll.id, limit: '3' })).json?.messages?.at(-1);
+    check(
+      "a page around a poll carries the viewer's own vote",
+      pollForBob?.id === aroundPoll.id && pollForBob.poll?.myVotes?.[0] === aroundPoll.poll.options[0].id,
+    );
+
+    // A message that is not this channel's own answers the same whatever the reason.
+    const missing = await historyOf({ around: 'no-such-message' });
+    const foreign = await historyOf({ around: elsewhere.id });
+    check('a page around an unknown message is 404', missing.status === 404 && missing.json?.error?.code === 'message_not_found');
+    check(
+      "a page around another channel's message is the same 404",
+      foreign.status === 404 && foreign.json?.error?.code === 'message_not_found' && foreign.json?.error?.message === missing.json?.error?.message,
+    );
+    const doomed = (await postIn(aroundRoom, ownerToken, { content: 'around and gone' })).json;
+    await req(`/messages/${doomed.id}`, { method: 'DELETE', token: ownerToken });
+    check('a page around a deleted message is the same 404', (await historyOf({ around: doomed.id })).status === 404);
+    const mixed = await historyOf({ around: posted[15].id, before: posted[20].createdAt, beforeId: posted[20].id });
+    check('around cannot be mixed with a before cursor (400)', mixed.status === 400 && mixed.json?.error?.code === 'validation_error');
+    check(
+      'nor with an after cursor (400)',
+      (await historyOf({ around: posted[15].id, after: posted[3].createdAt })).status === 400,
+    );
+    check(
+      'nor beforeId alone (400)',
+      (await historyOf({ around: posted[15].id, beforeId: posted[20].id })).status === 400,
+    );
+    check('an empty around is refused (400)', (await historyOf({ around: '' })).status === 400);
+
+    // Paging forwards from an older stretch.
+    const forward = await historyOf({ after: posted[9].createdAt, afterId: posted[9].id, limit: '5' });
+    check('the page after a message is the next ones, oldest first', numbers(forward) === range(10, 14), numbers(forward));
+    const lastForward = await historyOf({ after: posted[26].createdAt, afterId: posted[26].id, limit: '5' });
+    check(
+      'the page after a message near the end comes back short, reaching the newest',
+      numbers(lastForward) === '27,28,29,Around or about?',
+      numbers(lastForward),
+    );
+    check(
+      'after cannot be mixed with before (400)',
+      (await historyOf({ after: posted[9].createdAt, before: posted[20].createdAt })).status === 400,
+    );
+
+    // A locked channel is answered exactly as its history already is.
+    const aroundRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Around' } });
+    const aroundLocked = (
+      await req('/channels', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: 'aroundlocked', requiredRoleId: aroundRole.json.id },
+      })
+    ).json.id;
+    const lockedMessage = (await postIn(aroundLocked, ownerToken, { content: 'behind the lock' })).json;
+    const lockedHistory = await historyOf({}, bobToken, aroundLocked);
+    const lockedAround = await historyOf({ around: lockedMessage.id }, bobToken, aroundLocked);
+    const lockedAroundUnknown = await historyOf({ around: 'no-such-message' }, bobToken, aroundLocked);
+    check(
+      'a page around a message in a locked channel is refused like its history (403)',
+      lockedHistory.status === 403 &&
+        lockedAround.status === 403 &&
+        lockedAround.json?.error?.code === lockedHistory.json?.error?.code,
+    );
+    check('and says nothing about whether the message exists', lockedAroundUnknown.status === 403);
+    check(
+      'an administrator can open a locked channel around a message',
+      numbers(await historyOf({ around: lockedMessage.id }, ownerToken, aroundLocked)) === 'behind the lock',
+    );
+
+    await req(`/channels/${aroundLocked}`, { method: 'DELETE', token: ownerToken });
+    await req(`/roles/${aroundRole.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${otherRoom}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${aroundRoom}`, { method: 'DELETE', token: ownerToken });
+  }
+
+  // --- Marking a channel unread from a message ---
+  // The read marker moves back to just before the message, and the answer is
+  // exactly what the channel list says afterwards.
+  {
+    const unreadRoom = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'unreadroom' } }))
+      .json.id;
+    const otherRoom = (await req('/channels', { method: 'POST', token: ownerToken, body: { name: 'unreadother' } }))
+      .json.id;
+    const m0 = (await postIn(unreadRoom, ownerToken, { content: 'first' })).json;
+    const m1 = (await postIn(unreadRoom, ownerToken, { content: '@bob early mention' })).json;
+    const m2 = (await postIn(unreadRoom, ownerToken, { content: 'nothing for bob' })).json;
+    const m3 = (await postIn(unreadRoom, bobToken, { content: "bob's own" })).json;
+    const m4 = (await postIn(unreadRoom, ownerToken, { content: '@bob later mention' })).json;
+    const m5 = (await postIn(unreadRoom, ownerToken, { content: 'a reply to bob', replyToId: m3.id })).json;
+    const m6 = (await postIn(unreadRoom, ownerToken, { content: 'the end' })).json;
+    const elsewhere = (await postIn(otherRoom, ownerToken, { content: 'not in unreadroom' })).json;
+    await req(`/channels/${unreadRoom}/read`, { method: 'POST', token: bobToken });
+
+    const markUnread = (messageId, token = bobToken, channelId = unreadRoom) =>
+      req(`/channels/${channelId}/unread`, { method: 'POST', token, body: { messageId } });
+    const listOf = async (token = bobToken) => (await channelsFor(token)).json;
+    const before = (message) => new Date(Date.parse(message.createdAt) - 1).toISOString();
+    /** Whether a mark-unread answer is what the channel list now says. */
+    const agrees = (answer, list) =>
+      answer.readAt === list.readMarkers[unreadRoom] &&
+      answer.unread === list.unreadChannelIds.includes(unreadRoom) &&
+      answer.mentionCount === (list.mentionCounts[unreadRoom] ?? 0);
+
+    check('the channel starts read for bob', !(await listOf()).unreadChannelIds.includes(unreadRoom));
+    const fromM2 = await markUnread(m2.id);
+    check(
+      'marking unread from a message moves the marker to just before it',
+      fromM2.status === 200 && fromM2.json?.channelId === unreadRoom && fromM2.json?.readAt === before(m2),
+      JSON.stringify(fromM2.json),
+    );
+    check(
+      'the channel is unread, counting the mention and the reply from that message on',
+      fromM2.json?.unread === true && fromM2.json?.mentionCount === 2,
+      JSON.stringify(fromM2.json),
+    );
+    let list = await listOf();
+    check('and the channel list says the same', agrees(fromM2.json, list), JSON.stringify(list.readMarkers));
+    check(
+      'the inbox agrees about which mentions are unread',
+      (await inboxFor(bobToken)).json.mentions
+        .filter((entry) => entry.message.channelId === unreadRoom)
+        .every((entry) => entry.unread === (entry.message.id !== m1.id)),
+    );
+
+    const fromM1 = await markUnread(m1.id);
+    check('marking further back counts the earlier mention too', fromM1.json?.mentionCount === 3);
+    check('and the list agrees', agrees(fromM1.json, await listOf()));
+
+    const fromM6 = await markUnread(m6.id);
+    check(
+      'marking unread from a later message moves the marker forward',
+      fromM6.json?.readAt === before(m6) && fromM6.json?.unread === true && fromM6.json?.mentionCount === 0,
+      JSON.stringify(fromM6.json),
+    );
+    check('and the list agrees', agrees(fromM6.json, await listOf()));
+
+    // Bob's own messages never count as unread for him.
+    const fromOwn = await markUnread(m3.id);
+    check(
+      'marking unread from your own message counts what others wrote after it',
+      fromOwn.json?.unread === true && fromOwn.json?.mentionCount === 2,
+      JSON.stringify(fromOwn.json),
+    );
+    const m7 = (await postIn(unreadRoom, bobToken, { content: "bob's last word" })).json;
+    const fromOwnLast = await markUnread(m7.id);
+    check(
+      'marking unread from your own last message leaves the channel read',
+      fromOwnLast.status === 200 && fromOwnLast.json?.unread === false && fromOwnLast.json?.mentionCount === 0,
+      JSON.stringify(fromOwnLast.json),
+    );
+    list = await listOf();
+    check('and the list agrees, marker and all', agrees(fromOwnLast.json, list) && list.readMarkers[unreadRoom] === before(m7));
+    check('it is the caller alone whose marker moved', (await listOf(ownerToken)).readMarkers[unreadRoom] !== before(m7));
+
+    await markUnread(m4.id);
+    await req(`/channels/${unreadRoom}/read`, { method: 'POST', token: bobToken });
+    list = await listOf();
+    check(
+      'reading the channel afterwards reads it again',
+      !list.unreadChannelIds.includes(unreadRoom) && list.mentionCounts[unreadRoom] === undefined,
+    );
+    await markUnread(m4.id);
+    await postIn(unreadRoom, bobToken, { content: 'bob writes back' });
+    check('and so does posting in it', !(await listOf()).unreadChannelIds.includes(unreadRoom));
+
+    // Refusals.
+    const unknown = await markUnread('no-such-message');
+    const foreign = await markUnread(elsewhere.id);
+    check('an unknown message is 404', unknown.status === 404 && unknown.json?.error?.code === 'message_not_found');
+    check(
+      "another channel's message is the same 404",
+      foreign.status === 404 &&
+        foreign.json?.error?.code === 'message_not_found' &&
+        foreign.json?.error?.message === unknown.json?.error?.message,
+    );
+    await req(`/messages/${m0.id}`, { method: 'DELETE', token: ownerToken });
+    check('a deleted message is the same 404', (await markUnread(m0.id)).status === 404);
+    check(
+      'a channel that does not exist is 404',
+      (await markUnread(m2.id, bobToken, 'no-such-channel')).json?.error?.code === 'channel_not_found',
+    );
+    check(
+      'a missing message id is refused (400)',
+      (await req(`/channels/${unreadRoom}/unread`, { method: 'POST', token: bobToken, body: {} })).status === 400,
+    );
+    check(
+      'marking unread needs a session (401)',
+      (await req(`/channels/${unreadRoom}/unread`, { method: 'POST', body: { messageId: m2.id } })).status === 401,
+    );
+
+    const unreadRole = await req('/roles', { method: 'POST', token: ownerToken, body: { name: 'Unread' } });
+    const unreadLocked = (
+      await req('/channels', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: 'unreadlocked', requiredRoleId: unreadRole.json.id },
+      })
+    ).json.id;
+    const lockedMessage = (await postIn(unreadLocked, ownerToken, { content: '@bob behind the lock' })).json;
+    check(
+      'a locked channel is refused as marking it read is (403)',
+      (await markUnread(lockedMessage.id, bobToken, unreadLocked)).json?.error?.code === 'channel_forbidden',
+    );
+    check(
+      'and says nothing about whether the message exists',
+      (await markUnread('no-such-message', bobToken, unreadLocked)).status === 403,
+    );
+    check(
+      'and leaves no read marker behind',
+      (await listOf()).readMarkers[unreadLocked] === undefined,
+    );
+
+    await req(`/channels/${unreadLocked}`, { method: 'DELETE', token: ownerToken });
+    await req(`/roles/${unreadRole.json.id}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${otherRoom}`, { method: 'DELETE', token: ownerToken });
+    await req(`/channels/${unreadRoom}`, { method: 'DELETE', token: ownerToken });
   }
 
   // --- Mute and notification settings ---

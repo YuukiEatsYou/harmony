@@ -18,6 +18,17 @@
     if (hoverCapable()) profileCard.show(user, element);
   }
 
+  /**
+   * Opens a mentioned channel. The same text is drawn in the saved panel too,
+   * and a jump from a panel closes it, as its own "jump" buttons do, rather than
+   * changing channel out of sight behind it.
+   */
+  function openChannel(channelId: string): void {
+    ui.closeAll();
+    // A link to the channel already open would only reload it and lose the place.
+    if (channelId !== chat.activeChannelId) void chat.selectChannel(channelId);
+  }
+
   /** Opens the full profile viewer: the click action on a mentioned member. */
   function openViewer(user: User): void {
     profileCard.hide();
@@ -82,7 +93,7 @@
           type="button"
           class="channel-mention"
           title={`#${segment.channel.name}`}
-          onclick={() => chat.selectChannel(segment.channel.id)}
+          onclick={() => openChannel(segment.channel.id)}
         >
           #{segment.channel.name}
         </button>

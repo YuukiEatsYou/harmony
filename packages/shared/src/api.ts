@@ -85,6 +85,21 @@ export interface ChannelListResponse {
   defaultChannelId: string | null;
 }
 
+/**
+ * Response for `POST /api/v1/channels/:id/unread`: the member's read state for
+ * that channel once the marker has moved, worked out by the same queries as the
+ * channel list, so a client can take it as is rather than refetching the list.
+ */
+export interface ChannelUnreadResponse {
+  channelId: string;
+  /** The new read marker, just before the message: what `readMarkers` now says for the channel. */
+  readAt: string;
+  /** Whether the channel is now unread, as `unreadChannelIds` would say. */
+  unread: boolean;
+  /** Its unread mentions and replies, as `mentionCounts` would count them; 0 for none. */
+  mentionCount: number;
+}
+
 /** Response for `GET /api/v1/users/@me/channel-settings`. */
 export interface ChannelSettingsListResponse {
   /**

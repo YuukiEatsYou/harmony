@@ -56,7 +56,10 @@
   }
 
   function onWindowKeydown(event: KeyboardEvent): void {
-    if (open && event.key === 'Escape') open = false;
+    if (!open || event.key !== 'Escape') return;
+    // Used up, so the app-wide Escape does not also act on the same press.
+    event.preventDefault();
+    open = false;
   }
 </script>
 

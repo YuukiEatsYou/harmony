@@ -73,6 +73,30 @@ export function newMessagesLabel(count: number, more: boolean, since: string, fo
   return `${amount} ${noun} since ${formatTime(since)}`;
 }
 
+/**
+ * The unread list and mention counts once the server has said where one channel
+ * stands, as marking it unread from a message answers: the channel is in the
+ * list exactly when it is unread, and its count is set, or dropped at zero.
+ * Every other channel is left as it was.
+ */
+export function withChannelReadState(
+  unreadChannelIds: readonly string[],
+  mentionCounts: Readonly<Record<string, number>>,
+  state: { channelId: string; unread: boolean; mentionCount: number },
+): { unreadChannelIds: string[]; mentionCounts: Record<string, number> } {
+  const { channelId } = state;
+  const listed = unreadChannelIds.includes(channelId);
+  const ids = state.unread
+    ? listed
+      ? [...unreadChannelIds]
+      : [...unreadChannelIds, channelId]
+    : unreadChannelIds.filter((id) => id !== channelId);
+  const counts = { ...mentionCounts };
+  if (state.mentionCount > 0) counts[channelId] = state.mentionCount;
+  else delete counts[channelId];
+  return { unreadChannelIds: ids, mentionCounts: counts };
+}
+
 /** The number on a red mention pill, capped the way Discord caps it. */
 export function pillCount(count: number): string {
   return count > 99 ? '99+' : String(count);

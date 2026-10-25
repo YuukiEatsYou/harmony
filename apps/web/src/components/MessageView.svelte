@@ -1,13 +1,17 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { Permission, hasPermission, isGifContentType, isGifLinkUrl, type Attachment, type LinkEmbed, type Message, type User } from '@harmony/shared';
   import { ApiError } from '../lib/api';
   import { chat } from '../lib/chat.svelte';
   import { focusComposer } from '../lib/composer-field';
+  import { formatForKey, toggleFormat } from '../lib/composer-format';
+  import { messageLink } from '../lib/launch-params';
+  import { messageEdit } from '../lib/message-edit.svelte';
   import { avatarUrl, initial } from '../lib/avatar';
   import { inlineSegmentsOf, parseMessage } from '../lib/message-text';
   import { firstUnreadIndex, newMessageCount, newMessagesLabel } from '../lib/unread';
   import { groupedRows } from '../lib/message-grouping';
+  import { dayDividerLabel, messageTimeLabel, messageTimeTitle, withDayStarts } from '../lib/message-time';
   import { emojis } from '../lib/emojis.svelte';
   import { gifs } from '../lib/gifs.svelte';
   import LinkedGif from './LinkedGif.svelte';
@@ -57,9 +61,9 @@
   let watchedChannelId: string | null = null;
   /** The message whose reaction picker is open, if any. */
   let pickerFor = $state<string | null>(null);
-  /** The message currently being edited, and its draft text. */
-  let editingId = $state<string | null>(null);
-  let editValue = $state('');
+  /** The message whose "Copy link" just worked, for its moment of saying so. */
+  let copiedId = $state<string | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
   /** The message whose delete is awaiting confirmation. */
   let confirmingDeleteId = $state<string | null>(null);
   let actionError = $state<string | null>(null);
@@ -77,9 +81,10 @@
   /**
    * Messages paired with whether they continue the previous one, computed in one
    * place rather than per row so the flag cannot go stale as messages arrive.
-   * The message the "new" line sits above starts a fresh group, header and all.
+   * The message the "new" line sits above starts a fresh group, header and all,
+   * and so does the first message of each day, under its date line.
    */
-  const rows = $derived.by(() => groupedRows(chat.messages, newDividerId));
+  const rows = $derived.by(() => withDayStarts(groupedRows(chat.messages, newDividerId), !chat.hasMore));
 
   // ---- The "new" line and the bar that points up at it ----
 
@@ -238,21 +243,102 @@
 
   function startEdit(message: Message): void {
     actionError = null;
-    editingId = message.id;
-    editValue = message.content;
+    messageEdit.start(message);
   }
 
-  async function saveEdit(event: SubmitEvent, message: Message): Promise<void> {
-    event.preventDefault();
-    const content = editValue.trim();
+  /** Saves the edit box; a box emptied of everything is not saved, as Save is disabled then too. */
+  async function saveEdit(message: Message): Promise<void> {
+    const content = messageEdit.draft.trim();
     if (!content) return;
     actionError = null;
     try {
       await chat.editMessage(message.id, content);
-      editingId = null;
+      // Another edit may have been started meanwhile; only this one is over.
+      if (messageEdit.id === message.id) finishEdit();
     } catch (cause) {
       actionError = cause instanceof ApiError ? cause.message : String(cause);
     }
+  }
+
+  /**
+   * Closes the edit box and hands the caret back to the message box, where the
+   * member was most likely typing before, and where the Up arrow started it.
+   */
+  function finishEdit(): void {
+    messageEdit.stop();
+    focusComposer();
+  }
+
+  /**
+   * Enter saves and Shift+Enter starts a new line, as in the message box, and
+   * Escape cancels. A key that finishes an IME composition is left to the IME, by
+   * the same test the composer uses. Ctrl+B, Ctrl+I and Ctrl+U format the
+   * selection here too.
+   */
+  async function onEditKeydown(event: KeyboardEvent, message: Message): Promise<void> {
+    const box = event.currentTarget as HTMLTextAreaElement;
+    const format = formatForKey(event);
+    if (format && !event.isComposing) {
+      event.preventDefault();
+      const next = toggleFormat({ text: box.value, start: box.selectionStart, end: box.selectionEnd }, format);
+      messageEdit.draft = next.text;
+      await tick();
+      box.setSelectionRange(next.start, next.end);
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      void saveEdit(message);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finishEdit();
+    }
+  }
+
+  /**
+   * The edit box opens ready to type in: focused, with the caret after the last
+   * word, and scrolled into view, which matters when the Up arrow opened it for
+   * a message further up than the screen shows. One drawn again by a reload of
+   * the list takes focus back only if nothing else has it.
+   */
+  function focusEditBox(box: HTMLTextAreaElement): void {
+    const idle = document.activeElement === null || document.activeElement === document.body;
+    if (!messageEdit.takeFresh() && !idle) return;
+    box.focus({ preventScroll: true });
+    box.setSelectionRange(box.value.length, box.value.length);
+    box.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** Discord's "Mark unread": the channel is unread again from this message on. */
+  async function markUnread(message: Message): Promise<void> {
+    actionError = null;
+    try {
+      await chat.markUnreadFrom(message);
+    } catch (cause) {
+      actionError = cause instanceof ApiError ? cause.message : String(cause);
+    }
+  }
+
+  /** Copies the link that opens this message, the same one a notification tap follows. */
+  async function copyLink(message: Message): Promise<void> {
+    const link = messageLink(window.location.origin, message.channelId, message.id);
+    actionError = null;
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      // Clipboard access needs a secure origin and the browser's consent; when it
+      // is refused, the link itself is still worth having.
+      actionError = `Your browser did not allow copying. The link is ${link}`;
+      return;
+    }
+    copiedId = message.id;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      copiedId = null;
+      copiedTimer = null;
+    }, 1500);
   }
 
   async function remove(message: Message): Promise<void> {
@@ -272,6 +358,8 @@
     atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 60;
     checkNewSeen();
     if (element.scrollTop < 80) void loadOlder();
+    // An older stretch reads on towards the present as its end comes into view.
+    if (chat.detached && element.scrollHeight - element.scrollTop - element.clientHeight < 80) void loadNewer();
   }
 
   /**
@@ -282,14 +370,21 @@
    * nothing here.
    */
   function onMessageClick(event: MouseEvent, message: Message): void {
-    // A device with hover already shows the actions on hover.
-    if (window.matchMedia('(hover: hover)').matches) return;
-
     const target = event.target as Element | null;
     // The emoji picker is its own surface inside the row, with a search field and
     // stretches of padding between the emoji; a tap on any of it belongs to the
-    // picker, not to the message.
-    if (target?.closest('a, button, .spoiler, .profile-trigger, .emoji-picker')) return;
+    // picker, not to the message. The same goes for the edit box.
+    if (target?.closest('a, button, .spoiler, .profile-trigger, .emoji-picker, .edit-form')) return;
+
+    // Alt+click marks the channel unread from this message, as on Discord.
+    if (event.altKey) {
+      event.preventDefault();
+      void markUnread(message);
+      return;
+    }
+
+    // A device with hover already shows the actions on hover.
+    if (window.matchMedia('(hover: hover)').matches) return;
 
     // A tap while text is selected just clears the selection.
     const selection = window.getSelection();
@@ -314,10 +409,21 @@
     return () => window.removeEventListener('pointerdown', onPointerDown, true);
   });
 
-  // A channel change leaves any open menu pointing at the wrong list.
+  // A channel change leaves any open menu, or edit box, pointing at the wrong list.
   $effect(() => {
     void chat.activeChannelId;
     actionsFor = null;
+    untrack(() => messageEdit.stop());
+  });
+
+  // So does a jump within the channel, or a delete, that takes the message being
+  // edited out of the list; left open, its box would come back with the message
+  // later and catch what was being typed elsewhere.
+  $effect(() => {
+    const id = messageEdit.id;
+    if (id && !chat.loading && !chat.messages.some((message) => message.id === id)) {
+      untrack(() => messageEdit.stop());
+    }
   });
 
   /** Loads an older page while holding the messages already on screen in place. */
@@ -333,6 +439,20 @@
     // The prepend made the list taller; keep the viewport over the same message.
     const grown = element.scrollHeight - previousHeight;
     if (grown > 0) element.scrollTop = previousTop + grown;
+  }
+
+  /**
+   * Loads the page after an older stretch. It lands below the reader, so the
+   * viewport stays over the same messages by itself; the view only has to stop
+   * believing it is at the bottom, or the next row to settle would pin it to the
+   * end of a page nobody has read yet.
+   */
+  async function loadNewer(): Promise<void> {
+    const element = scroller;
+    if (!element) return;
+    await chat.loadNewer();
+    await tick();
+    atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 60;
   }
 
   let sizeObserver: ResizeObserver | null = null;
@@ -367,25 +487,34 @@
     };
   }
 
+  /** Whether the list was an older stretch the last time it changed. */
+  let wasDetached = false;
+
   // Follow the newest message, but never yank the view when older pages load.
   $effect(() => {
     const element = scroller;
     const channelId = chat.activeChannelId;
     const newest = chat.messages.at(-1)?.id ?? null;
     const oldest = chat.messages[0]?.id ?? null;
+    const detached = chat.detached;
 
     if (channelId !== watchedChannelId) {
       watchedChannelId = channelId;
       firstId = null;
       lastId = null;
+      wasDetached = false;
     }
 
     const prepended = firstId !== null && oldest !== firstId;
     const previousNewest = lastId;
+    const previouslyDetached = wasDetached;
     firstId = oldest;
     lastId = newest;
+    wasDetached = detached;
 
-    if (!element || prepended) return;
+    // The end of an older stretch is not the present, and a page added to it,
+    // even the one that rejoins the present, is read from where the reader is.
+    if (!element || prepended || previouslyDetached) return;
     if (newest !== null && newest !== previousNewest && (previousNewest === null || atBottom)) {
       element.scrollTo({ top: element.scrollHeight });
     }
@@ -462,6 +591,12 @@
         (segment) => segment.type === 'mention' && segment.user.id === myId,
       )}
       {@const picture = avatarUrl(message.author)}
+      {@const sentAt = Date.parse(message.createdAt)}
+      {#if row.dayStart}
+        <div class="day-divider" role="separator" aria-label={dayDividerLabel(sentAt)}>
+          <span>{dayDividerLabel(sentAt)}</span>
+        </div>
+      {/if}
       {#if message.id === newDividerId}
         <div class="new-divider" role="separator" aria-label="New messages" bind:this={newDivider}>
           <span>New</span>
@@ -486,7 +621,9 @@
         onclick={(event) => onMessageClick(event, message)}
       >
         {#if grouped}
-          <div class="avatar-spacer" aria-hidden="true"><span class="gutter-time">{formatTime(message.createdAt)}</span></div>
+          <div class="avatar-spacer" aria-hidden="true">
+            <span class="gutter-time" title={messageTimeTitle(sentAt)}>{formatTime(message.createdAt)}</span>
+          </div>
         {:else if picture}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
           <img
@@ -514,12 +651,27 @@
         {/if}
         <div class="body">
           {#if message.replyTo}
-            <div class="reply-ref" class:deleted={message.replyTo.deleted}>
-              <span class="reply-author">{replyAuthorName(message)}</span>
-              {#if replySnippet(message)}
+            {@const replyTo = message.replyTo}
+            {#if replyTo.deleted}
+              <div class="reply-ref deleted">
+                <span class="reply-author">{replyAuthorName(message)}</span>
                 <span class="reply-text">{replySnippet(message)}</span>
-              {/if}
-            </div>
+              </div>
+            {:else}
+              <!-- The quote is the way to the message it answers, wherever in history that is. -->
+              <button
+                type="button"
+                class="reply-ref"
+                aria-label={`Jump to the replied message from ${replyAuthorName(message)}`}
+                title="Jump to the replied message"
+                onclick={() => void chat.revealMessage(replyTo.id)}
+              >
+                <span class="reply-author">{replyAuthorName(message)}</span>
+                {#if replySnippet(message)}
+                  <span class="reply-text">{replySnippet(message)}</span>
+                {/if}
+              </button>
+            {/if}
           {/if}
 
           {#if !grouped}
@@ -543,7 +695,7 @@
               {#if message.author?.accountType === 'bot'}
                 <BotBadge size={13} />
               {/if}
-              <time>{formatTime(message.createdAt)}</time>
+              <time datetime={message.createdAt} title={messageTimeTitle(sentAt)}>{messageTimeLabel(sentAt)}</time>
               {#if message.editedAt}<EditHistory {message} />{/if}
               {#if message.pinnedAt}<span class="pin-marker" title="Pinned"><Icon name="pin" size={13} /></span>{/if}
             </div>
@@ -552,12 +704,27 @@
           {/if}
           {#if grouped && message.pinnedAt}<span class="pin-marker grouped" title="Pinned"><Icon name="pin" size={13} /></span>{/if}
 
-          {#if editingId === message.id}
-            <form class="edit-form" onsubmit={(event) => saveEdit(event, message)}>
-              <textarea class="edit-box" bind:value={editValue} rows="3" aria-label="Edit message"></textarea>
+          {#if messageEdit.id === message.id}
+            <form
+              class="edit-form"
+              onsubmit={(event) => {
+                event.preventDefault();
+                void saveEdit(message);
+              }}
+            >
+              <textarea
+                class="edit-box"
+                bind:value={messageEdit.draft}
+                rows="3"
+                aria-label="Edit message"
+                aria-describedby="edit-hint-{message.id}"
+                use:focusEditBox
+                onkeydown={(event) => onEditKeydown(event, message)}
+              ></textarea>
+              <p id="edit-hint-{message.id}" class="edit-hint">Enter to save, Shift+Enter for a new line, Escape to cancel</p>
               <div class="edit-actions">
-                <button type="submit" disabled={!editValue.trim()}>Save</button>
-                <button type="button" class="ghost" onclick={() => (editingId = null)}>Cancel</button>
+                <button type="submit" disabled={!messageEdit.draft.trim()}>Save</button>
+                <button type="button" class="ghost" onclick={finishEdit}>Cancel</button>
               </div>
             </form>
           {:else}
@@ -743,6 +910,22 @@
           >
             React
           </button>
+          <button
+            type="button"
+            title="Copy a link that opens this message"
+            onclick={() => {
+              void copyLink(message);
+              actionsFor = null;
+            }}>{copiedId === message.id ? 'Copied' : 'Copy link'}</button
+          >
+          <button
+            type="button"
+            title="Mark the channel unread from this message (Alt+click a message)"
+            onclick={() => {
+              void markUnread(message);
+              actionsFor = null;
+            }}>Mark unread</button
+          >
           <PinAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           <SaveAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
           <ServerGifAction {message} ondone={() => (actionsFor = null)} onerror={(text) => (actionError = text)} />
@@ -769,7 +952,19 @@
               >
               <button type="button" onclick={() => (confirmingDeleteId = null)}>Cancel</button>
             {:else}
-              <button type="button" title="Delete" onclick={() => (confirmingDeleteId = message.id)}>Delete</button>
+              <!-- Shift skips the confirming step, as on Discord. -->
+              <button
+                type="button"
+                title="Delete (Shift+click to delete without confirming)"
+                onclick={(event) => {
+                  if (event.shiftKey) {
+                    void remove(message);
+                    actionsFor = null;
+                  } else {
+                    confirmingDeleteId = message.id;
+                  }
+                }}>Delete</button
+              >
             {/if}
           {/if}
         </div>
@@ -777,9 +972,15 @@
     {/each}
   {/if}
 
+  {#if chat.loadingNewer}
+    <p class="muted pad">Loading newer messages…</p>
+  {/if}
+
   <!--
-    After a jump to a search or inbox result the list can be an older stretch of
-    history with newer messages held back, so the way back is always in reach.
+    After a jump to a search or inbox result, or a link to an old message, the
+    list can be an older stretch of history with newer messages held back. It
+    reads on towards the present as the reader scrolls down, and the leap there
+    is always in reach.
   -->
   {#if chat.detached && !chat.loading}
     <div class="present-bar" role="status">
@@ -860,6 +1061,24 @@
 
   .new-bar-read {
     flex: none;
+  }
+
+  /* The line where a new day starts, with its date in the middle. */
+  .day-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 1rem 0 0.3rem;
+    color: var(--h-text-faint);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  .day-divider::before,
+  .day-divider::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--h-border);
   }
 
   .new-divider {

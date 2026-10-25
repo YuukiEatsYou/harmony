@@ -6,21 +6,21 @@
   import { meta } from './lib/meta.svelte';
   import { session } from './lib/session.svelte';
   import { ui } from './lib/ui.svelte';
-  import AdminPanel from './components/admin/AdminPanel.svelte';
+  import { adminPanel, profilePanel, profileViewer, setupWizard } from './lib/lazy-panels';
   import AboutPanel from './components/AboutPanel.svelte';
   import AuthPanel from './components/AuthPanel.svelte';
+  import ChangelogDialog from './components/ChangelogDialog.svelte';
   import Chat from './components/Chat.svelte';
   import InboxPanel from './components/InboxPanel.svelte';
+  import LazyPanel from './components/LazyPanel.svelte';
   import Lightbox from './components/Lightbox.svelte';
   import ProfileCard from './components/ProfileCard.svelte';
-  import ProfilePanel from './components/ProfilePanel.svelte';
-  import ProfileViewer from './components/ProfileViewer.svelte';
   import SearchPanel from './components/SearchPanel.svelte';
   import ScreenShare from './components/ScreenShare.svelte';
-  import SetupWizard from './components/SetupWizard.svelte';
 
   let loading = $state(true);
-  let setupOpen = $state(false);
+  /** True while the owner's setup is being looked up, when the wizard may be about to open. */
+  let setupChecking = $state(false);
   /**
    * A one-off message about a Discord sign-in round trip or a session the server
    * ended, shown then dismissible.
@@ -98,8 +98,9 @@
         ? { text: errorText ?? 'Discord sign-in failed.', kind: 'error' }
         : { text: okText ?? 'Discord connected.', kind: 'ok' };
     }
+    // The entry's state is kept: it names the channel a reload reopens.
     if (invite || ok || error || resume) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      window.history.replaceState(window.history.state, '', window.location.pathname + window.location.hash);
     }
   });
 
@@ -126,13 +127,18 @@
     }
     if (setupCheckedFor === user.id) return;
     setupCheckedFor = user.id;
+    setupChecking = true;
     void api<ServerSettingsResponse>('/settings')
       .then((settings) => {
-        setupOpen = !settings.setupCompleted;
+        // In ui rather than here, so a step back can close it like any panel.
+        ui.setupOpen = !settings.setupCompleted;
       })
       .catch(() => {
         // Not worth blocking the app over: the admin panel exposes everything
         // the wizard would have set.
+      })
+      .finally(() => {
+        setupChecking = false;
       });
   });
 </script>
@@ -149,13 +155,19 @@
 {:else if session.user}
   <Chat />
   {#if ui.adminOpen}
-    <AdminPanel />
+    <LazyPanel module={adminPanel} label="the admin panel" onclose={() => ui.closeAdmin()}>
+      {#snippet children(AdminPanel)}<AdminPanel />{/snippet}
+    </LazyPanel>
   {/if}
   {#if ui.profileOpen}
-    <ProfilePanel />
+    <LazyPanel module={profilePanel} label="your account settings" onclose={() => ui.closeProfile()}>
+      {#snippet children(ProfilePanel)}<ProfilePanel />{/snippet}
+    </LazyPanel>
   {/if}
   {#if ui.profileViewerUser}
-    <ProfileViewer />
+    <LazyPanel module={profileViewer} label="the profile" onclose={() => ui.closeProfileViewer()}>
+      {#snippet children(ProfileViewer)}<ProfileViewer />{/snippet}
+    </LazyPanel>
   {/if}
   {#if ui.aboutOpen}
     <AboutPanel />
@@ -166,9 +178,13 @@
   {#if ui.inboxOpen}
     <InboxPanel onclose={() => ui.closeInbox()} />
   {/if}
-  {#if setupOpen}
-    <SetupWizard onclose={() => (setupOpen = false)} />
+  {#if ui.setupOpen}
+    <LazyPanel module={setupWizard} label="the setup wizard" onclose={() => ui.closeSetup()}>
+      {#snippet children(SetupWizard)}<SetupWizard onclose={() => ui.closeSetup()} />{/snippet}
+    </LazyPanel>
   {/if}
+  <!-- What's new waits for the setup wizard, which is the owner's first stop. -->
+  <ChangelogDialog held={ui.setupOpen || setupChecking} />
   <ProfileCard />
   <Lightbox />
   <ScreenShare />

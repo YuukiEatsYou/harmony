@@ -14,11 +14,14 @@
   import { chat } from '../lib/chat.svelte';
   import { commands } from '../lib/commands.svelte';
   import { registerComposerField } from '../lib/composer-field';
+  import { formatForKey, toggleFormat, type FormatKind } from '../lib/composer-format';
   import { drafts, type Draft } from '../lib/drafts.svelte';
   import { emojis } from '../lib/emojis.svelte';
   import { emojiUsage } from '../lib/emoji-usage.svelte';
   import { mediaFilesFrom } from '../lib/files';
   import { members } from '../lib/members.svelte';
+  import { lastEditable } from '../lib/message-edit';
+  import { messageEdit } from '../lib/message-edit.svelte';
   import { roster } from '../lib/roster.svelte';
   import { meta } from '../lib/meta.svelte';
   import { session } from '../lib/session.svelte';
@@ -493,6 +496,21 @@
     input.setSelectionRange(position, position);
   }
 
+  /**
+   * Wraps the selection in bold, italic or underline, or unwraps it, and puts the
+   * selection back around the same words. The text goes through the drafts store
+   * like any other edit to the box, so the browser is not left to change it.
+   */
+  async function applyFormat(kind: FormatKind): Promise<void> {
+    const input = textInput;
+    if (!input || draftKey === null) return;
+    const next = toggleFormat({ text: input.value, start: input.selectionStart, end: input.selectionEnd }, kind);
+    drafts.setText(draftKey, next.text);
+    await tick();
+    input.setSelectionRange(next.start, next.end);
+    updateAutocomplete();
+  }
+
   function onKeydown(event: KeyboardEvent): void {
     if (suggestions.length > 0) {
       // Alt+Up/Down is the app's channel-jump shortcut. Leave those arrows alone
@@ -519,6 +537,50 @@
       }
     }
 
+    // Ctrl+B, Ctrl+I and Ctrl+U (Cmd on a Mac) format the selection. Taking them
+    // here is also what keeps Ctrl+I and Ctrl+U, which mean the inbox and the
+    // member list everywhere else, from reaching those while someone types.
+    const format = formatForKey(event);
+    if (format && !event.isComposing) {
+      event.preventDefault();
+      void applyFormat(format);
+      return;
+    }
+
+    const mod = event.ctrlKey || event.metaKey;
+    const letter = event.key.toLowerCase();
+    // Ctrl+E and Ctrl+G open and close the emoji and gif pickers, and
+    // Ctrl+Shift+U the file picker, the same three the buttons beside the box do.
+    if (mod && !event.altKey && !event.shiftKey && (letter === 'e' || letter === 'g')) {
+      event.preventDefault();
+      if (letter === 'e') toggleEmoji();
+      else toggleGifs();
+      return;
+    }
+    if (mod && event.shiftKey && !event.altKey && letter === 'u') {
+      event.preventDefault();
+      if (!uploading && timeoutUntil === null) pickFiles();
+      return;
+    }
+
+    // The Up arrow in an empty box edits your last message, as on Discord. With
+    // anything typed or attached it moves the caret as usual.
+    if (
+      event.key === 'ArrowUp' &&
+      !mod &&
+      !event.altKey &&
+      !event.shiftKey &&
+      value.length === 0 &&
+      pending.length === 0
+    ) {
+      const last = lastEditable(chat.messages, session.user?.id);
+      if (last) {
+        event.preventDefault();
+        messageEdit.start(last);
+      }
+      return;
+    }
+
     // Ctrl+Shift+Enter (Cmd on a Mac) schedules the draft instead of sending it.
     if (event.key === 'Enter' && event.shiftKey && (event.ctrlKey || event.metaKey) && !event.isComposing) {
       event.preventDefault();
@@ -543,6 +605,12 @@
       if (showTimes) {
         event.preventDefault();
         showTimes = false;
+        return;
+      }
+      if (showPicker || showGifs) {
+        event.preventDefault();
+        showPicker = false;
+        showGifs = false;
         return;
       }
       if (activeTrigger) {

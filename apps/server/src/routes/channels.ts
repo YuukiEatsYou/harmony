@@ -6,11 +6,13 @@ import {
   channelImportSchema,
   createCategorySchema,
   createChannelSchema,
+  markUnreadSchema,
   moveSchema,
   updateCategorySchema,
   updateChannelSchema,
   type ChannelListResponse,
   type ChannelImportResponse,
+  type ChannelUnreadResponse,
   type DiscordChannelImportPreview,
   type TypingStartPayload,
 } from '@harmony/shared';
@@ -46,10 +48,15 @@ import {
   updateChannel,
   type ChannelRow,
 } from '../db/channels.ts';
-import { listReadMarkers, listUnreadChannelIds, markChannelRead } from '../db/channel_reads.ts';
+import {
+  listReadMarkers,
+  listUnreadChannelIds,
+  markChannelRead,
+  setChannelReadMarker,
+} from '../db/channel_reads.ts';
 import { countUnreadMentions } from '../db/mentions.ts';
 import type { Database } from '../db/index.ts';
-import { newestMessageAt } from '../db/messages.ts';
+import { findMessage, newestMessageAt } from '../db/messages.ts';
 import { findRole } from '../db/roles.ts';
 import { HttpError } from '../http/errors.ts';
 import { createRateLimiter } from '../http/rate-limit.ts';
@@ -149,6 +156,41 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ChannelRouteDe
 
     markChannelRead(db.sqlite, auth.user.id, id, newestMessageAt(db.sqlite, id) ?? new Date().toISOString());
     return reply.status(204).send();
+  });
+
+  /**
+   * Marks a channel unread from one of its messages, as Discord's Alt+click
+   * does: the caller's read marker goes to just before that message, back or
+   * forward, so the channel is unread from it on. The answer is worked out by
+   * the same queries as the channel list, so it is exactly what the list will
+   * say next, the caller's own messages never counting as unread included.
+   */
+  app.post('/api/v1/channels/:id/unread', async (request) => {
+    const auth = requirePermission(request, Permission.ViewChannels);
+    const { id } = request.params as { id: string };
+    requireChannelRow(id);
+    if (!canAccessChannel(db.sqlite, channelAccessFor(db.sqlite, auth.user.id), id)) {
+      throw new HttpError(403, 'channel_forbidden', 'You do not have access to that channel.');
+    }
+    const input = parseBody(markUnreadSchema, request.body);
+    // A message of another channel is the same 404 as one that never existed,
+    // so this says nothing about a channel the caller did not name.
+    const message = findMessage(db.sqlite, input.messageId);
+    if (!message || message.deleted_at || message.channel_id !== id) {
+      throw new HttpError(404, 'message_not_found', 'That message does not exist.');
+    }
+
+    // The marker is a time, and a channel is unread when it holds anything
+    // newer, so a millisecond before the message makes it the first unread one.
+    const readAt = new Date(Date.parse(message.created_at) - 1).toISOString();
+    setChannelReadMarker(db.sqlite, auth.user.id, id, readAt);
+    const body: ChannelUnreadResponse = {
+      channelId: id,
+      readAt,
+      unread: listUnreadChannelIds(db.sqlite, auth.user.id, [id]).includes(id),
+      mentionCount: countUnreadMentions(db.sqlite, auth.user.id, [id])[id] ?? 0,
+    };
+    return body;
   });
 
   /** The linked Discord server's channel list, for the import picker. */

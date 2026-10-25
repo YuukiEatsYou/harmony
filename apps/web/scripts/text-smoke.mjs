@@ -1,14 +1,25 @@
-// Focused checks for the client's pure logic: parsing message text into markdown,
-// links, emoji and mentions, the merge that catches up after being away, deciding
-// whether a message is aimed at you, what the emoji picker offers and finds, and
-// the quick switcher's matching, the channel arrows, the unread tab title and
-// how mutes change it, how a channel inherits its category's settings, where
-// the "new" line and the new-messages bar land, and reading the time
-// expressions the composer turns into timestamps, the channel and message a
-// launch link (a notification tap or a deep link) names, the native voice host
-// bridge (its off flag, the join/leave hand-off, and the call state it pushes
-// back), and the clamp, stored map, deafen-over-volume rule and two-stage
-// element/graph split behind the per-member voice-volume control.
+// Focused checks for the client's pure logic, the modules under apps/web/src/lib
+// that touch no DOM and hold no state, so Node can import them straight:
+//
+// - message text: markdown, links, emoji, mentions and timestamps, and whether a
+//   message is aimed at you;
+// - reading a channel: catching up after being away, where the "new" line and
+//   the new-messages bar land, jumping to any message and reading on from it,
+//   marking unread, the dates beside messages and the lines between days;
+// - finding things: the emoji picker, the quick switcher, the channel arrows,
+//   the unread tab title and how mutes and category settings change it;
+// - the composer: the time expressions it turns into timestamps, its
+//   formatting keys and the Up arrow that edits your last message;
+// - getting around: launch links (a notification tap or a deep link), going
+//   back and forward between channels, and which keys the app-wide keyboard
+//   layer takes and which it leaves alone;
+// - what's new: the changelog and when its dialog shows;
+// - loading: the panels fetched on first use, one reload for a burst of member
+//   and role events, and the numbering that keeps an older answer from undoing a
+//   newer one;
+// - voice: the native host bridge (its off flag, the join and leave hand-off and
+//   the call state it pushes back) and the per-member volume control (the clamp,
+//   the stored map, deafen over volume, and the element and graph stages).
 //
 // Run with: npm run smoke:text
 import { readFileSync } from 'node:fs';
@@ -95,7 +106,14 @@ import {
   scheduledBadge,
   upsertScheduled,
 } from '../src/lib/schedule-time.ts';
-import { firstUnreadIndex, muteLabel, newMessageCount, newMessagesLabel, pillCount } from '../src/lib/unread.ts';
+import {
+  firstUnreadIndex,
+  muteLabel,
+  newMessageCount,
+  newMessagesLabel,
+  pillCount,
+  withChannelReadState,
+} from '../src/lib/unread.ts';
 import { groupedRows, isGrouped } from '../src/lib/message-grouping.ts';
 import { detectTrigger, rankMember, suggestionsFor } from '../src/lib/composer-suggest.ts';
 import {
@@ -127,7 +145,45 @@ import {
 } from '../src/lib/search-query.ts';
 import { SLASH_COMMANDS, applySlashCommand, matchSlashCommands, slashQuery } from '../src/lib/slash-commands.ts';
 import { mediaFilesFrom } from '../src/lib/files.ts';
-import { hasLaunchTarget, parseLaunchParams, withoutLaunchParams } from '../src/lib/launch-params.ts';
+import { hasLaunchTarget, messageLink, parseLaunchParams, withoutLaunchParams } from '../src/lib/launch-params.ts';
+import { historyAroundSplit } from '@harmony/shared';
+import { appendNewer, windowAround } from '../src/lib/history-window.ts';
+import {
+  clockTime,
+  dayDividerLabel,
+  dayKey,
+  messageTimeLabel,
+  messageTimeTitle,
+  withDayStarts,
+} from '../src/lib/message-time.ts';
+import {
+  mayCarryOn,
+  mouseButtonStep,
+  ownedBy,
+  planOverlay,
+  planVisit,
+  popAction,
+  readEntry,
+  returnAfterClose,
+  stepDirection,
+  stepsOffMarker,
+  writeEntry,
+} from '../src/lib/channel-history.ts';
+import {
+  CHANGELOG,
+  CHANGELOG_VERSION_PATTERN,
+  HARMONY_VERSION,
+  changelogSeenSchema,
+  changelogToShow,
+  latestChangelog,
+} from '@harmony/shared';
+import { changelogSeenKey, formatChangelogDate, newerSeen, planChangelog, readSeenMarker } from '../src/lib/changelog.ts';
+import { globalShortcut, typesCharacter } from '../src/lib/global-shortcuts.ts';
+import { FORMAT_MARKERS, formatForKey, toggleFormat } from '../src/lib/composer-format.ts';
+import { lastEditable } from '../src/lib/message-edit.ts';
+import { SLOW_LOAD_MS, lazy } from '../src/lib/lazy.ts';
+import { MEMBER_RELOAD_MAX_WAIT_MS, MEMBER_RELOAD_QUIET_MS, MemberReloadQueue } from '../src/lib/member-reload.ts';
+import { ResponseOrder } from '../src/lib/response-order.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -1785,6 +1841,295 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   check('the strip of an empty search is empty', withoutLaunchParams('') === '');
 }
 
+// --- Message times: the day beside the clock, and the date lines ---
+{
+  const zone = { locale: 'en-GB', timeZone: 'Europe/London' };
+  const now = Date.parse('2026-10-22T09:00:00Z');
+  const at = (iso) => Date.parse(iso);
+  check('a day key is the calendar day in the zone', dayKey(at('2026-10-21T23:30:00Z'), 'Europe/London') === '2026-10-22');
+  check('the same instant is another day elsewhere', dayKey(at('2026-10-21T23:30:00Z'), 'America/New_York') === '2026-10-21');
+  check('the clock alone is hours and minutes', clockTime(at('2026-10-22T08:05:00Z'), zone) === '09:05');
+  check('a message from today shows only its time', messageTimeLabel(at('2026-10-22T07:15:00Z'), { ...zone, now }) === '08:15');
+  check(
+    'a message from yesterday says so',
+    messageTimeLabel(at('2026-10-21T20:00:00Z'), { ...zone, now }) === 'Yesterday at 21:00',
+  );
+  check(
+    'an older message carries its date',
+    messageTimeLabel(at('2026-09-03T11:00:00Z'), { ...zone, now }) === '03/09/2026 12:00',
+  );
+  // Clocks went back in London on 25 October 2026, so that day is 25 hours long.
+  const afterChange = Date.parse('2026-10-26T00:30:00Z');
+  check(
+    'yesterday is the calendar day before, across a clock change',
+    messageTimeLabel(at('2026-10-25T00:10:00Z'), { ...zone, now: afterChange }).startsWith('Yesterday at'),
+  );
+  check(
+    'yesterday reaches back across a year end',
+    messageTimeLabel(at('2026-12-31T22:00:00Z'), { ...zone, now: at('2027-01-01T10:00:00Z') }) === 'Yesterday at 22:00',
+  );
+  check('the tooltip names the full date', messageTimeTitle(at('2026-10-21T20:00:00Z'), zone).includes('21 October 2026'));
+  check('a date line reads as a date', dayDividerLabel(at('2026-10-21T20:00:00Z'), zone) === '21 October 2026');
+
+  const row = (createdAt, grouped = true) => ({ message: { createdAt }, grouped });
+  const rows = withDayStarts(
+    [row('2026-10-21T20:00:00Z', false), row('2026-10-21T20:03:00Z'), row('2026-10-22T08:00:00Z'), row('2026-10-22T08:01:00Z')],
+    false,
+    'Europe/London',
+  );
+  check('a new day opens where the date changes', rows.map((entry) => entry.dayStart).join() === 'false,false,true,false');
+  check('the first message of a day starts a fresh group', rows[2].grouped === false && rows[3].grouped === true);
+  check('a row inside a day keeps its grouping', rows[1].grouped === true);
+  check(
+    'the first row opens its day only when the list reaches the start of the channel',
+    withDayStarts([row('2026-10-21T20:00:00Z', false)], true, 'Europe/London')[0].dayStart === true,
+  );
+  check(
+    'grouping across midnight is broken by the date line',
+    withDayStarts([row('2026-10-21T22:58:00Z', false), row('2026-10-21T23:02:00Z')], false, 'Europe/London')[1].grouped === false,
+  );
+}
+
+// --- Channel history: back and forward between the channels opened ---
+
+/**
+ * A session history and an app wired the way ChannelHistory wires them, to
+ * check whole sequences rather than single decisions. The tab came from
+ * another page, so stepping back past the app's first entry leaves it.
+ *
+ * The installed app has no page before its first entry: a press there closes
+ * the app, which the browser does by itself, while a step the app takes there
+ * goes nowhere. So it matters there that the page is never left sitting on a
+ * marker it no longer needs, where the press that should close the app would
+ * only reach the entry beneath.
+ *
+ * The app's quiet step back off a marker lands at once here, where a browser
+ * lands it a moment later; nothing else happens in between in these sequences.
+ */
+function historySession(channelIds, { installed = false } = {}) {
+  const known = new Set(channelIds);
+  const foreign = { foreign: true };
+  const entries = installed ? [] : [foreign];
+  let at = 0;
+  let active = null;
+  /** How many layers are open over the chat. */
+  let depth = 0;
+  /** The entry the app last saw itself on. */
+  let here = null;
+  let left = false;
+  let closed = false;
+  const current = () => readEntry(entries[at] ?? null);
+  const push = (entry) => {
+    entries.splice(at + 1, entries.length, writeEntry(null, entry));
+    at += 1;
+    here = entry;
+  };
+  /** Pushes made without a click, which Chrome's back button punishes. */
+  let unclicked = 0;
+  // The component's effect, which runs whenever the open channel or what is
+  // open over it changes. `clicked` is whether a person has just acted.
+  const sync = (clicked = true) => {
+    const now = current();
+    const visit = planVisit(now, active, now !== null && known.has(now.channelId), here?.index ?? 0);
+    if (visit?.op === 'push') {
+      if (!clicked) unclicked += 1;
+      push(visit.entry);
+    } else if (visit) {
+      entries[at] = writeEntry(entries[at] ?? null, visit.entry);
+      here = visit.entry;
+    }
+    const marker = planOverlay(current(), active, depth, clicked);
+    if (marker) push(marker);
+    if (stepsOffMarker(current(), active, depth)) {
+      at -= 1;
+      here = current();
+      sync();
+    }
+  };
+  /** A step: a press when `pressed`, otherwise one the app takes itself. */
+  const go = (step, pressed = true) => {
+    const target = at + step;
+    if (target < 0 && pressed) closed = true;
+    if (target < 0 || target >= entries.length) return;
+    at = target;
+    if (entries[at] === foreign) {
+      left = true;
+      return;
+    }
+    const popped = readEntry(entries[at]);
+    const from = here;
+    here = popped;
+    const direction = stepDirection(from?.index ?? 0, popped.index);
+    const action = popAction(popped, active, known.has(popped.channelId), direction, depth);
+    if (action === 'close') {
+      const forward = returnAfterClose(popped, from, active);
+      depth = popped.depth;
+      if (forward !== null) {
+        at += forward;
+        here = current();
+      }
+      // A step is no click, whatever pressed it.
+      sync(false);
+      return;
+    }
+    if (action === 'stale') {
+      here = { ...popped, channelId: active };
+      entries[at] = writeEntry(entries[at], here);
+    }
+    if (action === 'open') {
+      depth = 0;
+      active = popped.channelId;
+      sync();
+    } else if (mayCarryOn(direction, popped.index, from, active)) go(direction, false);
+  };
+  // The page loads on an entry the browser made, with no state of ours yet.
+  entries.push(null);
+  at = entries.length - 1;
+  return {
+    /** Opens a channel with nothing open over the chat, as the sidebar does on a wide screen. */
+    open: (channelId) => {
+      active = channelId;
+      sync();
+    },
+    /** Opens a channel from something open over the chat, which closes it: a search result, a pick in the drawer. */
+    jump: (channelId) => {
+      depth = 0;
+      active = channelId;
+      sync();
+    },
+    /** Opens one more layer over the chat: a panel or drawer, then the lightbox over it. */
+    show: () => {
+      depth += 1;
+      sync();
+    },
+    /** Something that opens by itself, with no click: the notes after an update. */
+    appear: () => {
+      depth += 1;
+      sync(false);
+    },
+    /** Closes the top layer through its own controls: a close button, Escape, the backdrop. */
+    dismiss: () => {
+      depth -= 1;
+      sync();
+    },
+    /** Reloads the page: nothing is open, and the channel comes back from the entry's state. */
+    reload: () => {
+      depth = 0;
+      here = current();
+      active = here?.channelId ?? null;
+      sync();
+    },
+    go,
+    remove: (channelId) => known.delete(channelId),
+    get active() {
+      return active;
+    },
+    get depth() {
+      return depth;
+    },
+    get left() {
+      return left;
+    },
+    /** Whether a press closed the installed app. */
+    get closed() {
+      return closed;
+    },
+    /** How many entries were pushed without a click. */
+    get unclicked() {
+      return unclicked;
+    },
+    /** How many entries are the app's, not counting the page it came from. */
+    get length() {
+      return entries.length - (installed ? 0 : 1);
+    },
+  };
+}
+
+{
+  const entry = { channelId: 'c1', index: 2, depth: 0 };
+  check('an entry round-trips through history state', JSON.stringify(readEntry(writeEntry(null, entry))) === JSON.stringify(entry));
+  check('a null state holds no entry', readEntry(null) === null);
+  check("someone else's state holds no entry", readEntry({ other: 1 }) === null);
+  check('an entry with a blank channel is refused', readEntry(writeEntry(null, { channelId: '', index: 0, depth: 0 })) === null);
+  check('an entry with a fractional index is refused', readEntry({ harmonyChannel: { channelId: 'c1', index: 0.5 } }) === null);
+  check('writing keeps the rest of the state', writeEntry({ other: 1 }, entry).other === 1);
+  const signed = { ...entry, userId: 'u1' };
+  check('the account that wrote an entry round-trips', readEntry(writeEntry(null, signed))?.userId === 'u1');
+  check("an entry is its writer's", ownedBy(signed, 'u1'));
+  check('but not the next account to sign in', !ownedBy(signed, 'u2'));
+  check("an entry with no account is anyone's", ownedBy(entry, 'u2'));
+  check(
+    'an entry with a non-string account reads as having none',
+    readEntry({ harmonyChannel: { channelId: 'c1', index: 0, userId: 7 } })?.userId === undefined,
+  );
+
+  const first = planVisit(null, 'c1', false, 0);
+  check('the first channel opened rewrites the entry the page loaded on', first?.op === 'replace' && first.entry.index === 0);
+  const next = planVisit({ channelId: 'c1', index: 4, depth: 0 }, 'c2', true, 0);
+  check('opening another channel adds an entry after the current one', next?.op === 'push' && next.entry.index === 5);
+  const healed = planVisit({ channelId: 'gone', index: 4, depth: 0 }, 'c2', false, 0);
+  check('a channel that took over from a gone one rewrites its entry', healed?.op === 'replace' && healed.entry.index === 4);
+  check('the channel an entry already names adds nothing', planVisit({ channelId: 'c1', index: 4, depth: 0 }, 'c1', true, 0) === null);
+  check('nothing open adds nothing', planVisit({ channelId: 'c1', index: 4, depth: 0 }, null, true, 0) === null);
+
+  check('a step onto a gone channel is stale', popAction({ channelId: 'x', index: 1, depth: 0 }, 'c1', false, -1, 0) === 'stale');
+  check('a step onto the open channel is skipped', popAction({ channelId: 'c1', index: 1, depth: 0 }, 'c1', true, -1, 0) === 'skip');
+  check('a step onto another channel opens it', popAction({ channelId: 'c2', index: 1, depth: 0 }, 'c1', true, -1, 0) === 'open');
+  check('a lower position is a step back', stepDirection(3, 2) === -1);
+  check('a higher position is a step forward', stepDirection(2, 3) === 1);
+  check('mouse button 3 is back and 4 is forward', mouseButtonStep(3) === -1 && mouseButtonStep(4) === 1);
+  check('the main, middle and right buttons are not history', [0, 1, 2].every((button) => mouseButtonStep(button) === null));
+
+  check('a back step may carry on while there are entries of ours behind', mayCarryOn(-1, 1));
+  check('but never back past the first of them', !mayCarryOn(-1, 0));
+  check('a forward step may carry on', mayCarryOn(1, 0));
+
+  const walk = historySession(['a', 'b', 'c']);
+  walk.open('a');
+  walk.open('b');
+  walk.open('c');
+  check('three channels opened make three entries', walk.length === 3);
+  walk.go(-1);
+  check('back returns to the channel before', walk.active === 'b');
+  walk.go(-1);
+  check('back again returns to the first channel', walk.active === 'a');
+  walk.go(1);
+  check('forward goes the other way', walk.active === 'b');
+  walk.open('a');
+  check('opening a channel after going back drops the forward entries', walk.length === 3);
+  walk.go(1);
+  check('so there is nothing to go forward to', walk.active === 'a');
+  walk.go(-1);
+  check('and back is the channel left', walk.active === 'b');
+
+  const gone = historySession(['a', 'b', 'c']);
+  gone.open('a');
+  gone.open('b');
+  gone.open('c');
+  gone.remove('b');
+  gone.go(-1);
+  check('back skips over a channel that has gone', gone.active === 'a');
+  gone.go(1);
+  check('and forward skips over it too', gone.active === 'c');
+
+  const stuck = historySession(['a', 'b']);
+  stuck.open('a');
+  stuck.open('b');
+  stuck.remove('a');
+  stuck.go(-1);
+  check('back with only gone channels behind stays in the app', stuck.active === 'b' && !stuck.left);
+
+  const loop = historySession(['a', 'x']);
+  loop.open('a');
+  loop.open('x');
+  loop.open('a');
+  loop.remove('x');
+  loop.go(-1);
+  check('skipping a gone channel never steps back out of the app', !loop.left && loop.active === 'a');
+  loop.go(-1);
+  check('while an ordinary back from the first channel still leaves, as a browser does', loop.left);
+}
+
 // --- Per-member playback volume: the clamp and the stored map ---
 {
   check('a volume at the default stays the default', clampVolume(VOICE_VOLUME_DEFAULT) === VOICE_VOLUME_DEFAULT);
@@ -1865,6 +2210,726 @@ check('the app badge clears when all is read', unreadBadge(0, 0) === null);
   }
   check('an ordinary stored key still reads back', volumeOverride({ u2: 0.5 }, 'u2') === 0.5);
   check('a key absent from the stored map is undefined', volumeOverride(parseVolumes(null), 'u9') === undefined);
+}
+
+// --- What's new: the changelog, and when the dialog shows it ---
+{
+  // The data itself. Only the newest entry is ever shown, so the order matters,
+  // and notes for a version newer than the build would never be shown to anyone.
+  const versions = CHANGELOG.map((entry) => entry.version);
+  check('the changelog has at least one entry', CHANGELOG.length > 0);
+  check('every changelog version is three dotted numbers', versions.every((version) => CHANGELOG_VERSION_PATTERN.test(version)));
+  check('changelog versions are unique', new Set(versions).size === versions.length);
+  check(
+    'the changelog is newest first, each version older than the one above it',
+    versions.every((version, index) => index === 0 || isNewerVersion(versions[index - 1], version)),
+  );
+  check(
+    'every changelog date is a real YYYY-MM-DD day',
+    CHANGELOG.every(
+      (entry) =>
+        /^\d{4}-\d{2}-\d{2}$/.test(entry.date) &&
+        !Number.isNaN(Date.parse(`${entry.date}T00:00:00Z`)) &&
+        new Date(`${entry.date}T00:00:00Z`).toISOString().slice(0, 10) === entry.date,
+    ),
+  );
+  check(
+    'changelog dates never go forward down the list',
+    CHANGELOG.every((entry, index) => index === 0 || CHANGELOG[index - 1].date >= entry.date),
+  );
+  check('every entry has a title', CHANGELOG.every((entry) => entry.title.trim().length > 0));
+  check(
+    'every entry says something, with no blank items',
+    CHANGELOG.every((entry) => entry.items.length > 0 && entry.items.every((item) => item.trim().length > 0)),
+  );
+  check('the newest notes are not for a version newer than this build', !isNewerVersion(versions[0], HARMONY_VERSION));
+
+  const latest = latestChangelog();
+  const [major] = latest.version.split('.');
+  const newer = `${Number(major) + 1}.0.0`;
+  check('the latest entry is the first', latest === CHANGELOG[0]);
+  check('someone who has seen nothing is shown the latest', changelogToShow(null) === latest);
+  check('someone who saw an older version is shown the latest', changelogToShow('0.0.1') === latest);
+  check('someone who saw the latest is shown nothing', changelogToShow(latest.version) === null);
+  check('someone who saw a newer version is shown nothing', changelogToShow(newer) === null);
+
+  check('the version pattern takes a release number', CHANGELOG_VERSION_PATTERN.test('2.9.0') && CHANGELOG_VERSION_PATTERN.test('10.0.12'));
+  for (const bad of ['2.9', '2.9.0.1', 'v2.9.0', '02.9.0', '2.9.0 ', '', '2.x.0']) {
+    check(`the version pattern refuses ${JSON.stringify(bad)}`, !CHANGELOG_VERSION_PATTERN.test(bad));
+  }
+  check('the seen request takes a version', changelogSeenSchema.safeParse({ version: '2.9.0' }).success);
+  check('the seen request refuses a malformed one', !changelogSeenSchema.safeParse({ version: '2.9' }).success);
+  check('the seen request refuses a missing one', !changelogSeenSchema.safeParse({}).success);
+
+  // The browser's copy, and how it combines with the server's.
+  check('each account has its own stored key', changelogSeenKey('u1') === 'harmony:changelog-seen:u1');
+  check('nothing stored reads as nothing seen', readSeenMarker(null) === null);
+  check('garbage in storage reads as nothing seen', readSeenMarker('soon') === null && readSeenMarker('') === null);
+  check('a stored version reads back', readSeenMarker('2.9.0') === '2.9.0');
+  check('the newer of nothing is nothing', newerSeen(null, null) === null);
+  check('either side alone wins', newerSeen('2.8.3', null) === '2.8.3' && newerSeen(null, '2.9.0') === '2.9.0');
+  check('the newer side wins, compared as numbers', newerSeen('2.10.0', '2.9.0') === '2.10.0' && newerSeen('2.9.0', '2.10.0') === '2.10.0');
+
+  const plan = (server, stored) => planChangelog(server, stored);
+  const fresh = plan(null, null);
+  check('a member who has seen nothing anywhere is shown the latest', fresh.show === latest && fresh.report === null);
+  check('a member the server has down for the latest is shown nothing', plan(latest.version, null).show === null);
+  check('and nothing is sent', plan(latest.version, null).report === null);
+  const missed = plan(null, latest.version);
+  check('notes this browser showed are not shown again when the server missed it', missed.show === null);
+  check('and the server is told what it missed', missed.report === latest.version);
+  check('an older server copy is caught up too', plan('0.0.1', latest.version).report === latest.version);
+  check('a server copy ahead of this browser is left alone', plan(latest.version, '0.0.1').report === null && plan(latest.version, '0.0.1').show === null);
+  check('both up to date means nothing at all', plan(latest.version, latest.version).show === null && plan(latest.version, latest.version).report === null);
+  check('garbage in storage does not hide the notes', plan(null, 'soon').show === latest);
+  const rolledBack = plan(null, newer);
+  check('a copy from a newer build hides the notes', rolledBack.show === null);
+  check('but is not sent to a server that would refuse it', rolledBack.report === null);
+
+  check('a changelog date reads as a day (en-GB)', formatChangelogDate('2026-10-22', 'en-GB') === '22 October 2026');
+  check('a changelog date reads as a day (en-US)', formatChangelogDate('2026-10-22', 'en-US') === 'October 22, 2026');
+  check('the first of a month stays on that day', formatChangelogDate('2026-01-01', 'en-GB') === '1 January 2026');
+  check('an unreadable date is shown as written', formatChangelogDate('someday', 'en-GB') === 'someday');
+}
+
+// --- Jumping to any message: the page around it, and reading on to the present ---
+{
+  // A channel of 200 messages, m0 oldest, and the pages the server would answer
+  // with: around a message as historyAroundSplit lays it out, and after one.
+  const all = Array.from({ length: 200 }, (_, i) => ({
+    id: `m${i}`,
+    createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+  }));
+  const around = (i, limit = 50) => {
+    const split = historyAroundSplit(limit);
+    return all.slice(Math.max(0, i - split.before), i + split.after + 1);
+  };
+  const after = (id, limit = 50) => {
+    const index = all.findIndex((message) => message.id === id);
+    return all.slice(index + 1, index + 1 + limit);
+  };
+  const ids = (messages) => messages.map((message) => message.id).join(',');
+  const span = (from, to) => ids(all.slice(from, to + 1));
+  const newest = { messages: all.slice(150), hasMore: true };
+
+  const split = historyAroundSplit(50);
+  check('a page of 50 around a message is 25 before, it, and 24 after', split.before === 25 && split.after === 24);
+  check('a page of one is the message alone', historyAroundSplit(1).before === 0 && historyAroundSplit(1).after === 0);
+  check('a page of two takes the one before', historyAroundSplit(2).before === 1 && historyAroundSplit(2).after === 0);
+  check('the largest page is 50 before and 49 after', historyAroundSplit(100).before === 50 && historyAroundSplit(100).after === 49);
+
+  const old = windowAround(around(40), 'm40', 50, newest);
+  check('an old message is shown with its page around it', ids(old.messages) === span(15, 64));
+  check('a page that misses the present is an older stretch', old.detached === true);
+  check('with older history above it', old.hasMore === true);
+
+  const first = windowAround(around(3), 'm3', 50, newest);
+  check('near the channel start the page begins at its first message', ids(first.messages) === span(0, 27));
+  check('and has nothing older above it', first.hasMore === false && first.detached === true);
+
+  const recent = windowAround(around(160), 'm160', 50, newest);
+  check('a page that meets the present is joined to it', ids(recent.messages) === span(135, 199));
+  check('and the reader is in the present', recent.detached === false && recent.hasMore === true);
+
+  const latest = windowAround(around(190), 'm190', 50, null);
+  check('a page whose newer side came back short reaches the present by itself', latest.detached === false);
+  check('and keeps the messages it holds', ids(latest.messages) === span(165, 199));
+
+  const longPresent = windowAround(around(120), 'm120', 50, { messages: all.slice(90), hasMore: false });
+  check('a present reaching further back than the page is kept whole', ids(longPresent.messages) === span(90, 199));
+  check('and it is the one that knows what is older', longPresent.hasMore === false);
+
+  const raced = windowAround(around(190), 'm190', 50, { messages: all.slice(150, 199), hasMore: true });
+  check(
+    'a message newer than the present on screen lands at the end, once',
+    ids(raced.messages) === span(150, 199) && raced.detached === false,
+  );
+
+  const small = all.slice(0, 10);
+  const whole = windowAround(small, 'm5', 50, { messages: small, hasMore: false });
+  check('a small channel is simply the whole channel', ids(whole.messages) === span(0, 9) && !whole.hasMore && !whole.detached);
+  check('a page without the message is not laid out', windowAround(around(40), 'm999', 50, newest) === null);
+
+  const forward = appendNewer(old.messages, after('m64'), 50);
+  check('the page after an older stretch is appended', ids(forward.messages) === span(15, 114));
+  check('a full page leaves it short of the present', forward.detached === true);
+  const withLive = appendNewer([...old.messages, all[65]], after('m64'), 50);
+  check('a message already held is not repeated', ids(withLive.messages) === span(15, 114));
+
+  // Reading on from an old message gets back to the present with every message once.
+  let view = windowAround(around(40), 'm40', 50, newest);
+  let steps = 0;
+  while (view.detached && steps < 10) {
+    const next = appendNewer(view.messages, after(view.messages.at(-1).id), 50);
+    view = { ...view, messages: next.messages, detached: next.detached };
+    steps++;
+  }
+  check('reading on from an old message reaches the present', view.detached === false && steps === 3);
+  check('with every message from the page on exactly once', ids(view.messages) === span(15, 199));
+
+  // A link to a message, which the launch handling opens.
+  const link = messageLink('https://chat.example.com', 'c1', 'm1');
+  check('a message link is the launch link on the instance', link === 'https://chat.example.com/?channel=c1&message=m1');
+  const linked = parseLaunchParams(new URL(link).search);
+  check('the launch handling reads a message link back', linked.channelId === 'c1' && linked.messageId === 'm1');
+  check(
+    'an origin with a trailing slash does not double it',
+    messageLink('https://chat.example.com/', 'c1', 'm1') === 'https://chat.example.com/?channel=c1&message=m1',
+  );
+  const odd = parseLaunchParams(new URL(messageLink('http://127.0.0.1:8787', 'a&b=c', 'd e/é?#')).search);
+  check('ids are encoded so any id reads back unchanged', odd.channelId === 'a&b=c' && odd.messageId === 'd e/é?#');
+  check('the strip after handling leaves nothing of a message link', withoutLaunchParams(new URL(link).search) === '');
+}
+
+// --- Marking a channel unread from a message ---
+{
+  const me = 'me';
+  const at = (minute) => `2026-01-01T12:${String(minute).padStart(2, '0')}:00.000Z`;
+  // The server puts the marker a millisecond before the message it is marked from.
+  const markerBefore = (minute) => new Date(Date.parse(at(minute)) - 1).toISOString();
+  const msg = (id, minute, author = 'them') => ({ id, createdAt: at(minute), author: { id: author } });
+  const list = [msg('a', 1), msg('b', 2), msg('c', 3, me), msg('d', 4), msg('e', 5)];
+
+  check('marked unread from a message, the line goes above it', firstUnreadIndex(list, markerBefore(2), me, false) === 1);
+  check('and the bar counts it and everything after', newMessageCount(list, markerBefore(2), me, false).count === 3);
+  check(
+    'marked unread from your own message, the line goes above the next one by someone else',
+    firstUnreadIndex(list, markerBefore(3), me, false) === 3,
+  );
+  check(
+    'marked from your own last message, there is no line',
+    firstUnreadIndex([msg('a', 1), msg('b', 2, me)], markerBefore(2), me, false) === -1,
+  );
+  check(
+    'marked from the oldest message loaded, the line waits for older history unless there is none',
+    firstUnreadIndex(list, markerBefore(1), me, false) === -1 && firstUnreadIndex(list, markerBefore(1), me, true) === 0,
+  );
+
+  const after = withChannelReadState(['x'], { x: 1 }, { channelId: 'c', unread: true, mentionCount: 2 });
+  check('the channel joins the unread list', after.unreadChannelIds.join(',') === 'x,c');
+  check('with its mention count', after.mentionCounts.c === 2 && after.mentionCounts.x === 1);
+  const again = withChannelReadState(['c', 'x'], { c: 5 }, { channelId: 'c', unread: true, mentionCount: 1 });
+  check('a channel already listed is not listed twice', again.unreadChannelIds.join(',') === 'c,x' && again.mentionCounts.c === 1);
+  const read = withChannelReadState(['c', 'x'], { c: 5, x: 1 }, { channelId: 'c', unread: false, mentionCount: 0 });
+  check('a channel left read drops off the list', read.unreadChannelIds.join(',') === 'x');
+  check('and its count goes rather than reading zero', !('c' in read.mentionCounts) && read.mentionCounts.x === 1);
+  const input = ['x'];
+  const counts = { x: 1 };
+  withChannelReadState(input, counts, { channelId: 'c', unread: true, mentionCount: 3 });
+  check('the lists it was given are left alone', input.length === 1 && !('c' in counts));
+}
+
+// --- Global shortcuts: which key does what, and when the layer stays out of the way ---
+{
+  const press = (key, mods = {}) => ({
+    key,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
+  const ctrl = (key, mods = {}) => press(key, { ctrlKey: true, ...mods });
+  // A channel open, its message box ready, focus on nothing in particular and
+  // nothing open over the chat.
+  const calm = {
+    handled: false,
+    panel: false,
+    dialog: false,
+    popover: false,
+    card: false,
+    typing: false,
+    inComposer: false,
+    composerReady: true,
+    channelOpen: true,
+    hasNew: true,
+    inVoice: false,
+  };
+  const scene = (changes = {}) => ({ ...calm, ...changes });
+  const inComposer = scene({ typing: true, inComposer: true });
+  const inOtherField = scene({ typing: true });
+  const action = (pressed, where = calm) => globalShortcut(pressed, where)?.action ?? null;
+
+  check('Ctrl+K opens the quick switcher', action(ctrl('k')) === 'switcher');
+  check('Ctrl+K works from the message box', action(ctrl('k'), inComposer) === 'switcher');
+  check('Cmd+K is taken the same as Ctrl+K', action(press('k', { metaKey: true })) === 'switcher');
+  check('Ctrl+K stays quiet while a panel is open', action(ctrl('k'), scene({ panel: true })) === null);
+  check('Ctrl+K closes the switcher it opened', action(ctrl('k'), scene({ dialog: true })) === 'switcher');
+
+  check('Ctrl+F opens search', action(ctrl('f')) === 'search');
+  check('Ctrl+F works from the message box', action(ctrl('f'), inComposer) === 'search');
+  check('Ctrl+F works from any other text box', action(ctrl('f'), inOtherField) === 'search');
+  check(
+    'Ctrl+F inside a panel (search included) is left to the browser',
+    action(ctrl('f'), scene({ panel: true })) === null,
+  );
+  check('Ctrl+Shift+F is not search', action(ctrl('F', { shiftKey: true })) === null);
+
+  check('Ctrl+P opens the pins of the open channel', action(ctrl('p')) === 'pins');
+  check('Ctrl+P works from the message box', action(ctrl('p'), inComposer) === 'pins');
+  check('Ctrl+P with no channel open is left to the browser', action(ctrl('p'), scene({ channelOpen: false })) === null);
+
+  check('Ctrl+I opens the inbox', action(ctrl('i')) === 'inbox');
+  check('Ctrl+I in the message box is left to it (italic)', action(ctrl('i'), inComposer) === null);
+  check('Ctrl+Shift+I is the browser’s, not the inbox', action(ctrl('I', { shiftKey: true })) === null);
+  check('Ctrl+U shows or hides the member list', action(ctrl('u')) === 'members');
+  check('Ctrl+U in the message box is left to it (underline)', action(ctrl('u'), inComposer) === null);
+  check('Ctrl+Shift+U is not the member list', action(ctrl('U', { shiftKey: true })) === null);
+  check('Ctrl+U stays quiet while a panel is open', action(ctrl('u'), scene({ panel: true })) === null);
+
+  check('Ctrl+/ opens the shortcut list', action(ctrl('/')) === 'help');
+  check('Ctrl+/ toggles the list while it is open', action(ctrl('/'), scene({ dialog: true })) === 'help');
+  check('Ctrl+/ in a text box is left alone', action(ctrl('/'), inComposer) === null);
+  check('Escape closes the switcher or the list', action(press('Escape'), scene({ dialog: true })) === 'close-dialog');
+  check('the switcher takes nothing else', action(ctrl('f'), scene({ dialog: true })) === null);
+
+  const down = globalShortcut(press('ArrowDown', { altKey: true }), calm);
+  check('Alt+Down is the next channel', down?.action === 'step' && down.direction === 1 && !down.unreadOnly);
+  const upUnread = globalShortcut(press('ArrowUp', { altKey: true, shiftKey: true }), calm);
+  check(
+    'Alt+Shift+Up is the previous unread channel',
+    upUnread?.action === 'step' && upUnread.direction === -1 && upUnread.unreadOnly,
+  );
+  check('Alt+Down in a text box is left alone', action(press('ArrowDown', { altKey: true }), inComposer) === null);
+
+  check('Escape marks the open channel read', action(press('Escape')) === 'dismiss-new');
+  check('Escape with nothing new does nothing', action(press('Escape'), scene({ hasNew: false })) === null);
+  check('Escape with no channel open does nothing', action(press('Escape'), scene({ channelOpen: false })) === null);
+  check('Escape the composer used is not taken again', action(press('Escape'), scene({ ...inComposer, handled: true })) === null);
+  check('Escape the composer let through marks read', action(press('Escape'), inComposer) === 'dismiss-new');
+  check('Escape in another text box is left to it', action(press('Escape'), inOtherField) === null);
+  check('Escape while a menu or picker is open is left to it', action(press('Escape'), scene({ popover: true })) === null);
+  check('Escape while a profile card shows is left to it', action(press('Escape'), scene({ card: true })) === null);
+  check('Escape while a panel is open closes it', action(press('Escape'), scene({ panel: true })) === 'close-panel');
+  check(
+    'Escape over a panel closes it even from a text box inside it',
+    action(press('Escape'), scene({ panel: true, typing: true })) === 'close-panel',
+  );
+  check('Shift+Escape over a panel does nothing', action(press('Escape', { shiftKey: true }), scene({ panel: true })) === null);
+  check('Ctrl+Escape over a panel does nothing', action(press('Escape', { ctrlKey: true }), scene({ panel: true })) === null);
+  check('a key already used over a panel is left alone', action(press('Escape'), scene({ panel: true, handled: true })) === null);
+  check(
+    "Escape closes a phone's drawer",
+    action(press('Escape'), scene({ popover: true, drawer: true })) === 'close-panel',
+  );
+  check(
+    'but not while a profile card shows over it',
+    action(press('Escape'), scene({ popover: true, drawer: true, card: true })) === null,
+  );
+  check('Shift+Escape marks every channel read', action(press('Escape', { shiftKey: true })) === 'read-all');
+  check(
+    'Shift+Escape marks every channel read even with nothing new here',
+    action(press('Escape', { shiftKey: true }), scene({ hasNew: false })) === 'read-all',
+  );
+  check(
+    'Shift+Escape while a menu is open is left to it',
+    action(press('Escape', { shiftKey: true }), scene({ popover: true })) === null,
+  );
+
+  const inVoice = scene({ inVoice: true });
+  check('Ctrl+Shift+M mutes in voice', action(ctrl('M', { shiftKey: true }), inVoice) === 'mute');
+  check('Ctrl+Shift+D deafens in voice', action(ctrl('D', { shiftKey: true }), inVoice) === 'deafen');
+  check(
+    'Ctrl+Shift+M works from the message box',
+    action(ctrl('M', { shiftKey: true }), scene({ ...inComposer, inVoice: true })) === 'mute',
+  );
+  check(
+    'Ctrl+Shift+D works with a panel open',
+    action(ctrl('D', { shiftKey: true }), scene({ panel: true, inVoice: true })) === 'deafen',
+  );
+  check('Ctrl+Shift+M out of voice is left to the browser', action(ctrl('M', { shiftKey: true })) === null);
+  check('Ctrl+M without Shift is not mute', action(ctrl('m'), inVoice) === null);
+
+  check('a letter typed with nothing focused goes to the message box', action(press('a')) === 'type');
+  check('a capital letter does too', action(press('A', { shiftKey: true })) === 'type');
+  check('so does punctuation, which starts a slash command', action(press('/')) === 'type');
+  check('a letter typed while a profile card shows still goes there', action(press('a'), scene({ card: true })) === 'type');
+  check('a letter typed in a text box stays there', action(press('a'), inComposer) === null);
+  check('a letter typed with a menu open is the menu’s', action(press('a'), scene({ popover: true })) === null);
+  check('a letter typed in the switcher is the switcher’s', action(press('a'), scene({ dialog: true })) === null);
+  check('a letter typed over a panel is the panel’s', action(press('a'), scene({ panel: true })) === null);
+  check('a letter typed with no usable message box goes nowhere', action(press('a'), scene({ composerReady: false })) === null);
+  check('a key already used is not taken again', action(press('a'), scene({ handled: true })) === null);
+
+  check('one character types', typesCharacter(press('x')));
+  check('an emoji outside the basic plane is one character', typesCharacter(press('\u{1F600}')));
+  check('Space does not type into the box, so a list can still scroll', !typesCharacter(press(' ')));
+  check('a named key does not type', !typesCharacter(press('Enter')) && !typesCharacter(press('ArrowDown')));
+  check('a dead key does not type', !typesCharacter(press('Dead')));
+  check('Ctrl plus a letter is a shortcut, not typing', !typesCharacter(ctrl('c')));
+  check('Alt plus a letter is not typing', !typesCharacter(press('x', { altKey: true })));
+  check('Cmd plus a letter is not typing', !typesCharacter(press('v', { metaKey: true })));
+  check('AltGr, reported as Ctrl and Alt, types', typesCharacter(press('@', { ctrlKey: true, altKey: true, altGraph: true })));
+}
+
+// --- The message box's own keys: formatting and the Up arrow ---
+{
+  const press = (key, extra = {}) => ({ key, ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, ...extra });
+  check('Ctrl+B, Ctrl+I and Ctrl+U are bold, italic and underline', formatForKey(press('b')) === 'bold' && formatForKey(press('i')) === 'italic' && formatForKey(press('u')) === 'underline');
+  check('Cmd works where Ctrl does', formatForKey(press('B', { ctrlKey: false, metaKey: true })) === 'bold');
+  check('Shift or Alt makes it some other shortcut', formatForKey(press('u', { shiftKey: true })) === null && formatForKey(press('b', { altKey: true })) === null);
+  check('a plain letter is not a format', formatForKey(press('b', { ctrlKey: false })) === null);
+  check('the markers are the ones the parser reads', FORMAT_MARKERS.bold === '**' && FORMAT_MARKERS.italic === '*' && FORMAT_MARKERS.underline === '__');
+
+  const at = (text, start, end = start) => ({ text, start, end });
+  const same = (got, text, start, end) => got.text === text && got.start === start && got.end === end;
+
+  check('wrapping a word keeps it selected', same(toggleFormat(at('say hello now', 4, 9), 'bold'), 'say **hello** now', 6, 11));
+  check('nothing selected puts the pair in with the caret between', same(toggleFormat(at('ab', 1), 'italic'), 'a**b', 2, 2));
+  check('an empty box gets the pair', same(toggleFormat(at('', 0), 'underline'), '____', 2, 2));
+  check('a second press takes the markers off the selected words', same(toggleFormat(at('say **hello** now', 6, 11), 'bold'), 'say hello now', 4, 9));
+  check('selecting the markers too takes them off as well', same(toggleFormat(at('say **hello** now', 4, 13), 'bold'), 'say hello now', 4, 9));
+  check('spaces at the edges stay outside the markers', same(toggleFormat(at('a  word  b', 1, 8), 'bold'), 'a  **word**  b', 5, 9));
+  check('a selection of only spaces acts like the caret at its end', toggleFormat(at('a   b', 1, 4), 'bold').text === 'a   ****b');
+  check('a selection made backwards is taken the right way round', same(toggleFormat(at('hello', 5, 0), 'italic'), '*hello*', 1, 6));
+  check('several lines are wrapped as one', toggleFormat(at('one\ntwo', 0, 7), 'bold').text === '**one\ntwo**');
+  check('italic on bold words makes them both', toggleFormat(at('**bold**', 0, 8), 'italic').text === '***bold***');
+  check('italic comes off bold-and-italic words and leaves the bold', toggleFormat(at('***both***', 0, 10), 'italic').text === '**both**');
+  check('bold comes off bold-and-italic words and leaves the italic', toggleFormat(at('***both***', 0, 10), 'bold').text === '*both*');
+  check('italic is not mistaken for bold markers around the words', toggleFormat(at('**bold**', 2, 6), 'italic').text === '***bold***');
+  check('bold words inside get their markers taken off by bold', same(toggleFormat(at('***both***', 3, 7), 'bold'), '*both*', 1, 5));
+  check('underline wraps in double underscores', toggleFormat(at('x', 0, 1), 'underline').text === '__x__');
+  check('an empty pair selected is taken away', same(toggleFormat(at('a****b', 1, 5), 'bold'), 'ab', 1, 1));
+  check('a press, then a press with the pair selected, leaves nothing behind', (() => {
+    const first = toggleFormat(at('', 0), 'italic');
+    return toggleFormat({ text: first.text, start: 0, end: first.text.length }, 'italic').text === '';
+  })());
+  check('a selection past the end is held to the text', same(toggleFormat(at('hi', 0, 99), 'bold'), '**hi**', 2, 4));
+
+  const message = (id, authorId, poll = null) => ({ id, author: authorId === null ? null : { id: authorId }, poll });
+  const list = [message('m1', 'me'), message('m2', 'you'), message('m3', 'me', { question: 'q' }), message('m4', 'you')];
+  check('the Up arrow edits your newest message', lastEditable(list, 'me')?.id === 'm1');
+  check('a poll is passed over, since it cannot be edited', lastEditable([message('m1', 'me'), message('m2', 'me', {})], 'me')?.id === 'm1');
+  check('nothing of yours means nothing to edit', lastEditable(list, 'them') === null);
+  check('signed out means nothing to edit', lastEditable(list, undefined) === null);
+  check("a deleted account's message is nobody's", lastEditable([message('m1', null)], 'me') === null);
+}
+
+// --- Lazy panels: one fetch, kept once loaded, tried again after a failure ---
+{
+  let calls = 0;
+  const panel = lazy(async () => {
+    calls++;
+    return { default: 'panel' };
+  });
+  check('nothing is fetched before a panel is first wanted', calls === 0 && panel.current === null);
+  const [first, second] = await Promise.all([panel.load(), panel.load()]);
+  check('two openings in quick succession share one fetch', calls === 1 && first === 'panel' && second === 'panel');
+  check('the loaded panel is kept, so the next opening draws it at once', panel.current === 'panel');
+  await panel.load();
+  check('a later opening does not fetch again', calls === 1);
+
+  let attempts = 0;
+  const flaky = lazy(async () => {
+    attempts++;
+    if (attempts === 1) throw new TypeError('Failed to fetch dynamically imported module');
+    return { default: 'flaky' };
+  });
+  const failure = await flaky.load().then(
+    () => null,
+    (cause) => cause,
+  );
+  check('a failed fetch rejects, so the panel can say so', failure instanceof TypeError && flaky.current === null);
+  check('the loader forgets a failure, so the next opening asks again', (await flaky.load()) === 'flaky' && attempts === 2);
+  check('the loading line waits a moment, but not long', SLOW_LOAD_MS > 0 && SLOW_LOAD_MS <= 500);
+}
+
+// --- Member and role events: one reload per burst ---
+{
+  const queue = new MemberReloadQueue();
+  check('an empty queue has nothing to reload', queue.take() === null);
+
+  check('a first change waits the quiet period', queue.member('u1', 0) === MEMBER_RELOAD_QUIET_MS);
+  check('another change starts the wait over', queue.member('u2', 100) === MEMBER_RELOAD_QUIET_MS);
+  queue.member('u1', 150);
+  const people = queue.take();
+  check(
+    'a burst about members reloads once, for the union of them',
+    people !== null && people.channels === false && people.authors?.size === 2 && people.authors.has('u1') && people.authors.has('u2'),
+  );
+  check('taking the batch empties the queue', queue.take() === null);
+
+  queue.member('u3', 1000);
+  queue.role(1100);
+  queue.member('u4', 1200);
+  const roles = queue.take();
+  check('a role change rechecks everyone on screen', roles !== null && roles.authors === null);
+  check('a role change reloads the channel list too', roles?.channels === true);
+
+  // A steady stream still reloads within the limit, rather than waiting for it to stop.
+  check('the first change of a long run waits the quiet period', queue.member('u5', 5000) === MEMBER_RELOAD_QUIET_MS);
+  check(
+    'near the limit the wait is cut short',
+    queue.member('u5', 5000 + MEMBER_RELOAD_MAX_WAIT_MS - 100) === 100,
+  );
+  check('past the limit the reload is due at once', queue.member('u6', 5000 + MEMBER_RELOAD_MAX_WAIT_MS + 50) === 0);
+  queue.take();
+  check('a new batch gets the full quiet period again', queue.role(9000) === MEMBER_RELOAD_QUIET_MS);
+  queue.clear();
+  check('clearing drops what had gathered', queue.take() === null);
+  check('the quiet period is a short pause', MEMBER_RELOAD_QUIET_MS >= 250 && MEMBER_RELOAD_QUIET_MS <= 500);
+}
+
+// --- Overlapping reloads: an older answer never undoes a newer one ---
+{
+  const order = new ResponseOrder();
+  const first = order.begin();
+  const second = order.begin();
+  check('an older answer landing first is applied', order.accept(first));
+  check('a newer answer after it is applied too', order.accept(second));
+
+  const slow = order.begin();
+  const fast = order.begin();
+  check('a newer answer landing first is applied', order.accept(fast));
+  check('a slower, older answer is then turned away', !order.accept(slow));
+
+  const pending = order.begin();
+  order.cancel();
+  check('an answer still out when the store was emptied is turned away', !order.accept(pending));
+  check('a request sent afterwards is applied', order.accept(order.begin()));
+}
+
+// --- Channel history: back closes what is open over the chat first ---
+{
+  const marker = { channelId: 'c1', index: 3, depth: 2 };
+  check('a marker round-trips through history state', JSON.stringify(readEntry(writeEntry(null, marker))) === JSON.stringify(marker));
+  check(
+    'an entry written before markers existed reads as a channel entry',
+    readEntry({ harmonyChannel: { channelId: 'c1', index: 2 } })?.depth === 0,
+  );
+  check('a negative depth is refused', readEntry({ harmonyChannel: { channelId: 'c1', index: 2, depth: -1 } }) === null);
+  check('a fractional depth is refused', readEntry({ harmonyChannel: { channelId: 'c1', index: 2, depth: 0.5 } }) === null);
+
+  const onChannel = { channelId: 'c1', index: 4, depth: 0 };
+  const onMarker = { channelId: 'c1', index: 5, depth: 1 };
+  check(
+    'something that opened by itself gets no marker, so Chrome cannot skip the channel under it',
+    planOverlay(onChannel, 'c1', 1, false) === null,
+  );
+  check('something opened with a click or a key does', planOverlay(onChannel, 'c1', 1, true) !== null);
+  const pushed = planOverlay(onChannel, 'c1', 1);
+  check(
+    'opening something pushes a marker for the open channel after the current entry',
+    pushed?.channelId === 'c1' && pushed.index === 5 && pushed.depth === 1,
+  );
+  check('nothing open pushes nothing', planOverlay(onChannel, 'c1', 0) === null);
+  check('a marker that already covers what is open is reused', planOverlay(onMarker, 'c1', 1) === null);
+  check('one more layer over a marker pushes another', planOverlay(onMarker, 'c1', 2)?.depth === 2);
+  check('a marker for another channel is not reused', planOverlay(onMarker, 'c2', 1)?.channelId === 'c2');
+  check('no entry of ours yet pushes nothing', planOverlay(null, 'c1', 1) === null);
+  check('no open channel pushes nothing', planOverlay(onChannel, null, 1) === null);
+  check(
+    'a replaced marker stays a marker',
+    planVisit({ channelId: 'gone', index: 5, depth: 1 }, 'c2', false, 0)?.entry.depth === 1,
+  );
+
+  check('a marker whose layers were closed is stepped off', stepsOffMarker(onMarker, 'c1', 0));
+  check('a marker with its layer still open is kept', !stepsOffMarker(onMarker, 'c1', 1));
+  check("a channel's own entry is never stepped off", !stepsOffMarker(onChannel, 'c1', 0));
+  check('a marker naming another channel is left alone', !stepsOffMarker(onMarker, 'c2', 0));
+
+  check('back with something open closes it', popAction(onChannel, 'c1', true, -1, 1) === 'close');
+  check('even onto an entry for another channel', popAction({ channelId: 'c2', index: 3, depth: 0 }, 'c1', true, -1, 1) === 'close');
+  check('back onto a marker closes only what is above it', popAction(onMarker, 'c1', true, -1, 2) === 'close');
+  check('back with only what the marker stands for open passes it by', popAction(onMarker, 'c1', true, -1, 1) === 'skip');
+  check('forward never closes', popAction({ channelId: 'c2', index: 6, depth: 0 }, 'c1', true, 1, 1) === 'open');
+  check(
+    'a marker is passed over even when it names another channel',
+    popAction({ channelId: 'c2', index: 5, depth: 1 }, 'c1', true, -1, 0) === 'skip',
+  );
+  check('a step from a marker over the open channel may leave the app', mayCarryOn(-1, 0, onMarker, 'c1'));
+  check('but not from a marker over a channel since left', !mayCarryOn(-1, 0, onMarker, 'c2'));
+  check("nor from a channel's own entry", !mayCarryOn(-1, 0, onChannel, 'c1'));
+
+  check(
+    'a close that landed on another channel returns to the entry it came from',
+    returnAfterClose({ channelId: 'c0', index: 1, depth: 0 }, onChannel, 'c1') === onChannel.index - 1,
+  );
+  check('a close on the open channel stays', returnAfterClose(onChannel, onMarker, 'c1') === null);
+  check(
+    'a close with no entry to return to stays',
+    returnAfterClose({ channelId: 'c0', index: 1, depth: 0 }, null, 'c1') === null,
+  );
+
+  // Something that opened by itself has no marker; back closes it and returns
+  // to the open channel's entry without a push, and the next back goes on.
+  const notes = historySession(['a', 'b']);
+  notes.open('a');
+  notes.open('b');
+  const notesLength = notes.length;
+  notes.appear();
+  check('something that opens by itself pushes no marker', notes.length === notesLength);
+  notes.go(-1);
+  check('back closes it and stays in the channel', notes.active === 'b' && notes.depth === 0);
+  check('and writes no entry without a click', notes.unclicked === 0 && notes.length === notesLength);
+  notes.go(-1);
+  check('the next back goes to the channel before', notes.active === 'a');
+  notes.go(1);
+  check('and forward comes back to it', notes.active === 'b');
+
+  const panel = historySession(['a', 'b']);
+  panel.open('a');
+  panel.open('b');
+  panel.show();
+  panel.go(-1);
+  check('back with a panel open closes it and stays in the channel', panel.active === 'b' && panel.depth === 0);
+  panel.go(-1);
+  check('and the next back changes channel', panel.active === 'a');
+
+  const dismissed = historySession(['a', 'b']);
+  dismissed.open('a');
+  dismissed.open('b');
+  dismissed.show();
+  dismissed.dismiss();
+  dismissed.go(-1);
+  check('one back after closing a panel through its own controls goes to the channel before', dismissed.active === 'a');
+
+  const often = historySession(['a', 'b']);
+  often.open('a');
+  often.open('b');
+  for (let round = 0; round < 5; round++) {
+    often.show();
+    often.dismiss();
+  }
+  check('opening and closing over and over leaves one marker at most', often.length === 3);
+  often.go(-1);
+  check('so back still goes to the channel before in one press', often.active === 'a');
+
+  const jumped = historySession(['a', 'b']);
+  jumped.open('a');
+  jumped.show();
+  jumped.jump('b');
+  jumped.go(-1);
+  check('back from a channel opened inside a panel returns to the one it was opened from', jumped.active === 'a');
+  jumped.go(-1);
+  check('and back from there leaves the app, as from any first channel', jumped.left);
+
+  const drawer = historySession(['a', 'b']);
+  drawer.open('a');
+  drawer.show();
+  drawer.jump('b');
+  drawer.show();
+  drawer.go(-1);
+  check('on a phone, back closes the drawer first', drawer.active === 'b' && drawer.depth === 0);
+  drawer.go(-1);
+  check('then returns to the channel the drawer was used to leave', drawer.active === 'a');
+  drawer.go(-1);
+  check('then leaves the app', drawer.left);
+
+  const stacked = historySession(['a', 'b']);
+  stacked.open('a');
+  stacked.open('b');
+  stacked.show();
+  stacked.show();
+  stacked.go(-1);
+  check('back from a picture opened in the gallery closes only the picture', stacked.depth === 1 && stacked.active === 'b');
+  stacked.go(-1);
+  check('the next back closes the gallery', stacked.depth === 0 && stacked.active === 'b');
+  stacked.go(-1);
+  check('and the one after changes channel', stacked.active === 'a');
+
+  const inner = historySession(['a', 'b']);
+  inner.open('a');
+  inner.open('b');
+  inner.show();
+  inner.show();
+  inner.dismiss();
+  inner.go(-1);
+  check('with the picture closed by hand, one back closes the gallery', inner.depth === 0 && inner.active === 'b');
+
+  const reloaded = historySession(['a', 'b']);
+  reloaded.open('a');
+  reloaded.open('b');
+  reloaded.show();
+  reloaded.reload();
+  check('a reload with a panel open reopens the channel and nothing over it', reloaded.active === 'b' && reloaded.depth === 0);
+  reloaded.go(-1);
+  check('and one back then goes to the channel before', reloaded.active === 'a');
+
+  const firstReload = historySession(['a']);
+  firstReload.open('a');
+  firstReload.show();
+  firstReload.reload();
+  firstReload.go(-1);
+  check('a reload over the first channel still lets one back leave the app', firstReload.left);
+
+  const firstClosed = historySession(['a']);
+  firstClosed.open('a');
+  firstClosed.show();
+  firstClosed.dismiss();
+  firstClosed.go(-1);
+  check('closing a panel over the first channel by hand still lets one back leave the app', firstClosed.left);
+
+  const app = historySession(['a'], { installed: true });
+  app.open('a');
+  app.show();
+  app.go(-1);
+  check('in the installed app, back on the first channel closes the drawer and not the app', !app.closed && app.depth === 0);
+  app.go(-1);
+  check('and the next back closes the app', app.closed);
+
+  const appDismissed = historySession(['a'], { installed: true });
+  appDismissed.open('a');
+  appDismissed.show();
+  appDismissed.dismiss();
+  appDismissed.go(-1);
+  check('with the drawer closed by hand, one back closes the installed app', appDismissed.closed);
+
+  const appReloaded = historySession(['a'], { installed: true });
+  appReloaded.open('a');
+  appReloaded.show();
+  appReloaded.reload();
+  appReloaded.go(-1);
+  check('and so does one back after a reload with the drawer open', appReloaded.closed);
+
+  const forward = historySession(['a', 'b']);
+  forward.open('a');
+  forward.open('b');
+  forward.show();
+  forward.go(-1);
+  forward.go(1);
+  check('forward never reopens what back closed', forward.depth === 0 && forward.active === 'b');
+  forward.go(-1);
+  check('and back from there is the channel before', forward.active === 'a');
+
+  const rested = historySession(['a']);
+  rested.open('a');
+  rested.show();
+  rested.dismiss();
+  rested.go(1);
+  rested.go(-1);
+  check('back from a marker forward came to rest on still leaves from the first channel', rested.left);
+
+  const ahead = historySession(['a', 'b']);
+  ahead.open('a');
+  ahead.open('b');
+  ahead.go(-1);
+  ahead.show();
+  ahead.go(-1);
+  ahead.go(1);
+  check('opening something after going back drops the channels ahead, as opening a channel does', ahead.active === 'a');
+
+  // Chrome's back button passes over an entry whose next entry was pushed
+  // without a click, which a marker for the setup wizard opening on load is.
+  const skipped = historySession(['a', 'b']);
+  skipped.open('a');
+  skipped.open('b');
+  skipped.show();
+  skipped.go(-2);
+  check('a back that skipped past the open channel only closes', skipped.active === 'b' && skipped.depth === 0);
+  check('and returns to the open channel without a push', skipped.length === 3 && skipped.unclicked === 0);
+  skipped.go(-1);
+  check('from where the next back goes to the channel before', skipped.active === 'a');
+  skipped.go(-1);
+  check('so the next back is still the channel before', skipped.active === 'a');
+
+  const goneUnder = historySession(['x', 'b']);
+  goneUnder.open('x');
+  goneUnder.show();
+  goneUnder.jump('b');
+  goneUnder.remove('x');
+  goneUnder.go(-1);
+  check('back past a marker onto a gone first channel stays in the app', goneUnder.active === 'b' && !goneUnder.left);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);

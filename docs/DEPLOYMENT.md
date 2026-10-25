@@ -437,6 +437,9 @@ sudo systemctl restart harmony
 There are no build steps for the server itself; Node runs the TypeScript
 directly.
 
+The next time each member opens Harmony after an update, they are shown a short
+"What's new" note for the release, once, whichever device they open it on.
+
 ### The update button
 
 The owner sees an **Update** tab in the admin panel. On its own it holds a manual

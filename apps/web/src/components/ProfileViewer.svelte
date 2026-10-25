@@ -59,6 +59,9 @@
   onMount(() => {
     const onKeydown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
+      // Marked as used, so the app-wide Escape does not close the viewer as well
+      // when this one only backed out of the link question.
+      event.preventDefault();
       if (pendingUrl) pendingUrl = null;
       else ui.closeProfileViewer();
     };

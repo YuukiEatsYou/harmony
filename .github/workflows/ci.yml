@@ -1,0 +1,54 @@
+# The checks AGENTS.md asks for before any change is called done, run on every
+# push and pull request so a red one is seen the day it turns red. There is no
+# test framework: the smoke scripts are plain node programs that exit non-zero
+# on a failed check. None of them needs the network; the server smoke test boots
+# its own throwaway server on loopback.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an older run's result moot.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client:
+    name: Typecheck, build and client logic
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The server runs its TypeScript through Node's type stripping and uses
+          # the built-in node:sqlite, which is why the project asks for 24.
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # Also what catches CSS the minifier would drop.
+      - run: npm run build:web
+      - run: npm run smoke:text
+
+  server:
+    name: Server, bridge, auth and voice smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run smoke
+      - run: npm run smoke:bridge
+      - run: npm run smoke:auth
+      # Three in-process WebRTC peers over loopback UDP; no media devices needed.
+      - run: npm run smoke:sfu

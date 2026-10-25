@@ -372,7 +372,7 @@ Rules (`docs/AGENTS.md` "CSS and motion gotchas" — authoritative):
 
 ## 4. Component inventory
 
-47 Svelte components under `apps/web/src/components`, plus 19 admin sections
+51 Svelte components under `apps/web/src/components`, plus 19 admin sections
 under `apps/web/src/components/admin`. Grouped by the role they play and the
 pattern they express. File paths are relative to `apps/web/src/components`.
 
@@ -387,7 +387,10 @@ pattern they express. File paths are relative to `apps/web/src/components`.
 | `Icon.svelte` + `lib/icons.ts` | The shared monochrome line-icon primitive; decorative (`aria-hidden`), colored by `currentColor`. |
 | `UnreadBadge.svelte` | Count pill on a nav button. |
 | `QuickSwitcher.svelte` | Command-palette jump (`role="dialog"`, listbox of results). |
-| `KeyboardShortcuts.svelte` / `ShortcutHelp.svelte` | Keyboard reference; `ShortcutHelp` is presentational. |
+| `KeyboardShortcuts.svelte` / `ShortcutHelp.svelte` | The app-wide keyboard layer (decisions in `lib/global-shortcuts.ts`) and its reference; `ShortcutHelp` is presentational. |
+| `ChannelHistory.svelte` | Back and forward between channels through browser history; draws nothing. |
+| `ChangelogDialog.svelte` | "What's new" after an update (`role="dialog"`, focus trapped, Escape, backdrop or "Got it" closes). Shown once per member, opened again from About. |
+| `LazyPanel.svelte` + `lib/lazy-panels.ts` | Mounts a panel fetched on first use (admin, setup, account, profile viewer, events, scheduled, gallery): nothing for 200 ms, then a "Loading …" pill; a failed download is a small dialog with Reload. |
 | `admin/AdminPanel.svelte` | Overlay shell: `.admin-overlay`, left `.admin-tabs` nav, section body. |
 
 ### 4.2 The conversation stream
@@ -395,7 +398,7 @@ pattern they express. File paths are relative to `apps/web/src/components`.
 | Component | Pattern it expresses |
 | --- | --- |
 | `Chat.svelte` | Channel header + message view + composer; empty-channel state (`.chat.empty`). |
-| `MessageView.svelte` | The scroll stream: grouping, "new messages" bar, loading older/initial, "No messages yet." |
+| `MessageView.svelte` | The scroll stream: grouping, date lines between days, "new messages" bar, loading older/initial, "No messages yet." |
 | `MessageContent.svelte` | Markdown/mention/emoji rendering inside `.content`. |
 | `CodeBlock.svelte` | Fenced code with copy; `--syntax-*` colors. |
 | `EmbedVideo.svelte` / `LinkedGif.svelte` | Rich link/media embeds with fallback ordering. |
@@ -419,7 +422,7 @@ pattern they express. File paths are relative to `apps/web/src/components`.
 
 | Component | Pattern it expresses |
 | --- | --- |
-| `MemberList.svelte` | Roster: role groups (`.roster-group`), member rows with presence dot. Empty state ("No members yet."). |
+| `MemberList.svelte` | Roster: role groups (`.roster-group`), member rows with presence dot. Empty state ("No members yet."). A drawer on a narrow screen; on a wide one `.put-away` hides it (members button, Ctrl+U). |
 | `ProfileCard.svelte` | Hover/click mini card (banner, member color). |
 | `ProfilePanel.svelte` / `ProfileViewer.svelte` | Full profile overlay (`.profile-viewer`, `--profile-accent`). |
 | `MemberBadge.svelte` / `BotBadge.svelte` | Inline crown/sword/shield and bot glyphs. |
@@ -552,6 +555,8 @@ under a "Discord" heading and a stand-in has no other profile fields.
 | --- | --- | --- |
 | Loading | `<p class="muted">Loading…</p>` in the panel body | No skeleton, no spinner. **Gap 2 (§4.9).** |
 | Loading older | "Loading older messages…" above the stream | Same. |
+| Panel still downloading | `LazyPanel`: nothing for the first 200 ms, then a centered pill with a spinner and "Loading …" (`role="status"`). | Opaque, not glass: a turning spinner inside a backdrop filter makes Firefox repaint the blur every frame. |
+| Panel failed to download | `LazyPanel`: a modal card with a `.status.err` explanation, Reload (focused) and Close. | The recovery is a reload: the usual cause is an update that replaced the files, and Chromium keeps a failed download failed until the page reloads. |
 | Uploading | Progress on the attachment in `Composer` (`uploadBatches`). | Keep; the one place with real progress UI. |
 | Empty | One `.muted` sentence, plain language, no blame. `.roster-empty`, `.qs-empty`, "No messages yet. Say hello!" | Good pattern; formalize as a primitive. |
 | Error (text) | `.form-error` (error color) under a field; `role="alert"` where announced. | Inline, single-column (§ forms). |
@@ -574,9 +579,21 @@ The shared contract (currently duplicated — see Gap 1):
   above the catcher.
 - `role="dialog"` + `aria-modal="true"`; Escape closes; focus returns to the
   opener (e.g. `EventsPanel`, `Lightbox`).
+- An overlay is either state in `ui` (panels, drawers, the setup wizard) or, for
+  a dialog that keeps its open state to itself, registered with `modalLayers`
+  (`lib/modal-layers.svelte.ts`) while open, as `EditHistory` and
+  `ChangelogDialog` are. That is how back knows to close it before it changes
+  channel; an overlay outside both stays open over a channel change.
+- A layer opened from inside a message row or a sidebar row must leave the row
+  with `use:portal` (`lib/portal.ts`), as `EditHistory` does. Those rows carry a
+  transform and `will-change: transform` for their hover nudge, and either one
+  makes the row the box `position: fixed` is measured against, so the layer
+  would cover that one row instead of the window.
 - z-index ladder: `.screen-share` `50`; `.notice` and `.profile-card` `60`;
   drawers/backdrop `75`–`80`; composer action popovers `90`–`91`; admin overlay
-  `100`; lightbox `200` (above admin, by design).
+  and the loading pill of a panel still downloading `100`; dialogs that can open
+  over a panel (what's new, shortcut help, edit history) `120`; lightbox `200`
+  (above admin, by design).
 
 ### 5.6 Motion states
 

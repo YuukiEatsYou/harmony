@@ -76,9 +76,16 @@ retention, the bridge) live in the database and are edited in the admin panel.
 | Command | What it does |
 | --- | --- |
 | `npm run typecheck` | Type-check every workspace (`tsc` for the server and shared package, `svelte-check` for the web client) |
-| `npm run smoke` | Boot a throwaway server and exercise the API end to end |
+| `npm run smoke` | Boot a throwaway server and exercise the API end to end. It listens on port 8791; set `HARMONY_SMOKE_PORT` to run two at once |
 | `npm run smoke:bridge` | Exercise the Discord bridge against a fake transport |
-| `npm run smoke:text` | Check the client's pure logic: the markdown and link parser, catching up after being away, and what the emoji picker offers |
+| `npm run smoke:auth` | Login throttling: the per-account and per-address budgets |
+| `npm run smoke:sfu` | The voice SFU relays RTP between in-process WebRTC peers over loopback |
+| `npm run smoke:text` | Check the client's pure logic: the markdown and link parser, catching up after being away, what the emoji picker offers, and every other pure module under `apps/web/src/lib` |
+
+GitHub Actions runs all of these on every push and pull request
+(`.github/workflows/ci.yml`): one job typechecks, builds the client and runs the
+text smoke test, and another runs the server, bridge, auth and voice smoke
+tests, both on Node 24. None of them needs the network.
 
 ### Production
 
@@ -115,6 +122,45 @@ channel's history, so a member who loses the role a channel needs loses its medi
 too. A pending upload no message carries yet is served only to its uploader or an
 administrator, and a deleted message's media answers `404` like a missing id, so
 the route is not an existence oracle (see `docs/API.md`).
+
+## What a visit downloads
+
+The built client is an entry chunk plus pieces fetched the first time they are
+needed, so a visit downloads what most visits use and nothing more. The unicode
+emoji set and the code highlighter have always worked this way (see
+[Emoji](#emoji)); the panels most visits never open do too: the admin panel, the
+setup wizard, a member's own account settings, the full profile viewer, events,
+scheduled messages and the media gallery. `lib/lazy-panels.ts` lists them, and
+`LazyPanel.svelte` draws one where it used to be mounted:
+
+- The first opening fetches the panel's chunk. Nothing is drawn meanwhile, so on
+  an ordinary connection the panel simply opens with its usual entrance; a fetch
+  still running after 200 ms shows a small "Loading …" line, so a slow
+  connection does not look like a click that did nothing.
+- A fetched panel is kept for the rest of the session, so later openings are
+  immediate.
+- A fetch that fails says so in a small dialog with a Reload button. The usual
+  cause is an update: the open page names the hashed files of the build it came
+  from, an update replaces them, and the server answers `404` for the old names.
+  Reloading fetches the new `index.html` and with it the new names. A reload is
+  also the way back after a dropped connection: the loader forgets a failure and
+  asks again on the next opening, but Chromium keeps a module that failed to
+  load as failed for the life of the page, so without a reload the same panel
+  fails again at once, with no new request.
+
+Search, the mentions inbox, pins and saved messages stay in the entry chunk:
+they are opened often enough that waiting on first use would cost more than it
+saves. A split panel must not be imported statically anywhere else, or the
+bundler quietly folds it back into the entry chunk.
+
+Rolldown puts the modules the entry shares with the split panels (the Svelte
+runtime, the shared package and the main stores) into a few chunks of their
+own, which `index.html` preloads beside the entry, so they arrive in parallel.
+All told a visit fetches about 430 kB of script (135 kB compressed) where it
+fetched 580 kB (176 kB) in one chunk before; the admin panel alone was 108 kB of
+that. Much of what is left is the Svelte runtime and zod. The client never calls
+zod, but the shared package builds its schemas when it loads, so the bundler
+cannot drop them.
 
 ## Theming
 
@@ -187,6 +233,37 @@ color carries a soft glow in that same color (`name-glow`, a static text-shadow
 riding on `currentColor`); a color the member picked does not. Both a palette edit
 and a removal announce the affected members with `MEMBER_UPDATE`, since the color
 only changes for them in the DTO they are refetched with.
+
+## Member and role changes
+
+`MEMBER_UPDATE` carries only a member's id and the `ROLE_*` events little more
+than the role, so a client brings itself in step by refetching what they touch:
+the member directory (names, pictures and colors, which also re-dress the
+messages on screen without reloading history), the roster with the role list
+(the member list's groups and presence) and, after a role change, the channel
+list, since a role can lock or unlock channels.
+
+Every connected client hears every one of these events, and they come in runs:
+an administrator handing out several roles, a palette edit announcing each
+member who picked the color, the bridge bringing linked members' pictures in
+step. Refetching per event made each run cost every client one round of those
+lists per event. The web client now gathers them (`lib/member-reload.ts`): it
+reloads once the events have paused for 300 ms, or after two seconds of a
+steady stream, and then re-dresses the messages of every member named in the
+meantime, or of everyone when a role changed. With three clients connected,
+four role assignments in a row used to make each client fetch the directory,
+the roster and the role list four times, and three role edits made each fetch
+those and the channel list three times; each now fetches them once.
+
+An event about the signed-in member still refreshes their own session and
+channel list at once, since a timeout or a role that unlocks channels should
+not wait on anyone else's changes.
+
+Reloads can still overlap, for instance a reconnect's resync beside a batched
+reload, and the server may answer them in any order. The directory and roster
+stores number their requests and drop an answer older than one they have
+already applied (`lib/response-order.ts`), so a slow, stale answer cannot put
+an old name back on a message.
 
 ## Voice
 
@@ -691,6 +768,201 @@ A Discord sticker link pasted into a message — the `media.discordapp.net/stick
 form the client's copy-link gives — is learned the same way and draws as the
 sticker, so it does not sit there as a URL.
 
+## Keyboard shortcuts
+
+The app-wide keys live in one place, `components/KeyboardShortcuts.svelte`, which listens on the
+window; which shortcut a key press is, given what the page looked like when it went down, is decided
+by the pure `lib/global-shortcuts.ts`, covered by `npm run smoke:text`. Keys that belong to one
+surface stay with it: the message box handles its own (sending, formatting, its pickers), the quick
+switcher its arrows, a menu its Escape. `ShortcutHelp.svelte`, opened with Ctrl+/, lists them all.
+"Ctrl" means Cmd on an Apple keyboard, and a press of either is taken the same way.
+
+| Keys | What they do | Works in a text box |
+| --- | --- | --- |
+| Ctrl+K | Quick switcher | Yes |
+| Ctrl+F | Search messages | Yes |
+| Ctrl+P | Pinned messages of the open channel | Yes |
+| Ctrl+I | Mentions and replies | No (italic there) |
+| Ctrl+U | Show or hide the member list | No (underline there) |
+| Ctrl+/ | The shortcut list | No |
+| Alt+Up / Alt+Down, with Shift for unread only | Previous or next channel | No |
+| Escape, over a panel or a phone's drawer | Close it | Yes |
+| Escape | Mark the open channel read and drop its "new" line | Only the message box, see below |
+| Shift+Escape | Mark every channel read | Only the message box, see below |
+| Ctrl+Shift+M / Ctrl+Shift+D | Mute / deafen, while connected to voice | Yes |
+| Any character | Start writing in the message box | No (it is typing already) |
+
+- **When the layer stays out of the way.** A key something else already used (`defaultPrevented`)
+  or one that finishes an IME composition is never taken. While a panel covers the chat (anything in
+  `.admin-overlay`, the lightbox, or a dialog registered in `lib/modal-layers.svelte.ts` such as a
+  message's edit history) every shortcut but mute, deafen and Escape stays quiet, since acting would
+  happen out of sight. While the quick switcher or the shortcut list is open only they answer.
+  In a text box only the keys that mean nothing to it are taken.
+- **Escape** marks read only when nothing is open that Escape would close: a menu, a picker, a
+  popover, a dialog, a drawer or a profile card. In the message box it waits until the composer has
+  nothing to back out of: the composer handles Escape first and calls `preventDefault` when it
+  cancels a reply or closes its suggestions. Several of those menus and cards listen for Escape on
+  the window too, in whatever order they happened to mount, so the layer reads what is open in the
+  capture phase, before any handler has had the key. Read after one of them, the menu would already
+  have closed itself and the same press would mark the channel read as well. With nothing new in the
+  open channel Escape is left alone, so it does not send a read for nothing.
+- **Escape over a panel or a phone's drawer closes it.** Most panels have no Escape of their own, so
+  without this nothing closed them from the keyboard. Whatever sits over a panel and closes on Escape
+  itself (the lightbox, a menu, the profile card, a dialog such as "What's new") marks the key as
+  used, and the layer acts on this one only after every handler has had the key, on the next turn of
+  the event loop, because it listens on the window early and would otherwise go first. So one press
+  closes only the top thing. A registered dialog that did not get the key, because focus was
+  outside it, is closed before any panel beneath it. The setup wizard is left to its own buttons.
+- **Typing a character** while focus is on nothing editable and nothing is open over the chat moves
+  focus into the message box during the keydown, and the key's own default then types the character
+  there. Space is left out, so a focused list still scrolls with it. AltGr counts as typing, since
+  Windows reports it as Ctrl+Alt and many layouts need it for @ or €. A disabled message box (a
+  timed-out member's) is left alone.
+- **Conflicts with the browser.** Ctrl+F, Ctrl+P and Ctrl+U are the browser's find, print and view
+  source, and are prevented when the layer acts on them. Ctrl+F opens search only while no panel is
+  open: inside any panel, search included, it falls through, so the browser's own find is always one
+  more press away, for text the app's search cannot reach such as the admin panel or a long result
+  list. Ctrl+P with no channel open is left to print. Ctrl+Shift+M and Ctrl+Shift+D (Chrome's profile
+  menu and bookmark-all-tabs) are taken only while connected to voice. Keys the browser keeps for
+  itself (Ctrl+T, Ctrl+W, Ctrl+N, Ctrl+Tab) cannot be taken from it by a page, which is why none of
+  them are used.
+- **The member list** is a drawer on a narrow screen and always beside the chat on a wide one, and
+  the members button in the channel header and Ctrl+U both go through `ui.toggleMembers`, which
+  does whichever applies at the current width: open or close the drawer, or put the wide list away.
+  That last choice is remembered per browser in localStorage (`harmony.membersHidden`) and ignored
+  by the drawer. The width is the 768px of the mobile block in `app.css`, mirrored by a
+  `MediaQuery` in `lib/ui.svelte.ts`; the two must agree.
+- **Mute and deafen** work from anywhere while connected, panels and text boxes included, since they
+  are about the call rather than what is on screen. They follow the voice bar's rules: deafening
+  leaves the mute setting alone (a deafened member is muted without it changing), so undeafening
+  brings back whatever it was.
+
+### The message box, the edit box and the messages
+
+The message box (`Composer.svelte`) and a message's edit box (`MessageView.svelte`) take their own
+keys first and prevent them, which is also what keeps Ctrl+I and Ctrl+U, the inbox and the member
+list everywhere else, from reaching the app-wide layer while someone types.
+
+| Keys | Where | What they do |
+| --- | --- | --- |
+| Enter / Shift+Enter | Both | Send or save / a new line |
+| Ctrl+B / Ctrl+I / Ctrl+U | Both | Wrap the selection in `**`, `*` or `__`, or take them off again |
+| Escape | Edit box | Cancel the edit and go back to the message box |
+| Escape | Message box | Back out of a suggestion list, a picker, the timestamp list or a reply, one at a time |
+| Up | Empty message box | Edit your newest message in the channel (not a poll) |
+| Ctrl+E / Ctrl+G | Message box | Open or close the emoji / gif picker |
+| Ctrl+Shift+U | Message box | Choose a file to attach |
+
+- **Formatting** is the pure `lib/composer-format.ts`, covered by `npm run smoke:text`. With nothing
+  selected the pair goes in with the caret between; a selection that already has the format, whether
+  the markers were selected too or sit just outside it, has it taken off; spaces at the edges of a
+  selection stay outside the markers, since markdown does not read `** bold**` as bold. Asterisks
+  stack as the parser reads them (one italic, two bold, three both), so italic on bold words makes
+  them both and comes off again without taking the bold.
+- **The edit state** lives in `lib/message-edit.svelte.ts` rather than in the message view, because
+  the message box starts edits too. Only one message is edited at a time, a channel change closes the
+  edit box, and the box opens focused with the caret at the end and scrolled into view. Saving or
+  cancelling hands the caret back to the message box.
+- **Messages.** Clicking a reply's quote jumps to the message it answers through
+  `chat.revealMessage`, however far back it is (see "Jumping to a message"); a quote whose message
+  was deleted is plain text. Alt+click on a message, or its "Mark unread" action, marks the channel
+  unread from it (see "Unread channels"); the actions are there for a phone, which has no Alt.
+  "Copy link" copies the same link a notification tap opens, `?channel=…&message=…` on the
+  instance's address. Shift+click on Delete deletes without the confirming step, as on Discord. On a
+  narrow screen the actions toolbar wraps onto a second row rather than running off the screen.
+
+## Going back and forward
+
+Every channel opened, by whatever route (the sidebar, the quick switcher, the channel arrows, a
+`#channel` link, a jump from search, the inbox, pins, saved messages or the gallery), adds a browser
+history entry, so back and forward walk the channels a member has been through. They are real
+entries rather than a list kept on the side because that is what everything already called "back"
+walks: the browser's buttons, Alt+arrow and Cmd+bracket, a trackpad swipe, the Android back gesture
+in the installed app, and the mouse's side buttons. `components/ChannelHistory.svelte` writes and
+follows them; the decisions are the pure `lib/channel-history.ts`, covered by `npm run smoke:text`.
+
+- **The URL does not change.** The channel lives in the entry's state, under its own key so other
+  state is left alone, and the browser keeps that state across a reload, which is how a reload
+  reopens the channel it was on. A launch link (`?channel=…&message=…`) still wins over it, and an
+  entry added after one does not copy the link's parameters.
+- **Only a change of channel is an entry.** A jump to a message in the channel already open adds
+  nothing. The first channel a page opens rewrites the entry it was loaded on, and a channel that
+  took over from one that has gone (deleted, or locked away by a role change) rewrites the gone
+  one's entry, since going back to it could only land on the default again.
+- **A step onto a channel that has gone carries on in the same direction.** Its entry is rewritten
+  to the open channel and skipped, and so is any entry naming the channel already open, so a press
+  never seems to do nothing while there is somewhere else to go. Skipping never goes back past the
+  first of the app's entries (each entry carries its position, and the first is 0), so a press that
+  meant to change channel cannot carry on out of the app to whatever page came before.
+- **Back closes what is open over the chat before it changes channel**, as back does on a phone,
+  where the drawers and panels cover the whole screen. Something opening over the chat pushes a
+  marker entry naming the open channel and how many layers are open (`depth`): the drawers (only
+  while the screen is narrow, the only place they are drawn), the panels and the setup wizard are
+  one layer, the quick switcher and shortcut list another, the
+  dialogs that register themselves in `lib/modal-layers.svelte.ts` (edit history, "What's new") a
+  third, and the lightbox a fourth. `ui.overlayDepth` is the one place that counts them. A step back
+  that lands below what is open closes the layers above the entry it landed on and stops there, so a
+  picture opened from the gallery closes before the gallery does. A step onto a marker with nothing
+  open is skipped like an entry for the open channel, so a channel opened from inside a panel (a
+  search result, a pick in the phone's drawer) goes back to the one it was opened from in one
+  press. Forward never reopens anything.
+- **Closing something through its own control** (a Close button, Escape, the backdrop) leaves its
+  marker behind, so the page steps quietly back off it, with no channel change; the next press then
+  does what it would have done had nothing been opened. That matters most on the first channel of
+  the installed app, where a press with nowhere to go closes the app, and a leftover marker would
+  swallow it. Opening and closing again pushes one marker at a time, never a pile of them, and a
+  quiet step the browser never reports is given up on after a second rather than holding history
+  still. A reload on a marker steps off it the same way, without reopening anything.
+- **Entries belong to the account that wrote them.** Signing out leaves the tab's history as it
+  is, so each entry records its writer, and one written by someone else is treated like an entry
+  for a deleted channel (`ownedBy`): the next account to sign in on the tab opens the default
+  channel rather than the last one the previous account had open, and back steps past the
+  previous account's entries instead of walking through the channels they visited.
+- **Something that opened by itself gets no marker**: the "What's new" notes after an update, or the
+  owner's setup wizard. Chrome lets a page add an entry without a click but marks the entry the page
+  was on as one its back button skips, which would make back skip the channel beneath, or on the
+  first channel leave the app. Without a marker, a step back still closes it: it lands one entry
+  further back, and the page steps quietly forward again onto the entry it came from, since
+  writing the open channel's entry in again from there would be a push without a click too
+  (`returnAfterClose`). The mouse's back button,
+  which the client handles itself, closes it without stepping at all. Only the browser's own back
+  button on the app's very first entry can still leave the app with such a dialog open.
+- **A step that changes channel closes whatever is over the chat**, as a jump from inside a panel
+  does: some panels (pins, the gallery) belong to the channel they were opened from.
+- **The mouse's side buttons** are `MouseEvent.button` 3 and 4. Chrome navigates as the default
+  action of their `mouseup`, and Firefox never shows them to the page and navigates by itself.
+  Engines that hand the page the event and do nothing more (Safari, some desktop app shells) are
+  why the client takes the step itself on that `mouseup`, preventing the default first so Chrome
+  does not take it twice.
+
+## Jumping to a message
+
+A link to a message (a notification tap, a deep link, or one built with `messageLink` in
+`lib/launch-params.ts`, all of them `?channel=…&message=…`) opens wherever in history the message
+sits, with one request:
+`GET /channels/:id/messages?around=<id>` returns the page centred on it, the message with about half
+the page before it and the rest after. Neither side borrows from the other at the ends of a channel,
+which is what lets the client read the counts back (`historyAroundSplit` in `packages/shared`, used
+by both sides): a short older side means there is nothing above to load, and a short newer side means
+the page already reaches the newest message.
+
+`chat.revealMessage` in the client decides what the open channel shows, through the pure
+`lib/history-window.ts` (covered by `npm run smoke:text`). A message already loaded is only scrolled
+to and flashed. Otherwise the page around it is laid against what is known of the present, which is
+the list on screen when it reaches the present, or a newest page fetched alongside when it does not.
+When the two share a message they become one list and the reader is simply in the present, with the
+message somewhere above. When they do not, the page is shown as an older stretch, **detached** from
+the present: live messages are held back rather than put straight after it, which would hide the gap.
+
+A detached stretch reads on towards the present rather than only leaping there. Scrolling near its
+end fetches the page after its newest message (`after`/`afterId`, the forward twin of the `before`
+cursor) and appends it below the reader, who stays where they are: the view does not follow a page
+appended to a stretch, even the one that rejoins the present, and stops thinking it is at the bottom.
+A page shorter than the limit is the newest one, so the stretch is the present again, the held-back
+messages are folded in from a fresh newest page, and the channel counts as read. The "Jump to present"
+bar stays for the reader who would rather leap. Search, inbox, pin, saved and gallery jumps open a
+detached stretch the same way and read on from it the same way.
+
 ## Unread channels
 
 A channel with something new in it is drawn brighter in the sidebar, with a mark down its left edge.
@@ -714,6 +986,24 @@ otherwise mean a request per message. And a tab coming back into view marks the 
 messages that arrived while nobody was looking stayed marked, which is what makes the mark mean
 something. Posting marks a channel read on the server side, since whatever else was waiting there has
 plainly been seen by whoever just wrote in it.
+
+Reading only ever moves the marker forward (`markChannelRead` takes the later of the two times), so a
+read that lands late cannot undo one that came before it. The one exception is **marking unread from a
+message**, Discord's Alt+click: `POST /channels/:id/unread` sets the marker (`setChannelReadMarker`) to
+one millisecond before the message, so that message and everything after it are unread and its
+mentions and replies count again. Nothing else changes, so the member's own messages still never count:
+marked from their own last message, the channel stays read. The answer is worked out by the same
+queries as the channel list (unread, mention count, marker), and `chat.markUnreadFrom` takes it as is.
+
+On the client that would last about a second, since everything that reads the open channel would read
+it straight back. So a channel marked unread while it is open is **held**: every automatic read of the
+open channel (a message arriving in a visible tab, the tab coming back into view, a channel-list
+refresh and the reconnect catch-up that runs one, the leap to the present or reading down to it) goes
+through `#markRead` or `#queueRead`, and both skip the held channel, as does the client's own copy of
+the marker. While held, a new message there counts as unread and a mention adds to its number, just as
+in a channel nobody is looking at. The hold ends when the member leaves the channel (it stays unread
+behind them) or opens it afresh, marks it read themselves (the bar's Mark as read, or the sidebar's),
+or posts in it, which reads it on the server anyway. A jump within the channel keeps it.
 
 ## Mentions and the inbox
 
@@ -1313,6 +1603,46 @@ instance.
 The number is compiled into the web bundle, so an installed app that has not
 reloaded since an update reports the version it was built with. The service worker
 caches nothing, so one reload corrects it.
+
+## Changelog
+
+After an update, a member opening Harmony is shown what changed, once, in a
+**What's new** dialog. About (click the server name) has a **What's new** button
+that opens the same notes again whenever they like.
+
+- **The notes are data in the shared package.** `CHANGELOG` in
+  `packages/shared/src/changelog.ts` is a list of entries, newest first, each a
+  version, a date, a title and a few short items written for members rather than
+  developers. It ships with the client, so there is nothing to fetch. Only the
+  newest entry is ever shown, which is why it has to cover everything
+  user-facing since the entry before it; `AGENTS.md` has the rule for keeping it
+  current. `npm run smoke:text` checks the list is in order, well formed and
+  never ahead of `HARMONY_VERSION`.
+- **What a member has seen is kept by the server, per account**, in
+  `users.changelog_seen`, so "once" holds across their devices and browsers.
+  `GET` and `PUT /api/v1/users/@me/changelog` read and record it (see `docs/API.md`).
+  The marker only moves forward, and a version newer than the running release is
+  refused.
+- **The rule for showing**: the newest entry is shown when the member has seen
+  none, or only an older version. It is recorded as seen the moment it appears,
+  not when it is closed, so a reload or a second tab does not bring it back
+  however the dialog ends. The browser also keeps a copy, under
+  `harmony:changelog-seen:<user id>`, and the newer of the two counts: if the
+  write to the server fails, the copy stops a second showing here, and the next
+  visit sends the server what it missed. If the server cannot be asked at all,
+  nothing is shown; a late note is better than a repeated one.
+- **New accounts start at the newest entry.** Every account a person signs in
+  to, by password or with Discord (including one that adopts a bridge
+  stand-in), is created by `insertUser`, which stamps it, so a newcomer, the
+  owner's very first account included, is not greeted with notes about changes
+  from before they arrived. Accounts that existed before this was added
+  started at null, which is how everyone sees the notes of the release that
+  brought the dialog in once.
+- **It waits its turn.** The dialog is only mounted for a signed-in member, so
+  it never covers the sign-in screen, and it holds off while the owner's setup
+  wizard is open or about to open. The decisions are in the pure
+  `apps/web/src/lib/changelog.ts`, the fetching and storage in
+  `lib/changelog.svelte.ts`, and the dialog is `components/ChangelogDialog.svelte`.
 
 ## The update check
 

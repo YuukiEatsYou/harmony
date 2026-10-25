@@ -92,7 +92,8 @@
   });
 </script>
 
-<aside class="roster" class:open={ui.rosterOpen} aria-label="Members">
+<!-- Put away hides the list on a wide screen only; on a narrow one it is a drawer, and app.css ignores the class there. -->
+<aside id="member-list" class="roster" class:open={ui.rosterOpen} class:put-away={ui.membersHidden} aria-label="Members">
   {#if groups.length === 0}
     <p class="muted roster-empty">No members yet.</p>
   {:else}

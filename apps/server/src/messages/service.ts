@@ -5,6 +5,7 @@ import {
   Permission,
   bypassesSlowmode,
   hasPermission,
+  historyAroundSplit,
   listMentionUsernames,
   type Attachment,
   type Mention,
@@ -40,6 +41,8 @@ import {
   insertMessage,
   lastMessageAt,
   listMessages,
+  listMessagesAfter,
+  listMessagesAround,
   parseMessageEmbed,
   searchMessages,
   softDeleteMessage,
@@ -599,11 +602,22 @@ export function createMessageService(sqlite: DatabaseSync, hub: GatewayHub, audi
     history(channelId, query, viewerId) {
       requireChannel(channelId);
       assertChannelAccess(viewerId, channelId);
-      const rows = listMessages(sqlite, channelId, {
-        limit: query.limit,
-        before: query.before,
-        beforeId: query.beforeId,
-      });
+      if (query.around !== undefined) {
+        // Only a message of this channel is centred on. One that is gone, or
+        // lives in another channel, is the same 404 as one that never existed,
+        // so the answer says nothing about a channel the caller did not ask about.
+        const around = listMessagesAround(sqlite, channelId, query.around, historyAroundSplit(query.limit));
+        if (!around) throw new HttpError(404, 'message_not_found', 'That message does not exist.');
+        return renderPage(around, viewerId);
+      }
+      const rows =
+        query.after !== undefined
+          ? listMessagesAfter(sqlite, channelId, { limit: query.limit, after: query.after, afterId: query.afterId })
+          : listMessages(sqlite, channelId, {
+              limit: query.limit,
+              before: query.before,
+              beforeId: query.beforeId,
+            });
       return renderPage(rows, viewerId);
     },
 

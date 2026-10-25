@@ -33,7 +33,7 @@ get wrong.
 
 **Because it feels like home.** A familiar, Discord-like interface, with the
 colors and icon you choose — and it installs to a phone or desktop home screen
-like a real app.
+like a real app. After an update, everyone gets a short note of what's new, once.
 
 ### What it isn't
 

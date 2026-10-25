@@ -74,7 +74,10 @@
       profileCard.hide();
     };
     const onKeydown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') profileCard.hide();
+      if (event.key !== 'Escape' || profileCard.user === null) return;
+      // Used up, so the panel the card was over stays open for the next press.
+      event.preventDefault();
+      profileCard.hide();
     };
     // Moving on would leave the card pointing at nothing.
     const onMove = (): void => profileCard.hide();

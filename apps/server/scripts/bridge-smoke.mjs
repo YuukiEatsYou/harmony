@@ -293,6 +293,16 @@ const transport = createFakeTransport();
 const pins = createPinService(db.sqlite, hub, audit, messages);
 const serverWarnings = [];
 
+/**
+ * Waits until a message from Discord has been stored, for two seconds at most.
+ * Bringing one in downloads its pictures and runs them through sharp first, which
+ * a fixed pause can outlast on a slow machine such as a CI runner, where the
+ * checks after it then fail on a message that was only late.
+ */
+async function landed(discordMessageId) {
+  const deadline = Date.now() + 2000;
+  while (!findBridgeMessageByDiscordId(db.sqlite, discordMessageId) && Date.now() < deadline) await sleep(10);
+}
 const previews = [];
 const bridge = createBridgeService({
   sqlite: db.sqlite,
@@ -397,7 +407,7 @@ try {
     attachments: [{ url: 'https://cdn.example/pic.png', filename: 'pic.png', contentType: 'image/png', size: png.length }],
     fromBot: false,
   });
-  await sleep(50);
+  await landed('d1');
 
   const history = messages.history(channelId, { limit: 50 }, userId);
   const ingested = history.messages.find((message) => message.content === 'hi harmony');
@@ -490,7 +500,7 @@ try {
     ],
     fromBot: false,
   });
-  await sleep(50);
+  await landed('d1v');
   const videoIngested = messages
     .history(channelId, { limit: 50 }, userId)
     .messages.find((message) => message.attachments.some((attachment) => attachment.filename === 'clip.mp4'));
@@ -915,7 +925,7 @@ try {
     attachments: [],
     fromBot: false,
   });
-  await sleep(100);
+  await landed('d5b');
   const learnedMessage = messages
     .history(channelId, { limit: 50 }, userId)
     .messages.find((m) => m.content.startsWith('party'));
@@ -1008,7 +1018,7 @@ try {
     stickers: [{ id: 'st1', name: 'wave', formatType: 1 }],
     fromBot: false,
   });
-  await sleep(100);
+  await landed('d5d');
   const stickerMessage = messages
     .history(channelId, { limit: 50 }, userId)
     .messages.find((m) => m.stickers.length > 0);
@@ -1030,7 +1040,7 @@ try {
     stickers: [{ id: 'st1', name: 'wave', formatType: 1 }],
     fromBot: false,
   });
-  await sleep(100);
+  await landed('d5e');
   check(
     'a repeated sticker is stored once',
     db.sqlite.prepare('SELECT COUNT(*) AS count FROM stickers').get().count === stickersBefore + 1,
@@ -1048,7 +1058,7 @@ try {
     stickers: [{ id: 'st2', name: 'wumpus', formatType: 3 }],
     fromBot: false,
   });
-  await sleep(100);
+  await landed('d5f');
   check(
     'a sticker that cannot be drawn is kept as its name',
     messages
@@ -1070,7 +1080,7 @@ try {
     attachments: [],
     fromBot: false,
   });
-  await sleep(100);
+  await landed('d5g');
   const linkedSticker = messages
     .history(channelId, { limit: 50 }, userId)
     .messages.find((m) => m.stickers.some((sticker) => sticker.name.startsWith('SmugTao')));
@@ -1385,28 +1395,25 @@ try {
   // it finishes unfurling the link, often while we are still downloading the
   // gif, and each of those used to store a copy of its own.
   settings.update({ embedsEnabled: true });
+  // The resolver downloads through the SSRF-guarded fetch, which never touches
+  // the global one, so the stand-in host is handed to it directly.
+  let gifFetches = 0;
   const embeds = createEmbedService({
     sqlite: db.sqlite,
     settings,
     hub,
     attachments,
     renderMessage: (id) => messages.byId(id),
+    fetch: async () => {
+      gifFetches++;
+      await sleep(150);
+      return new Response(png, { headers: { 'content-type': 'image/png' } });
+    },
   });
   const gifUrl = 'https://93.184.216.34/funny.png';
   const gifMessage = messages.createBridged(channelId, userId, gifUrl, [], null, { silent: true });
-  const realFetch = globalThis.fetch;
-  let gifFetches = 0;
-  globalThis.fetch = async () => {
-    gifFetches++;
-    await sleep(150);
-    return new Response(png, { headers: { 'content-type': 'image/png' } });
-  };
-  try {
-    for (let i = 0; i < 3; i++) embeds.resolve(gifMessage.id, gifUrl);
-    await sleep(800);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+  for (let i = 0; i < 3; i++) embeds.resolve(gifMessage.id, gifUrl);
+  await sleep(800);
   check(
     'a link resolved three times at once is kept once',
     listLinkedAttachments(db.sqlite, gifMessage.id).length === 1,

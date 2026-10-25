@@ -1,5 +1,14 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { AccountType, LinkedUser, PermissionValue, SocialLinks, User, UserBadge, UserProfile } from '@harmony/shared';
+import {
+  latestChangelog,
+  type AccountType,
+  type LinkedUser,
+  type PermissionValue,
+  type SocialLinks,
+  type User,
+  type UserBadge,
+  type UserProfile,
+} from '@harmony/shared';
 import { hasPassword, NO_PASSWORD } from '../auth/passwords.ts';
 import { getHighestRoleColor, getUserBadge } from './roles.ts';
 import { findNameColor } from './name_colors.ts';
@@ -33,6 +42,8 @@ export interface UserRow {
   discord_avatar_checked_at: string | null;
   /** The palette color the member picked for their username, or null for none. */
   name_color_id: string | null;
+  /** The newest release whose "What's new" notes the member has been shown, or null for none. */
+  changelog_seen: string | null;
 }
 
 /** A stored account type, defaulting to a person for anything unrecognized. */
@@ -500,16 +511,36 @@ export function deleteUser(sqlite: DatabaseSync, id: string): void {
   sqlite.prepare('DELETE FROM users WHERE id = ?').run(id);
 }
 
+/**
+ * Creates an account a person signs in to, whether by password or with Discord.
+ *
+ * It starts at the newest changelog entry: someone who has only just arrived has
+ * nothing to catch up on, so their first visit is not greeted with notes about
+ * changes from before they arrived. That is set here rather than by each sign-up
+ * path because every such account is made here, so a new path cannot forget it.
+ */
 export function insertUser(
   sqlite: DatabaseSync,
   input: { id: string; username: string; passwordHash: string; isOwner: boolean },
 ): void {
   sqlite
     .prepare(
-      `INSERT INTO users (id, username, password_hash, is_owner, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO users (id, username, password_hash, is_owner, created_at, changelog_seen)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.id, input.username, input.passwordHash, input.isOwner ? 1 : 0, new Date().toISOString());
+    .run(
+      input.id,
+      input.username,
+      input.passwordHash,
+      input.isOwner ? 1 : 0,
+      new Date().toISOString(),
+      latestChangelog()?.version ?? null,
+    );
+}
+
+/** Records the newest release whose notes a member has been shown. */
+export function setChangelogSeen(sqlite: DatabaseSync, id: string, version: string): void {
+  sqlite.prepare('UPDATE users SET changelog_seen = ? WHERE id = ?').run(version, id);
 }
 
 /** Every bot the owner has set up, oldest first. */

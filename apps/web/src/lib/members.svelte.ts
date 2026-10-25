@@ -1,5 +1,6 @@
 import type { User, UserDirectoryResponse } from '@harmony/shared';
 import { api } from './api';
+import { ResponseOrder } from './response-order';
 
 /**
  * Everyone on this instance. It is deliberately separate from the admin member
@@ -9,6 +10,8 @@ import { api } from './api';
 class MemberDirectory {
   list = $state<User[]>([]);
   #loadedAt = 0;
+  /** Reloads can overlap; this keeps a slow, older answer from undoing a newer one. */
+  #order = new ResponseOrder();
 
   /** Username (lower-cased) -> user, for resolving mention tokens. */
   byUsername = $derived(new Map(this.list.map((user) => [user.username.toLowerCase(), user])));
@@ -17,8 +20,11 @@ class MemberDirectory {
   byId = $derived(new Map(this.list.map((user) => [user.id, user])));
 
   async load(): Promise<void> {
+    const ticket = this.#order.begin();
     try {
-      this.list = (await api<UserDirectoryResponse>('/members/directory')).users;
+      const { users } = await api<UserDirectoryResponse>('/members/directory');
+      if (!this.#order.accept(ticket)) return;
+      this.list = users;
       this.#loadedAt = Date.now();
     } catch {
       // Not signed in or offline; keep whatever we already have.

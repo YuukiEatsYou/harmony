@@ -15,6 +15,21 @@ export function markChannelRead(sqlite: DatabaseSync, userId: string, channelId:
 }
 
 /**
+ * Puts a member's read marker exactly where it is told, back as well as forward,
+ * for marking a channel unread from a message. Reading only ever moves the
+ * marker on, through `markChannelRead`, so a read that arrives late cannot undo
+ * one that came before it; this is the one deliberate exception.
+ */
+export function setChannelReadMarker(sqlite: DatabaseSync, userId: string, channelId: string, readAt: string): void {
+  sqlite
+    .prepare(
+      `INSERT INTO channel_reads (user_id, channel_id, read_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id, channel_id) DO UPDATE SET read_at = excluded.read_at`,
+    )
+    .run(userId, channelId, readAt);
+}
+
+/**
  * Which of these channels hold something this member has not read.
  *
  * A channel nobody has ever opened counts as unread as soon as it has a message,

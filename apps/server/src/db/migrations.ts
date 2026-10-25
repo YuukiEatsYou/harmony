@@ -1145,4 +1145,19 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 43,
+    name: 'changelog_seen',
+    up(db) {
+      /*
+       * The newest release whose "What's new" notes a member has been shown, so
+       * the dialog appears once per member rather than once per browser. It is
+       * a version string such as 2.9.0, compared as numbers in code rather than
+       * as text in SQL. Accounts that already exist start at NULL, which is how
+       * everyone sees the notes of the release that brings this in, once; an
+       * account created from now on starts at the newest entry instead.
+       */
+      db.exec('ALTER TABLE users ADD COLUMN changelog_seen TEXT');
+    },
+  },
 ];

@@ -260,6 +260,68 @@ export function listMessages(
   return (rows as unknown as MessageRow[]).reverse();
 }
 
+/**
+ * Returns up to `limit` messages just after a cursor, in ascending order: the
+ * page that follows the newest message a client holds, for a reader making their
+ * way back towards the present from an older stretch. The cursor is the same
+ * `createdAt` plus id that `listMessages` takes, for the same reason.
+ */
+export function listMessagesAfter(
+  sqlite: DatabaseSync,
+  channelId: string,
+  options: { limit: number; after: string; afterId?: string },
+): MessageRow[] {
+  const { limit, after, afterId } = options;
+
+  const rows = afterId
+    ? sqlite
+        .prepare(
+          `SELECT * FROM messages
+           WHERE channel_id = ? AND deleted_at IS NULL
+             AND (created_at > ? OR (created_at = ? AND rowid > (SELECT rowid FROM messages WHERE id = ?)))
+           ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+        )
+        .all(channelId, after, after, afterId, limit)
+    : sqlite
+        .prepare(
+          `SELECT * FROM messages
+           WHERE channel_id = ? AND deleted_at IS NULL AND created_at > ?
+           ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+        )
+        .all(channelId, after, limit);
+
+  return rows as unknown as MessageRow[];
+}
+
+/**
+ * The stretch of a channel's history centred on one message, in ascending
+ * order: up to `split.before` messages ahead of it, the message itself, and up
+ * to `split.after` behind it, fewer where the channel begins or ends. Null when
+ * the id is not a live message of this channel, whether it never existed, was
+ * deleted or belongs to another channel, so a caller cannot tell those apart.
+ */
+export function listMessagesAround(
+  sqlite: DatabaseSync,
+  channelId: string,
+  messageId: string,
+  split: { before: number; after: number },
+): MessageRow[] | null {
+  const target = findMessage(sqlite, messageId);
+  if (!target || target.channel_id !== channelId || target.deleted_at) return null;
+
+  const before = listMessages(sqlite, channelId, {
+    limit: split.before,
+    before: target.created_at,
+    beforeId: target.id,
+  });
+  const after = listMessagesAfter(sqlite, channelId, {
+    limit: split.after,
+    after: target.created_at,
+    afterId: target.id,
+  });
+  return [...before, target, ...after];
+}
+
 export function updateMessageContent(sqlite: DatabaseSync, id: string, content: string, editedAt: string): void {
   // The old preview no longer matches the new text, so drop it here. The embed
   // service re-resolves the new content and broadcasts again when it finds a link.

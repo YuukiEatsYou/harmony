@@ -6,6 +6,7 @@ import type {
   RoleListResponse,
 } from '@harmony/shared';
 import { api } from './api';
+import { ResponseOrder } from './response-order';
 
 /**
  * Who is on the server, what roles they hold, and whether they are online. This
@@ -15,13 +16,17 @@ import { api } from './api';
 class Roster {
   members = $state<MemberRosterEntry[]>([]);
   roles = $state<Role[]>([]);
+  /** Reloads can overlap; this keeps a slow, older answer from undoing a newer one. */
+  #order = new ResponseOrder();
 
   async load(): Promise<void> {
+    const ticket = this.#order.begin();
     try {
       const [roster, roleList] = await Promise.all([
         api<MemberRosterResponse>('/members/roster'),
         api<RoleListResponse>('/roles'),
       ]);
+      if (!this.#order.accept(ticket)) return;
       this.members = roster.members;
       this.roles = roleList.roles;
     } catch {
@@ -49,6 +54,8 @@ class Roster {
   }
 
   reset(): void {
+    // A load still out would otherwise refill the list after signing out.
+    this.#order.cancel();
     this.members = [];
     this.roles = [];
   }

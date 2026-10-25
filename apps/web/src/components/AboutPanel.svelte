@@ -1,10 +1,13 @@
 <script lang="ts">
-  import { HARMONY_NAME, HARMONY_REPO_URL, HARMONY_VERSION } from '@harmony/shared';
+  import { HARMONY_NAME, HARMONY_REPO_URL, HARMONY_VERSION, latestChangelog } from '@harmony/shared';
+  import { changelog } from '../lib/changelog.svelte';
   import { meta } from '../lib/meta.svelte';
   import { ui } from '../lib/ui.svelte';
 
   /** The address without its scheme, which reads better as a link label. */
   const repoLabel = HARMONY_REPO_URL.replace(/^https?:\/\//, '');
+  /** Whether there are any notes to open again; a build with an empty changelog has none. */
+  const hasNotes = latestChangelog() !== null;
 </script>
 
 <div class="admin-overlay">
@@ -26,6 +29,12 @@
       <p class="about-version muted">Version {HARMONY_VERSION}</p>
 
       <div class="editor-actions">
+        <!-- Opens over this panel, so closing it lands back here. What has been seen is left alone. -->
+        {#if hasNotes}
+          <button type="button" class="ghost" aria-haspopup="dialog" onclick={() => changelog.openLatest()}>
+            What's new
+          </button>
+        {/if}
         <button type="button" onclick={() => ui.closeAbout()}>Close</button>
       </div>
     </div>

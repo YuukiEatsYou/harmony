@@ -8,8 +8,10 @@ import {
   BIO_MAX,
   DEFAULT_MAX_AVATAR_BYTES,
   DEFAULT_MAX_BANNER_BYTES,
+  HARMONY_VERSION,
   SOCIAL_PLATFORM_KEYS,
   STATUS_MAX,
+  isNewerVersion,
   validSocialValue,
   type ImageContentType,
   type SocialLinks,
@@ -22,6 +24,7 @@ import {
   findUserByDiscordId,
   findUserByUsername,
   mergeUsers,
+  setChangelogSeen,
   setDiscordAvatarSync,
   setUserDiscordId,
   updateUserAccount,
@@ -91,6 +94,15 @@ export interface UserService {
   avatarPath(hash: string): string;
   /** Absolute path of a banner blob. */
   bannerPath(hash: string): string;
+  /** The newest release whose "What's new" notes the member has been shown, or null for none. */
+  changelogSeen(userId: string): string | null;
+  /**
+   * Records that a member has been shown a release's notes. The marker only ever
+   * moves forward, so a late write from another tab or an older build can never
+   * bring back notes already read. A release newer than the one running is
+   * refused: nobody can have been shown notes this instance does not have.
+   */
+  markChangelogSeen(userId: string, version: string): void;
 }
 
 export function createUserService(sqlite: DatabaseSync, config: Config): UserService {
@@ -403,6 +415,24 @@ export function createUserService(sqlite: DatabaseSync, config: Config): UserSer
       assertEditable(row);
       updateUserProfile(sqlite, row.id, { bannerHash: null });
       return require(userId);
+    },
+
+    changelogSeen(userId) {
+      return require(userId).changelog_seen;
+    },
+
+    markChangelogSeen(userId, version) {
+      if (isNewerVersion(version, HARMONY_VERSION)) {
+        throw new HttpError(
+          400,
+          'unknown_version',
+          `That version is newer than the ${HARMONY_VERSION} this server runs.`,
+        );
+      }
+      const row = require(userId);
+      if (row.changelog_seen === null || isNewerVersion(version, row.changelog_seen)) {
+        setChangelogSeen(sqlite, row.id, version);
+      }
     },
   };
 }

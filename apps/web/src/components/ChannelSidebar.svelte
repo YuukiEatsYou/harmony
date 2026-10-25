@@ -71,9 +71,15 @@
     session.permissions = '0';
   }
 
-  /** Picking a channel closes the drawer on narrow screens. */
+  /**
+   * Picking a channel closes the drawer on narrow screens. Picking the one
+   * already open, which is the natural way to put the drawer away on a phone,
+   * must not reload it: that would drop the reply being written and the
+   * reader's place. It only comes back to the present from an older stretch.
+   */
   function selectChannel(id: string): void {
-    chat.selectChannel(id);
+    if (id !== chat.activeChannelId) void chat.selectChannel(id);
+    else if (chat.detached) void chat.jumpToPresent();
     ui.closeDrawers();
   }
 

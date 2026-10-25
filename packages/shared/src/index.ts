@@ -21,3 +21,4 @@ export * from './commands.ts';
 export * from './profile.ts';
 export * from './voice-timing.ts';
 export * from './push.ts';
+export * from './changelog.ts';

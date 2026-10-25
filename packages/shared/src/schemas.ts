@@ -186,8 +186,59 @@ const cursorQuerySchema = z.object({
   beforeId: z.string().optional(),
 });
 
-export const messageHistoryQuerySchema = cursorQuerySchema;
+/**
+ * A channel's history takes the same backwards cursor, and two more ways in.
+ * `after`/`afterId` ask for the page just after a message, oldest first, for a
+ * reader making their way back towards the present from an older stretch.
+ * `around` asks for the page centred on one message, laid out as
+ * `historyAroundSplit` says, which is how a link to a message far back in
+ * history is opened in one request. Each names a different page, so only one of
+ * the three may be given.
+ */
+export const messageHistoryQuerySchema = cursorQuerySchema
+  .extend({
+    /** Return items created strictly after this ISO timestamp, oldest first. */
+    after: z.string().optional(),
+    /** Id of the item `after` came from, to break ties within a millisecond. */
+    afterId: z.string().optional(),
+    /** Return the page around this message instead of paging from a cursor. */
+    around: z.string().min(1).optional(),
+  })
+  .refine(
+    (value) =>
+      value.around === undefined ||
+      (value.before === undefined &&
+        value.beforeId === undefined &&
+        value.after === undefined &&
+        value.afterId === undefined),
+    { message: 'around cannot be combined with before, beforeId, after or afterId.', path: ['around'] },
+  )
+  .refine(
+    (value) =>
+      (value.after === undefined && value.afterId === undefined) ||
+      (value.before === undefined && value.beforeId === undefined),
+    { message: 'after cannot be combined with before or beforeId.', path: ['after'] },
+  );
 export type MessageHistoryQuery = z.infer<typeof messageHistoryQuerySchema>;
+
+/**
+ * How a page of `limit` messages around one message is shared out: the message
+ * itself, about half the page before it and the rest after it. Neither side
+ * borrows from the other at the ends of a channel, so a client can tell from the
+ * counts alone whether anything lies beyond the page: a side that came back
+ * short reached the channel's first or newest message. The server lays the page
+ * out with this and the client reads it back with it, so the two cannot drift.
+ */
+export function historyAroundSplit(limit: number): { before: number; after: number } {
+  const before = Math.floor(limit / 2);
+  return { before, after: Math.max(0, limit - before - 1) };
+}
+
+/** Marking a channel unread from one of its messages, as Discord's Alt+click does. */
+export const markUnreadSchema = z.object({
+  messageId: z.string().min(1),
+});
+export type MarkUnreadInput = z.infer<typeof markUnreadSchema>;
 
 /** The audit log pages the same way, newest first. */
 export const auditQuerySchema = cursorQuerySchema;

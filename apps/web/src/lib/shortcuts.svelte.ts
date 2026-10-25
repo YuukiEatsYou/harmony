@@ -67,10 +67,13 @@ export const shortcuts = new ShortcutsState();
 /** Whether this is an Apple keyboard, where the switcher answers to ⌘ rather than Ctrl. */
 export const isApple = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
 
+/** The shortcuts' modifier, named the way this keyboard prints it, for hints in tooltips. */
+export const modKey = isApple ? '⌘' : 'Ctrl';
+
 /**
  * Whether a key press belongs to a field that is being typed in. The arrows,
- * Escape and slash all mean something there already, so the keyboard layer
- * leaves such presses alone.
+ * Escape, slash and the letters all mean something there already, so the
+ * keyboard layer leaves most such presses alone.
  */
 export function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;

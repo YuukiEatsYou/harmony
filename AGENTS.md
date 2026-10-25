@@ -34,7 +34,13 @@ npm run smoke:text     # web client pure logic (markdown/link parser, emoji pick
 ```
 
 There is no linter and no test framework. A smoke script can also be run
-directly, for example `node apps/server/scripts/bridge-smoke.mjs`.
+directly, for example `node apps/server/scripts/bridge-smoke.mjs`. `npm run smoke`
+listens on port 8791; set `HARMONY_SMOKE_PORT` to another port when two runs
+might overlap (two checkouts, or several agents at once).
+
+CI (`.github/workflows/ci.yml`) runs typecheck, the client build and every
+smoke script on each push and pull request. A red run is a broken branch, not
+a flake to rerun: find out why.
 
 ## Verify before you claim something works
 
@@ -76,6 +82,15 @@ not wait to be asked, and do not leave finished work uncommitted.
   `HARMONY_VERSION` in `packages/shared/src/constants.ts` (the client, server and
   bridge all read it). Patch for fixes, minor for features, and leave the major
   number to the owner. Bump it in the same commit as the change it describes.
+- Keep the changelog in step with it. A user-facing change also updates
+  `CHANGELOG` in `packages/shared/src/changelog.ts`, the notes every member is
+  shown once in the "What's new" dialog after an update. A branch adds one entry
+  at the top for the version it ships as, or extends its own top entry if it
+  already added one. Write it in members' words: short plain sentences about
+  what they can now do or what was fixed, with no internals. Only the newest
+  entry is ever shown, so it has to cover everything user-facing since the
+  previous entry. `npm run smoke:text` fails when the list is out of order or
+  its newest entry is for a version newer than `HARMONY_VERSION`.
 - Write commit messages that stand on their own: a short imperative subject,
   then paragraphs explaining what changed and why, including the reasoning a
   future reader would otherwise have to reconstruct. Prefer several paragraphs
@@ -261,6 +276,10 @@ npm workspaces monorepo; every package is ESM TypeScript.
   `:root`. Stylesheets reference those tokens only; the hardcoded values in the
   `:root` block of `app.css` are first-paint fallbacks, not a palette. Status
   colors (success/error/warning) are intentionally not derived from the accent.
+- Big, rarely opened panels are fetched on first use: they are listed in
+  `lib/lazy-panels.ts` and mounted through `LazyPanel.svelte`. Never import one
+  of them statically as well, or the bundler folds it back into the entry chunk
+  without a word; check the chunk list `npm run build:web` prints.
 - In production one process serves the built client, the API and the gateway on
   one origin, so there is no CORS to manage.
 
